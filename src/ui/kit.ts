@@ -102,25 +102,60 @@ export function icon(name: string, size = 15): SVGSVGElement {
 
 /**
  * A detail that would otherwise cost a paragraph: one icon, the words on hover.
- * Focusable, so the text is reachable without a pointer, and it shares the
- * `.tip` bubble the settings fields use rather than a native tooltip.
+ * Focusable, so the text is reachable without a pointer. `note` is the quieter
+ * second line: why something is unavailable, or what it needs.
  */
-export function infoIcon(text: string, name = "info"): HTMLElement {
-  return h("span", { class: "info-i", tabindex: "0", role: "note" }, [
-    icon(name, 12),
-    tip(text),
-  ]);
+export function infoIcon(text: string, name = "info", note = ""): HTMLElement {
+  const mark = h("span", { class: "info-i", tabindex: "0", role: "note" }, [icon(name, 12)]);
+  attachTip(mark, text, note);
+  return mark;
 }
 
 /**
- * The bubble on its own, for a parent that is its own hover target. `note` is
- * the quieter second line: why something is unavailable, or what it needs.
+ * Hover text placed beside its anchor instead of over the row it explains.
+ * One bubble exists: it is moved, filled and flipped to the other side when it
+ * would leave the window. A modal dialog paints above everything else, so the
+ * bubble joins it there whenever the anchor lives inside one.
  */
-export function tip(text: string, note = "", cls = ""): HTMLElement {
-  return h("span", { class: `tip${cls ? ` ${cls}` : ""}` }, [
-    h("span", { text }),
-    ...(note ? [h("span", { class: "no", text: note })] : []),
-  ]);
+let bubble: HTMLElement | null = null;
+
+export function attachTip(anchor: HTMLElement, text: string, note = ""): void {
+  const show = (): void => showTip(anchor, text, note);
+  anchor.addEventListener("pointerenter", show);
+  anchor.addEventListener("focus", show);
+  anchor.addEventListener("pointerleave", hideTip);
+  anchor.addEventListener("blur", hideTip);
+}
+
+function showTip(anchor: HTMLElement, text: string, note: string): void {
+  const node = (bubble ??= h("span", { class: "tip anchored", role: "tooltip" }));
+  node.replaceChildren(h("span", { text }), ...(note ? [h("span", { class: "no", text: note })] : []));
+  (anchor.closest("dialog") ?? document.body).appendChild(node);
+  // Measured from a corner: a bubble parked near the right edge would wrap
+  // narrower than it will be once placed, and the flip would read it wrong.
+  node.style.left = "0px";
+  node.style.top = "0px";
+  node.classList.add("on");
+  const at = anchor.getBoundingClientRect();
+  const box = node.getBoundingClientRect();
+  const right = at.right + 10;
+  const fits = right + box.width <= window.innerWidth - 8;
+  node.style.left = `${fits ? right : Math.max(8, at.left - 10 - box.width)}px`;
+  node.style.top = `${Math.min(Math.max(8, at.top + at.height / 2 - box.height / 2), Math.max(8, window.innerHeight - 8 - box.height))}px`;
+}
+
+function hideTip(): void {
+  bubble?.classList.remove("on");
+}
+
+/** A ring that turns while something is in flight. */
+export function spinner(size = 12): HTMLElement {
+  return h("span", { class: "spin", style: `width:${size}px;height:${size}px` });
+}
+
+/** One line saying a pane is working, for a pane with nothing to show yet. */
+export function busyRow(text: string): HTMLElement {
+  return h("div", { class: "busy-row" }, [spinner(13), h("span", { text })]);
 }
 
 export function iconButton(
@@ -163,15 +198,22 @@ document.addEventListener(
   true,
 );
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && layer) {
+  if (e.key !== "Escape") return;
+  hideTip();
+  if (layer) {
     e.stopPropagation();
     closeLayer();
   }
 }, true);
-window.addEventListener("blur", () => closeLayer());
+window.addEventListener("blur", () => {
+  hideTip();
+  closeLayer();
+});
 window.addEventListener(
   "wheel",
   (e) => {
+    // A bubble is placed against a rectangle that scrolling has just moved.
+    hideTip();
     const target = e.target as Node | null;
     if (layer && !(target && layer.nodes.some((n) => n.contains(target)))) closeLayer();
   },

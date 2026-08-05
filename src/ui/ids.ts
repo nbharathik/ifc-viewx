@@ -2,7 +2,7 @@
 // model against it in this tab. Entity, attribute and property facets are
 // evaluated. Classification, material and partOf need data the viewer does not
 // carry, so they are listed as unchecked rather than silently passed.
-import { h, icon } from "./kit.js";
+import { h, icon, spinner } from "./kit.js";
 import { emptyState } from "./shell.js";
 import { scanElements } from "./filters.js";
 import type { ItemProperties, Viewer } from "../viewer-core/viewer.js";
@@ -331,16 +331,22 @@ export class IdsPanel {
     );
   }
 
+  /** The status line, with a ring while the pass it describes is still going. */
+  private say(text: string, busy = false): void {
+    this.status.replaceChildren(...(busy ? [spinner(12)] : []), h("span", { text }));
+  }
+
   private fail(err: Error): void {
-    this.status.textContent = err.message;
+    this.say(err.message);
     this.status.classList.add("error");
     this.run.disabled = loadedIds() === null;
+    this.run.classList.remove("busy");
   }
 
   private async load(file: File): Promise<void> {
     const parsed = loadIds(await file.text(), file.name);
     this.title.textContent = `${parsed.title} · ${parsed.specs.length} specification${parsed.specs.length === 1 ? "" : "s"} · ${file.name}`;
-    this.status.textContent = "";
+    this.say("");
     this.status.classList.remove("error");
     this.run.disabled = false;
     this.empty.classList.add("hidden");
@@ -353,8 +359,10 @@ export class IdsPanel {
     const document_ = loadedIds();
     if (!document_) return;
     this.run.disabled = true;
+    this.run.classList.add("busy");
     this.status.classList.remove("error");
     this.results.replaceChildren();
+    this.say("Reading the model", true);
     let failedSpecs = 0;
     let applicable = 0;
     let unreadable = 0;
@@ -368,22 +376,24 @@ export class IdsPanel {
           this.results.appendChild(this.renderResult(result));
         },
         (spec, index, total, done, of) => {
-          this.status.textContent = `Checking ${index + 1}/${total}: ${spec.name} (${done}/${of})`;
+          this.say(`Checking ${index + 1}/${total}: ${spec.name} (${done}/${of})`, true);
         },
       );
     } finally {
       this.run.disabled = false;
+      this.run.classList.remove("busy");
     }
     // A geometry-only file would otherwise pass everything for the wrong reason.
     const blind = applicable === 0 && unreadable > 0;
     const total = document_.specs.length;
-    this.status.textContent = blind
+    const outcome = blind
       ? "Nothing could be read from this file. Open the .ifc rather than the converted .ifcx."
       : failedSpecs
         ? `${failedSpecs} of ${total} specifications have failures`
         : `All ${total} specifications pass`;
+    this.say(outcome);
     this.status.classList.toggle("error", blind);
-    this.actions.log(this.status.textContent, failedSpecs || blind ? "error" : "success");
+    this.actions.log(outcome, failedSpecs || blind ? "error" : "success");
   }
 
   private renderResult(result: SpecResult): HTMLElement {

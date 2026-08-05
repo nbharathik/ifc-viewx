@@ -2,7 +2,7 @@
 // columns resolve through the element type, which is the part a plain
 // instance read gets wrong. Runs in this tab. Rows select in the viewer; the
 // table exports as CSV.
-import { h, icon, toast } from "./kit.js";
+import { h, icon, spinner, toast } from "./kit.js";
 import { emptyState } from "./shell.js";
 import { saveCsv, type Value } from "../plugins/kit.js";
 import type { ScheduleReport } from "../ifc/ifcEngine.js";
@@ -63,7 +63,10 @@ export class SchedulePanel {
       .map((p) => p.trim())
       .filter(Boolean);
     this.runBtn.disabled = true;
-    this.status.textContent = `Reading ${type}`;
+    this.runBtn.classList.add("busy");
+    // Every element of the class is read through its type, so a large model
+    // takes a moment: the line turns while it does.
+    this.status.replaceChildren(spinner(12), h("span", { text: `Reading ${type}` }));
     this.status.classList.remove("error");
     try {
       const report = await this.actions.run(type, properties);
@@ -74,6 +77,7 @@ export class SchedulePanel {
       this.status.classList.add("error");
     } finally {
       this.runBtn.disabled = false;
+      this.runBtn.classList.remove("busy");
     }
   }
 

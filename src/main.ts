@@ -5,6 +5,7 @@
 import "./styles.css";
 import { createViewer } from "./viewer-core/viewer.js";
 import { listCachedModels, loadCachedSource, storeSourceBytes, type CachedModel } from "./viewer-core/engine/cache.js";
+import type { LoadProgress } from "./viewer-core/engine/types.js";
 import { PythonEngine, type ProposedEdit } from "./python/pythonEngine.js";
 import { IfcEngine, type EditOp, type ValidationReport } from "./ifc/ifcEngine.js";
 import { chat, findProvider, isConfigured, isVerified, loadSettings, type ChatMessage } from "./llm/llmClient.js";
@@ -22,7 +23,7 @@ import { Connection } from "./ui/connection.js";
 import { CommandRegistry } from "./ui/commands.js";
 import { Ribbon, type RibbonTab } from "./ui/ribbon.js";
 import type { SchedulePanel } from "./ui/schedules.js";
-import { CommandPalette, h, icon, lightDismiss, promptForm, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
+import { busyRow, CommandPalette, h, icon, lightDismiss, promptForm, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
 import { PluginHost, type PluginPython } from "./plugins/host.js";
 import { PluginBrowser } from "./plugins/browser.js";
 import { ServiceClient, type EditDiff } from "./bridge/serviceClient.js";
@@ -109,6 +110,9 @@ const viewer = createViewer(shell.viewerHost, {
   wasmAbsolute: true,
   antialias: settings.antialias,
   panels: { tree: $("pane-tree"), properties: $("tab-properties") },
+  // The shell draws the loading screen: it also covers the drop card, which
+  // the viewer's own card cannot, and it reports conversions the same way.
+  progressCard: false,
   worker: {
     factory: () =>
       new Worker(new URL("./viewer-core/engine/worker.entry.ts", import.meta.url), { type: "module" }),
@@ -164,9 +168,6 @@ function assistant(): AssistantPanel {
       openLocal: () => connection.open(),
     });
     refreshAssistantEngine();
-    // Nothing to talk to yet: show the fields rather than a chat box that
-    // would only fail on the first message.
-    if (needsAssistantSetup()) assistantUi.openSettings();
   }
   return assistantUi;
 }
@@ -184,18 +185,21 @@ function needsAssistantSetup(): boolean {
 function refreshAssistantEngine(): void {
   if (!assistantUi) return;
   const proxied = service.proxiesLlm();
+  const llm = loadSettings();
+  const ready = isVerified(llm);
   assistantUi.setProxy(proxied);
+  // Nothing to talk to yet: the fields belong in the panel, not in a dialog
+  // that opens itself over the app before the user has asked for anything.
+  assistantUi.setNeedsSetup(needsAssistantSetup(), proxied || ready);
   if (proxied) {
     assistantUi.setEngine("Local Studio", "The local service holds the provider key");
   } else {
-    const settings = loadSettings();
-    const provider = findProvider(settings.provider);
-    const ready = isVerified(settings);
+    const provider = findProvider(llm.provider);
     assistantUi.setEngine(
-      isConfigured(settings) ? `${provider.label} · ${settings.model}` : "Not configured",
+      isConfigured(llm) ? `${provider.label} · ${llm.model}` : "Not configured",
       ready
         ? "This model answered a live check; the key stays in this browser"
-        : isConfigured(settings)
+        : isConfigured(llm)
           ? "Not verified yet. Verify the model id in the assistant settings."
           : "Choose a provider and model in the assistant settings",
       ready,
@@ -348,6 +352,67 @@ function worthConverting(bytes: Uint8Array, name: string): boolean {
   return bytes.length > BIG_MODEL_BYTES || containsAscii(bytes, "IFCADVANCEDBREP");
 }
 
+/**
+ * One loading screen for anything the viewport waits on: opening a file,
+ * replaying a cached model, fetching one from Local Studio, or a conversion.
+ * It covers the drop card on a first open, because that card looks idle while
+ * a 200 MB file is being parsed behind it. Once a model is on screen it
+ * shrinks to a top card, so the work is reported without hiding the model.
+ */
+const loadingUi = (() => {
+  const host = $("loading");
+  const name = $("load-name");
+  const detail = $("load-detail");
+  const fill = $("load-fill");
+  const cancel = $<HTMLButtonElement>("load-cancel");
+  let onCancel: (() => void) | null = null;
+  cancel.addEventListener("click", () => onCancel?.());
+
+  /** Null means nothing to count yet, and the bar sweeps instead of sitting at zero. */
+  const bar = (percent: number | null): void => {
+    host.classList.toggle("waiting", percent === null);
+    fill.style.width = percent === null ? "" : `${percent}%`;
+  };
+
+  return {
+    show(title: string, cancelWith: (() => void) | null = null): void {
+      onCancel = cancelWith;
+      name.textContent = title;
+      detail.textContent = "Preparing";
+      bar(null);
+      cancel.classList.toggle("hidden", cancelWith === null);
+      host.classList.toggle("compact", activeBytes !== null);
+      host.classList.remove("hidden");
+    },
+    /** A step with no number behind it: conversion, or a fetch about to start. */
+    step(text: string): void {
+      detail.textContent = text;
+    },
+    update(progress: LoadProgress): void {
+      if (progress.phase === "downloading") {
+        const read = ((progress.bytesLoaded ?? 0) / 1e6).toFixed(1);
+        const total = progress.bytesTotal;
+        bar(total ? Math.min(100, Math.round(((progress.bytesLoaded ?? 0) / total) * 100)) : null);
+        detail.textContent = total ? `${read} of ${(total / 1e6).toFixed(1)} MB` : `${read} MB read`;
+        return;
+      }
+      const percent =
+        progress.totalEntities > 0
+          ? Math.min(100, Math.round((progress.entities / progress.totalEntities) * 100))
+          : null;
+      bar(progress.phase === "parsing" ? null : percent);
+      detail.textContent =
+        progress.phase === "parsing"
+          ? "Reading entities"
+          : `${progress.meshes.toLocaleString()} meshes${percent === null ? "" : ` · ${percent}%`}`;
+    },
+    hide(): void {
+      onCancel = null;
+      host.classList.add("hidden");
+    },
+  };
+})();
+
 function hideDropzone(animate: boolean): void {
   dropzone.classList.remove("dragging");
   if (animate) {
@@ -361,10 +426,15 @@ function hideDropzone(animate: boolean): void {
 async function loadBytes(bytes: Uint8Array, name: string, preserveCamera = false, adoptSha?: string): Promise<void> {
   const pose = preserveCamera ? viewer.getCamera() : null;
   shell.setStatus("Loading", "busy");
+  loadingUi.show(name, () => viewer.cancelLoad());
   // Taken before the parser runs: viewer.load hands these bytes to a worker,
   // and a transferred buffer would leave the semantic engine with nothing.
   const semanticCopy = name.toLowerCase().endsWith(".ifcx") ? null : bytes.slice();
-  await viewer.load(bytes, {});
+  try {
+    await viewer.load(bytes, { onProgress: (progress) => loadingUi.update(progress) });
+  } finally {
+    loadingUi.hide();
+  }
   if (pose) viewer.setCamera(pose);
   activeBytes = bytes;
   fileName = name;
@@ -375,6 +445,7 @@ async function loadBytes(bytes: Uint8Array, name: string, preserveCamera = false
   // .ifcx is our converted container, not STEP, so the semantic engine gets
   // the original bytes or nothing: it must never answer from a previous model.
   ifc.setModel(semanticCopy);
+  streamedCategories.clear();
   if (!preserveCamera) { checkpoints = []; redoStack = []; }
   hideDropzone(true);
   updateModelChrome();
@@ -399,6 +470,8 @@ async function openFromParam(): Promise<void> {
   if (!sha || !/^[0-9a-f]{64}$/.test(sha)) return;
   const given = params.get("name") ?? "model.ifc";
   shell.setStatus("Loading", "busy");
+  loadingUi.show(given);
+  loadingUi.step("Reading it from Local Studio");
   try {
     const wasIfcx = given.toLowerCase().endsWith(".ifcx");
     let res = await fetch(`${service.origin}/models/${sha}.ifcx`);
@@ -414,6 +487,8 @@ async function openFromParam(): Promise<void> {
   } catch (err) {
     updateModelChrome();
     reportError(err);
+  } finally {
+    loadingUi.hide();
   }
 }
 
@@ -599,9 +674,23 @@ function setHud(on: boolean): void {
   ribbon.sync();
 }
 
+/** Lazy categories already streamed for the model on screen. */
+const streamedCategories = new Set<string>();
+
 async function setCategory(category: "IfcSpace" | "IfcOpeningElement"): Promise<void> {
-  await viewer.setCategoryVisible(category, !viewer.isCategoryVisible(category));
-  ribbon.sync();
+  const on = !viewer.isCategoryVisible(category);
+  // The first time on, this geometry is parsed and streamed in, which on a
+  // large model is a wait the button gives no sign of by itself. Later
+  // toggles are instant and must not flash a card.
+  const streaming = on && !streamedCategories.has(category);
+  if (streaming) loadingUi.show(`Loading ${category.replace(/^Ifc/, "")} geometry`);
+  try {
+    await viewer.setCategoryVisible(category, on);
+    if (on) streamedCategories.add(category);
+  } finally {
+    if (streaming) loadingUi.hide();
+    ribbon.sync();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1051,7 +1140,6 @@ async function handleChat(text: string): Promise<void> {
     }
   } catch (err) {
     ui.addMessage("system", `Error: ${err instanceof Error ? err.message : String(err)}`);
-    if (needsAssistantSetup()) ui.openSettings();
   } finally {
     ui.setBusy(false);
     ui.setStatus("");
@@ -1070,6 +1158,8 @@ function newChat(): void {
 }
 
 function reportError(err: unknown): void {
+  // A cancelled load is the user's own decision, not a failure to shout about.
+  if (err instanceof Error && err.name === "CancelledError") return shell.log("Load cancelled");
   shell.log(err instanceof Error ? err.message : String(err), "error", true);
 }
 
@@ -1103,6 +1193,13 @@ function renderSummary(): void {
   page.append(h("div", { class: "group-title", text: "Model" }), list);
   renderChecks(page);
   host.appendChild(page);
+}
+
+/** Repaint the summary; `reveal` brings it forward, for work that lands there. */
+function refreshSummary(reveal = false): void {
+  summaryDirty = true;
+  if (reveal) showPane("summary");
+  else if (paneVisible("summary")) renderSummary();
 }
 
 /**
@@ -1166,9 +1263,13 @@ async function convertWithService(): Promise<void> {
   try {
     shell.setStatus("Converting", "busy");
     shell.log("Converting with IfcOpenShell, this can take minutes");
+    loadingUi.show(`Converting ${fileName}`);
     await handOverModel();
     const source = service.getSha();
-    const converted = await service.convert((text) => shell.setHint(text));
+    const converted = await service.convert((text) => {
+      shell.setHint(text);
+      loadingUi.step(text);
+    });
     await loadBytes(converted, fileName.replace(/\.ifc$/i, ".ifcx"));
     // The viewer now shows the .ifcx; native tools keep using the stored source.
     if (source) service.adoptModel(source);
@@ -1177,20 +1278,26 @@ async function convertWithService(): Promise<void> {
   } catch (err) {
     reportError(err);
     updateModelChrome();
+  } finally {
+    loadingUi.hide();
   }
 }
 
 // ---------------------------------------------------------------------------
 // Model checks (native, no generated code)
 let lastReport: ValidationReport | null = null;
+let checking = false;
 
 async function validateModel(): Promise<void> {
-  if (!activeBytes) return toast("Open a model first", "info");
+  if (!activeBytes || checking) return toast(checking ? "The checks are already running" : "Open a model first", "info");
   shell.setStatus("Checking", "busy");
+  // Shown before the wait, not after it: a pass over every entity takes
+  // seconds, and the pane it lands in is where the user should be watching.
+  checking = true;
+  refreshSummary(true);
+  ribbon.sync();
   try {
     lastReport = await ifc.validate();
-    summaryDirty = true;
-    showPane("summary");
     const { error, warning } = lastReport.counts;
     shell.log(
       `Model checks: ${error} error${error === 1 ? "" : "s"}, ${warning} warning${warning === 1 ? "" : "s"}`,
@@ -1198,6 +1305,8 @@ async function validateModel(): Promise<void> {
       true,
     );
   } finally {
+    checking = false;
+    refreshSummary();
     updateModelChrome();
   }
 }
@@ -1206,12 +1315,21 @@ function renderChecks(page: HTMLElement): void {
   const head = h("div", { class: "group-title" }, [
     h("span", { text: "Model checks" }),
     (() => {
-      const run = h("button", { class: "link-btn", type: "button", text: lastReport ? "Re-run" : "Run" });
+      const run = h("button", {
+        class: "link-btn",
+        type: "button",
+        text: lastReport ? "Re-run" : "Run",
+        disabled: checking,
+      });
       run.addEventListener("click", () => void validateModel().catch(reportError));
       return run;
     })(),
   ]);
   page.appendChild(head);
+  if (checking) {
+    page.appendChild(busyRow("Checking every entity"));
+    return;
+  }
   if (!lastReport) {
     page.appendChild(
       h("div", { class: "note", text: "Structural QA: identity, containment, placement, units, naming." }),
@@ -1357,7 +1475,7 @@ registry.add([
   { id: "file.screenshot", label: "Screenshot", icon: "camera", section: "File", shortcut: "S", enabled: hasModel, run: () => { viewer.screenshot(); shell.log("Screenshot saved", "success", true); } },
   { id: "file.viewpoint", label: "Viewpoint", icon: "bookmark", section: "File", shortcut: "V", enabled: hasModel, run: saveViewpoint },
   { id: "file.convert", label: "Convert", icon: "refresh", section: "Local Studio", tier: "local", available: () => canLocal("convert"), hint: "IfcOpenShell → .ifcx, then reopens are instant", enabled: hasModel, run: () => void convertWithService() },
-  { id: "file.check", label: "Checks", icon: "shield", section: "Review", hint: "Structural QA in this tab, no generated code", enabled: hasModel, run: () => void validateModel().catch(reportError) },
+  { id: "file.check", label: "Checks", icon: "shield", section: "Review", hint: "Structural QA in this tab, no generated code", enabled: () => hasModel() && !checking, run: () => void validateModel().catch(reportError) },
   { id: "file.schedule", label: "Schedule", icon: "table", section: "Review", hint: "Tabular export of a class, with pset columns resolved through the type", enabled: hasModel, run: () => shell.selectTab("schedule") },
 
   { id: "edit.undo", label: "Undo", icon: "undo", section: "Edit", shortcut: "Ctrl+Z", enabled: () => checkpoints.length > 0, run: () => void undo().catch(reportError) },
@@ -1537,9 +1655,10 @@ const RIBBON: RibbonTab[] = [
         { kind: "cmd", id: "panel.structure", size: "sm" },
         { kind: "cmd", id: "panel.summary", size: "sm" },
       ] },
-      { label: "Scripting", items: [
-        { kind: "cmd", id: "panel.py" },
-        { kind: "cmd", id: "app.plugins", size: "sm" },
+      // The Python console is a plugin like any other, so it is opened from
+      // the catalog rather than from a tile of its own up here.
+      { label: "Plugins", items: [
+        { kind: "cmd", id: "app.plugins" },
       ] },
     ],
   },

@@ -1,8 +1,10 @@
 // Assistant settings dialog: connection at the top, then what the assistant is
 // allowed to do, as a grid of named tools rather than a paragraph. Anything
 // that would take a sentence to say is an icon with the sentence on hover, so
-// the catalog stays readable without scrolling.
-import { h, icon, iconButton, infoIcon, lightDismiss, tip, toast } from "./kit.js";
+// the catalog stays readable without scrolling. The connection fields are a
+// standalone function: the panel shows the same ones inline before anything is
+// configured, so a first run never opens a dialog on its own.
+import { attachTip, h, icon, iconButton, infoIcon, lightDismiss, toast } from "./kit.js";
 import {
   PROVIDERS,
   findProvider,
@@ -51,6 +53,7 @@ export interface AiSettingsActions {
 export class AssistantSettings {
   private readonly dialog: HTMLDialogElement;
   private readonly toolsHost = h("div");
+  private readonly connHost = h("div");
   private readonly proxyNote = h("div", { class: "note hidden" });
 
   constructor(private readonly actions: AiSettingsActions) {
@@ -62,18 +65,16 @@ export class AssistantSettings {
       h("div", { class: "dlg-body" }, [
         h("div", { class: "group-title", text: "Connection" }),
         this.proxyNote,
-        ...this.connectionFields(),
+        this.connHost,
         h("div", { class: "group-title", text: "What it can do" }),
         h(
           "div",
           { class: "how-row" },
-          HOW.map(([name, label, detail]) =>
-            h("span", { class: "how", tabindex: "0" }, [
-              icon(name, 12),
-              h("span", { text: label }),
-              tip(detail, "", "below"),
-            ]),
-          ),
+          HOW.map(([name, label, detail]) => {
+            const chip = h("span", { class: "how", tabindex: "0" }, [icon(name, 12), h("span", { text: label })]);
+            attachTip(chip, detail);
+            return chip;
+          }),
         ),
         this.toolsHost,
       ]),
@@ -90,6 +91,9 @@ export class AssistantSettings {
   }
 
   open(): void {
+    // Rebuilt on every open: the same fields also live in the panel, and two
+    // copies of one setting must never disagree about what is stored.
+    this.connHost.replaceChildren(...connectionFields(() => this.actions.onChange()));
     if (!this.dialog.open) this.dialog.showModal();
   }
 
@@ -140,7 +144,11 @@ export class AssistantSettings {
     this.toolsHost.replaceChildren(...blocks);
   }
 
-  /** Named tools, two to a row: the name shows, the sentence is on hover. */
+  /**
+   * Named tools, two to a row: the name shows, and the sentence is behind the
+   * mark at the end of the row. The bubble opens beside that mark rather than
+   * under the pointer, so reading one tool never covers the next.
+   */
   private grid(
     rows: Array<{ icon: string; name: string; off: boolean; plain: string; note: string }>,
   ): HTMLElement {
@@ -148,10 +156,10 @@ export class AssistantSettings {
       "div",
       { class: "tool-grid" },
       rows.map((row) =>
-        h("div", { class: `tool-cell${row.off ? " off" : ""}`, tabindex: "0" }, [
+        h("div", { class: `tool-cell${row.off ? " off" : ""}` }, [
           icon(row.icon, 13),
           h("span", { class: "grow", text: row.name }),
-          tip(row.plain, row.note, "below"),
+          infoIcon(row.plain, "info", row.note),
         ]),
       ),
     );
@@ -224,133 +232,141 @@ export class AssistantSettings {
     });
     return h("div", { class: "tool-group" }, [head, body]);
   }
+}
 
-  /**
-   * Provider controls. Each provider carries its own endpoint, wire format and
-   * auth header, so the only real choice is the model. A typed id is a guess
-   * until it answers, so nothing here claims a model works: Verify uses the id
-   * for real and reports what came back, and any later edit drops that proof.
-   */
-  private connectionFields(): HTMLElement[] {
-    const settings = loadSettings();
-    let verified = settings.verified;
+/** Two field sets can be on screen at once, so each owns its model list. */
+let listSeq = 0;
 
-    const provider = h("select");
-    for (const entry of PROVIDERS) provider.append(h("option", { value: entry.id, text: entry.label }));
-    provider.value = settings.provider;
+/**
+ * Provider controls. Each provider carries its own endpoint, wire format and
+ * auth header, so the only real choice is the model. A typed id is a guess
+ * until it answers, so nothing here claims a model works: Verify uses the id
+ * for real and reports what came back, and any later edit drops that proof.
+ */
+export function connectionFields(onChange: () => void): HTMLElement[] {
+  const settings = loadSettings();
+  let verified = settings.verified;
 
-    const baseUrl = h("input", { type: "text", value: settings.baseUrl });
-    const apiKey = h("input", { type: "password", value: settings.apiKey });
-    const models = h("datalist", { id: "llm-models" });
-    const model = h("input", { type: "text", value: settings.model, list: "llm-models", placeholder: "model id" });
-    const browse = iconButton("refresh", "List the models this endpoint offers", () => runBrowse(), "icon-btn sm");
-    const verify = h("button", { class: "btn sm accent", type: "button", text: "Verify" });
-    const note = h("div", { class: "note" });
-    const line = h("div", { class: "verify" });
-    const urlRow = h("label", { class: "field" }, [
-      h("span", { class: "field-label", text: "Endpoint" }),
-      baseUrl,
-    ]);
+  const provider = h("select");
+  for (const entry of PROVIDERS) provider.append(h("option", { value: entry.id, text: entry.label }));
+  provider.value = settings.provider;
 
-    const read = (): LlmSettings => ({
-      provider: provider.value as LlmSettings["provider"],
-      baseUrl: baseUrl.value.trim(),
-      apiKey: apiKey.value.trim(),
-      model: model.value.trim(),
-      mode: loadSettings().mode,
-      verified,
-    });
-    const persist = (): void => {
-      saveSettings(read());
-      this.actions.onChange();
-    };
+  const listId = `llm-models-${++listSeq}`;
+  const baseUrl = h("input", { type: "text", value: settings.baseUrl });
+  const apiKey = h("input", { type: "password", value: settings.apiKey });
+  const models = h("datalist", { id: listId });
+  const model = h("input", { type: "text", value: settings.model, list: listId, placeholder: "model id" });
+  const browse = iconButton("refresh", "List the models this endpoint offers", () => runBrowse(), "icon-btn sm");
+  const verify = h("button", { class: "btn sm accent", type: "button", text: "Verify" });
+  const note = h("div", { class: "note" });
+  const line = h("div", { class: "verify" });
+  const urlRow = h("label", { class: "field" }, [
+    h("span", { class: "field-label", text: "Endpoint" }),
+    baseUrl,
+  ]);
 
-    const say = (state: VerifyState, text: string): void => {
-      line.className = `verify ${state}`;
-      line.replaceChildren(icon(VERIFY_ICON[state], 12), h("span", { text }));
-    };
-    /** Every field below feeds the call, so touching one un-proves the model. */
-    const invalidate = (): void => {
-      verified = "";
-      persist();
-      say("idle", model.value.trim() ? "Not verified yet." : "Enter a model id.");
-    };
+  const read = (): LlmSettings => ({
+    provider: provider.value as LlmSettings["provider"],
+    baseUrl: baseUrl.value.trim(),
+    apiKey: apiKey.value.trim(),
+    model: model.value.trim(),
+    mode: loadSettings().mode,
+    verified,
+  });
+  const persist = (): void => {
+    saveSettings(read());
+    onChange();
+  };
 
-    const setOptions = (list: string[]): void =>
-      models.replaceChildren(...list.map((id) => h("option", { value: id })));
+  const say = (state: VerifyState, text: string): void => {
+    line.className = `verify ${state}`;
+    line.replaceChildren(icon(VERIFY_ICON[state], 12), h("span", { text }));
+  };
+  /** Every field below feeds the call, so touching one un-proves the model. */
+  const invalidate = (): void => {
+    verified = "";
+    persist();
+    say("idle", model.value.trim() ? "Not verified yet." : "Enter a model id.");
+  };
 
-    const runBrowse = (): void => {
-      browse.disabled = true;
-      say("busy", "Reading the model list");
-      void listModels(read())
-        .then((list) => {
-          setOptions(list);
-          say("idle", `${list.length} models offered. Pick one, then Verify.`);
-        })
-        .catch((err: unknown) => say("fail", err instanceof Error ? err.message : String(err)))
-        .finally(() => (browse.disabled = false));
-    };
+  const setOptions = (list: string[]): void =>
+    models.replaceChildren(...list.map((id) => h("option", { value: id })));
 
-    /** Reflect the chosen provider: its URL, its key hint, its known models. */
-    const syncProvider = (reset: boolean): void => {
-      const entry = findProvider(provider.value);
-      urlRow.classList.toggle("hidden", entry.fixedUrl);
-      baseUrl.placeholder = entry.baseUrl;
-      apiKey.placeholder = entry.keyPlaceholder;
-      note.textContent = entry.note;
-      setOptions(entry.models);
-      if (reset) baseUrl.value = entry.fixedUrl ? "" : entry.baseUrl;
-      // Never leave the field blank when the provider ships a known-good
-      // default: a first run should be provider, key, verify.
-      if (reset || !model.value) model.value = entry.models[0] ?? "";
-    };
+  const runBrowse = (): void => {
+    browse.disabled = true;
+    say("busy", "Reading the model list");
+    void listModels(read())
+      .then((list) => {
+        setOptions(list);
+        say("idle", `${list.length} models offered. Pick one, then Verify.`);
+      })
+      .catch((err: unknown) => say("fail", err instanceof Error ? err.message : String(err)))
+      .finally(() => (browse.disabled = false));
+  };
 
-    provider.addEventListener("change", () => {
-      syncProvider(true);
-      invalidate();
-    });
-    verify.addEventListener("click", () => {
-      const current = read();
-      verify.disabled = true;
-      say("busy", `Asking ${current.model || "the endpoint"} to answer`);
-      void verifyModel(current)
-        .then((result) => {
-          verified = result.model;
-          persist();
-          say("ok", `${result.model} answered in ${result.ms} ms`);
-          toast("Model verified", "success");
-        })
-        .catch((err: unknown) => {
-          verified = "";
-          persist();
-          say("fail", `Not loaded. ${err instanceof Error ? err.message : String(err)}`);
-        })
-        .finally(() => (verify.disabled = false));
-    });
+  /** Reflect the chosen provider: its URL, its key hint, its known models. */
+  const syncProvider = (reset: boolean): void => {
+    const entry = findProvider(provider.value);
+    urlRow.classList.toggle("hidden", entry.fixedUrl);
+    baseUrl.placeholder = entry.baseUrl;
+    apiKey.placeholder = entry.keyPlaceholder;
+    note.textContent = entry.note;
+    setOptions(entry.models);
+    if (reset) baseUrl.value = entry.fixedUrl ? "" : entry.baseUrl;
+    // Never leave the field blank when the provider ships a known-good
+    // default: a first run should be provider, key, verify.
+    if (reset || !model.value) model.value = entry.models[0] ?? "";
+  };
 
-    for (const control of [baseUrl, apiKey, model]) control.addEventListener("change", invalidate);
+  provider.addEventListener("change", () => {
+    syncProvider(true);
+    invalidate();
+  });
+  verify.addEventListener("click", () => {
+    const current = read();
+    verify.disabled = true;
+    verify.classList.add("busy");
+    say("busy", `Asking ${current.model || "the endpoint"} to answer`);
+    void verifyModel(current)
+      .then((result) => {
+        verified = result.model;
+        persist();
+        say("ok", `${result.model} answered in ${result.ms} ms`);
+        toast("Model verified", "success");
+      })
+      .catch((err: unknown) => {
+        verified = "";
+        persist();
+        say("fail", `Not loaded. ${err instanceof Error ? err.message : String(err)}`);
+      })
+      .finally(() => {
+        verify.disabled = false;
+        verify.classList.remove("busy");
+      });
+  });
 
-    syncProvider(false);
-    if (verified && verified === model.value.trim()) say("ok", `${verified} verified on this endpoint.`);
-    else invalidate();
+  for (const control of [baseUrl, apiKey, model]) control.addEventListener("change", invalidate);
 
-    return [
-      h("label", { class: "field" }, [h("span", { class: "field-label", text: "Provider" }), provider]),
-      urlRow,
-      h("label", { class: "field" }, [
-        h("span", { class: "field-label" }, [
-          h("span", { text: "API key" }),
-          h("span", { class: "hint", text: "Kept in this browser only." }),
-        ]),
-        apiKey,
+  syncProvider(false);
+  if (verified && verified === model.value.trim()) say("ok", `${verified} verified on this endpoint.`);
+  else invalidate();
+
+  return [
+    h("label", { class: "field" }, [h("span", { class: "field-label", text: "Provider" }), provider]),
+    urlRow,
+    h("label", { class: "field" }, [
+      h("span", { class: "field-label" }, [
+        h("span", { text: "API key" }),
+        h("span", { class: "hint", text: "Kept in this browser only." }),
       ]),
-      h("label", { class: "field" }, [
-        h("span", { class: "field-label", text: "Model" }),
-        h("span", { class: "row model-row" }, [model, browse, verify]),
-      ]),
-      line,
-      note,
-      models,
-    ];
-  }
+      apiKey,
+    ]),
+    h("label", { class: "field" }, [
+      h("span", { class: "field-label", text: "Model" }),
+      h("span", { class: "row model-row" }, [model, browse, verify]),
+    ]),
+    line,
+    note,
+    models,
+  ];
 }

@@ -12,7 +12,7 @@ import { markdown, codeBlock } from "./markdown.js";
 import { emptyState } from "./shell.js";
 import { loadSettings, saveSettings, type AssistantMode } from "../llm/llmClient.js";
 import { describeCall, prettyJson, summarizeReport, type ToolAvailability } from "../llm/tools.js";
-import { AssistantSettings } from "./aiSettings.js";
+import { AssistantSettings, connectionFields } from "./aiSettings.js";
 
 export interface PendingEditView {
   summary: string;
@@ -57,6 +57,7 @@ export interface AssistantCallbacks extends EscalationActions {
 
 export class AssistantPanel {
   private readonly messages = h("div", { class: "msgs hidden" });
+  private readonly setup = h("div", { class: "ai-setup hidden" });
   private readonly welcome: HTMLElement;
   private readonly chips = h("div", { class: "chips" });
   private readonly status = h("div", { class: "status-line" });
@@ -77,6 +78,9 @@ export class AssistantPanel {
   private mode: AssistantMode = loadSettings().mode;
   /** Ticks the elapsed seconds while a turn is in flight. */
   private clock = 0;
+  /** Whether the inline connection card is up, so it is built only on change. */
+  private setupShown = false;
+  private setupDismissed = false;
 
   constructor(
     host: HTMLElement,
@@ -130,6 +134,7 @@ export class AssistantPanel {
           iconButton("plus", "New chat", () => callbacks.onNewChat(), "icon-btn sm"),
           iconButton("sliders", "Assistant settings", () => this.settings.open(), "icon-btn sm"),
         ]),
+        this.setup,
         this.welcome,
         this.messages,
         this.typing,
@@ -175,6 +180,44 @@ export class AssistantPanel {
   /** Open assistant setup, for callers that just told the user to fix it. */
   openSettings(): void {
     this.settings.open();
+  }
+
+  /**
+   * Nothing to answer with yet, so the connection fields sit in the panel,
+   * above the conversation they unblock: a first run is answered where the
+   * question was asked, not by a dialog that opens itself over the app.
+   *
+   * It opens when nothing is configured and closes when the model has
+   * answered a check, or when the user closes it. A typed key alone is not
+   * enough to take it away: that would pull Verify out from under the pointer.
+   */
+  setNeedsSetup(need: boolean, ready: boolean): void {
+    if (ready) return this.closeSetup();
+    if (!need || this.setupShown || this.setupDismissed) return;
+    this.setupShown = true;
+    const more = h("button", { class: "link-btn", type: "button", text: "All settings" });
+    more.addEventListener("click", () => this.settings.open());
+    const close = iconButton("x", "Close", () => {
+      // Closed by hand stays closed: the settings icon is the way back.
+      this.setupDismissed = true;
+      this.closeSetup();
+    }, "icon-btn sm");
+    this.setup.replaceChildren(
+      h("div", { class: "group-title" }, [
+        h("span", { text: "Connect a model" }),
+        h("span", { class: "row" }, [more, close]),
+      ]),
+      h("div", { class: "note", text: "Pick a provider, paste a key, then verify. The key stays in this browser." }),
+      ...connectionFields(() => this.callbacks.onSettingsChange()),
+    );
+    this.setup.classList.remove("hidden");
+  }
+
+  private closeSetup(): void {
+    if (!this.setupShown) return;
+    this.setupShown = false;
+    this.setup.classList.add("hidden");
+    this.setup.replaceChildren();
   }
 
   /** What the assistant can reach right now, listed in the setup dialog. */

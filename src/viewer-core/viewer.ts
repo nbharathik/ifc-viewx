@@ -94,6 +94,8 @@ export interface ViewerOptions {
   antialias?: boolean;
   /** Host containers for the tree and properties panels; omit to mount none. */
   panels?: { tree?: HTMLElement; properties?: HTMLElement };
+  /** Built-in load progress card. Turn it off when the host draws its own. */
+  progressCard?: boolean;
   /** Parser worker source; false forces the inline (main thread) engine. */
   worker?: ViewerWorkerOptions | false;
 }
@@ -260,7 +262,7 @@ class ViewerImpl implements Viewer {
   private readonly treePanel: TreePanel | null;
   private readonly perfHud: PerfHud;
   private readonly axisGizmo: AxisGizmo;
-  private readonly loadingOverlay: LoadingOverlay;
+  private readonly loadingOverlay: LoadingOverlay | null;
   private readonly errorCard: ErrorCard;
   private initialized: Promise<AsyncIfcEngine> | null = null;
   private currentModelID: number | null = null;
@@ -404,8 +406,11 @@ class ViewerImpl implements Viewer {
       getResolutionScale: () => this.scene.getResolutionScale(),
       getLoadTimeline: () => this.timeline,
     });
-    // Loading/error overlays are always mounted (independent of side panels).
-    this.loadingOverlay = new LoadingOverlay(this.container, () => this.cancelLoad());
+    // Overlays mount independently of the side panels. The progress card is
+    // the one piece a host may already draw itself, and two cards reporting
+    // one load is worse than either alone.
+    this.loadingOverlay =
+      options.progressCard === false ? null : new LoadingOverlay(this.container, () => this.cancelLoad());
     this.errorCard = new ErrorCard(this.container);
 
     this.updateTheme();
@@ -467,12 +472,12 @@ class ViewerImpl implements Viewer {
     // Overlay first: the initial load pays the worker spawn and wasm compile,
     // which is otherwise dead time with no feedback.
     this.errorCard.hide();
-    this.loadingOverlay.show();
+    this.loadingOverlay?.show();
     let engine: AsyncIfcEngine;
     try {
       engine = await this.ensureInit();
     } catch (err) {
-      this.loadingOverlay.hide();
+      this.loadingOverlay?.hide();
       this.errorCard.show(err instanceof Error ? err.message : String(err));
       throw err;
     }
@@ -532,7 +537,7 @@ class ViewerImpl implements Viewer {
       const meta = await engine.loadModel(normalized, {
         onProgress: (p) => {
           if (token !== this.loadToken) return;
-          this.loadingOverlay.update(p);
+          this.loadingOverlay?.update(p);
           options.onProgress?.(p);
         },
         onMeshBatch: (meshes) => {
@@ -569,7 +574,7 @@ class ViewerImpl implements Viewer {
       this.resizeToContainer();
       this.controls.fitToModel();
       this.scene.render();
-      this.loadingOverlay.hide();
+      this.loadingOverlay?.hide();
       this.ready = true;
       this.loading = false;
       for (const listener of this.modelLoadedListeners) listener();
@@ -583,7 +588,7 @@ class ViewerImpl implements Viewer {
       if (token !== this.loadToken) throw err; // superseded; the newer load owns the UI
       this.scene.setStreamingMode(false);
       this.loading = false;
-      this.loadingOverlay.hide();
+      this.loadingOverlay?.hide();
       if (err instanceof CancelledError) {
         // User cancel: clear the partial model, no error card.
         this.scene.clearModel();
@@ -1387,7 +1392,7 @@ class ViewerImpl implements Viewer {
     this.treePanel?.dispose();
     this.perfHud.dispose();
     this.axisGizmo.dispose();
-    this.loadingOverlay.dispose();
+    this.loadingOverlay?.dispose();
     this.errorCard.dispose();
     this.controls.dispose();
     this.scene.dispose();

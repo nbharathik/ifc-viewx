@@ -1238,8 +1238,9 @@ dialog::backdrop { background: var(--scrim); }
 /* Any parent may carry one, which is what keeps every explanation in the app
    the same object: a mark, a chip or a whole cell reveals it the same way. */
 :hover > .tip, :focus-within > .tip { opacity: 1; }
-/* Hangs under its parent instead of beside it, for a row that is already wide. */
-.tip.below { margin: calc(23px * var(--ui, 1)) 0 0 0; }
+/* Placed by kit.ts against its anchor, so it never lands on the row it explains. */
+.tip.anchored { margin: 0; }
+.tip.anchored.on { opacity: 1; }
 .tip .no { display: block; margin-top: 3px; color: var(--fg-4); }
 /* The same aside, standalone: an icon anywhere a sentence would have gone. */
 .info-i { display: inline-flex; align-items: center; color: var(--fg-4); cursor: help; flex: 0 0 auto; }
@@ -1314,6 +1315,69 @@ dialog::backdrop { background: var(--scrim); }
 .recent-row .name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .recent-row .meta { color: var(--fg-3); font-size: calc(10.5px * var(--ui, 1)); font-family: var(--mono); flex: 0 0 auto; }
 
+/* ---- Loading ---------------------------------------------------------------
+   One screen for anything the viewport waits on. It covers the drop card on a
+   first open, because that card looks idle while a large file is being read,
+   and shrinks to a top card once a model is on screen so the work is reported
+   without hiding it. */
+#loading {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--viewport);
+}
+#loading.compact { background: transparent; align-items: flex-start; padding-top: 14px; pointer-events: none; }
+.load-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 11px;
+  width: min(300px, calc(100% - 32px));
+  text-align: center;
+}
+#loading.compact .load-card {
+  gap: 7px;
+  width: min(340px, calc(100% - 24px));
+  padding: 10px 14px 12px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r3);
+  box-shadow: var(--shadow);
+  pointer-events: auto;
+}
+.load-mark {
+  width: calc(44px * var(--ui, 1));
+  height: calc(44px * var(--ui, 1));
+  background: var(--mark) center / 100% no-repeat;
+}
+#loading.compact .load-mark { display: none; }
+.load-name { color: var(--fg); font-size: calc(13px * var(--ui, 1)); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.load-track { width: 100%; height: 3px; border-radius: 2px; background: var(--line-hi); overflow: hidden; }
+.load-track i { display: block; width: 0; height: 100%; border-radius: 2px; background: var(--accent); transition: width 0.12s linear; }
+/* Nothing to count yet, so the bar sweeps rather than sitting at zero. */
+#loading.waiting .load-track i { width: 34%; animation: sweep 1.1s ease-in-out infinite alternate; }
+@keyframes sweep { from { transform: translateX(-110%); } to { transform: translateX(300%); } }
+.load-detail { color: var(--fg-2); font-size: calc(11px * var(--ui, 1)); }
+
+/* The same ring wherever something is working: a pane, a line or a button. */
+.spin {
+  display: inline-block;
+  flex: 0 0 auto;
+  border: 2px solid var(--line-hi);
+  border-top-color: var(--accent);
+  border-radius: var(--pill);
+  animation: spin 0.7s linear infinite;
+}
+.busy-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; color: var(--fg-2); font-size: calc(11px * var(--ui, 1)); }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .spin, .btn.busy::after { animation-duration: 2.4s; }
+  #loading.waiting .load-track i { animation: none; }
+}
+
 /* ---- Inspector pages ------------------------------------------------------ */
 .page { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; padding: 10px; gap: 9px; }
 .page.flush { padding: 0; }
@@ -1335,6 +1399,7 @@ dialog::backdrop { background: var(--scrim); }
 
 .status-line { font-size: calc(11px * var(--ui, 1)); color: var(--fg-2); flex: 0 0 auto; min-height: 15px; }
 .status-line.error { color: var(--err); }
+.status-line .spin { margin-right: 6px; vertical-align: -2px; }
 .tier {
   display: inline-flex;
   align-items: center;
@@ -1409,6 +1474,23 @@ dialog::backdrop { background: var(--scrim); }
 
 /* Assistant chrome: what the next turn may do, said before it is typed. */
 .ai-bar { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+/* Setup in the panel, not in a dialog that opens itself: a first run is
+   answered where the question was asked. The fields stack, because this panel
+   is narrower than the dialog the same fields also appear in. */
+.ai-setup {
+  /* Shrinks and scrolls rather than pushing the chat row off a short panel. */
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 62%;
+  overflow-y: auto;
+  padding: 0 10px 8px;
+  margin: 0 -10px;
+  border-bottom: 1px solid var(--line);
+}
+.ai-setup .field { flex-direction: column; align-items: stretch; gap: 4px; padding: 5px 0; }
+.ai-setup .field > select,
+.ai-setup .field > input:not([type="checkbox"]),
+.ai-setup .field > .model-row { width: auto; }
 /* Assistant setup. Its own dialog, so the fields get a full row each and the
    tool catalog can be read as a list instead of a scrolling strip. */
 #assistant-dialog { width: min(640px, 94vw); }
@@ -1452,10 +1534,12 @@ dialog::backdrop { background: var(--scrim); }
   color: var(--fg-2);
   font-family: var(--mono);
   font-size: calc(11px * var(--ui, 1));
-  cursor: help;
 }
-.tool-cell:hover, .tool-cell:focus-visible { background: var(--hover); color: var(--fg); outline: none; }
+.tool-cell:hover, .tool-cell:focus-within { background: var(--hover); color: var(--fg); outline: none; }
 .tool-cell svg { color: var(--fg-4); flex: 0 0 auto; }
+/* The mark is the hover target, at the end of the row rather than over it. */
+.tool-cell .info-i { opacity: 0.6; }
+.tool-cell:hover .info-i, .tool-cell .info-i:focus-visible { opacity: 1; }
 .tool-cell .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Not available yet: dimmed, so it reads as "later" rather than "broken". */
 .tool-cell.off { color: var(--fg-4); opacity: 0.7; }
@@ -1643,7 +1727,17 @@ dialog::backdrop { background: var(--scrim); }
 .out-wrap { position: relative; display: flex; flex: 1 1 auto; min-height: 0; }
 .out-actions { position: absolute; top: 4px; right: 6px; display: flex; gap: 2px; }
 .snippets { height: calc(26px * var(--ui, 1)); padding: 0 26px 0 9px; font-size: calc(11px * var(--ui, 1)); background-position: calc(100% - 13px) calc(12px * var(--ui, 1)), calc(100% - 8px) calc(12px * var(--ui, 1)); }
+/* A button that is working says so where the click landed. */
 .btn.busy { opacity: 0.7; pointer-events: none; }
+.btn.busy::after {
+  content: "";
+  width: 11px;
+  height: 11px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: var(--pill);
+  animation: spin 0.7s linear infinite;
+}
 
 /* Activity log */
 .msgs.log { gap: 0; }
