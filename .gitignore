@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.vite/
+*.local
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.*
+local-bridge/.venv/
+local-bridge/dist/
+local-bridge/src/ifcviewx/app/
+__pycache__/
+*.egg-info/
+*.ifc
+*.ifcx
+dev/

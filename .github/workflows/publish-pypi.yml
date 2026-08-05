@@ -1,0 +1,42 @@
+name: Publish ifcviewx to PyPI
+
+# Tag a release (git tag v0.1.0 && git push --tags) and this builds the viewer,
+# bundles it into the wheel, and publishes via PyPI trusted publishing (no API
+# key in the repo; add this workflow as a trusted publisher on pypi.org).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build && python -m build local-bridge
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: local-bridge/dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

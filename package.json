@@ -1,0 +1,23 @@
+{
+  "name": "ifc-viewer-browser",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Fast browser-based IFC viewer with Python (IfcOpenShell/Pyodide) editing, LLM assistance, and MCP bridge",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "three": "0.184.0",
+    "web-ifc": "0.0.77"
+  },
+  "devDependencies": {
+    "@types/three": "0.184.1",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0",
+    "vite-plugin-static-copy": "^2.2.0"
+  }
+}

@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>IFCViewX</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64' width='64' height='64' role='img' aria-label='IFCViewX'><rect x='0.00' y='0.00' width='64.00' height='64.00' rx='14.40' fill='%230f1115'/><polygon points='9.28%2C45.12 32.00%2C58.24 32.00%2C32.00 9.28%2C18.88' fill='%233b82f6'/><polygon points='54.72%2C45.12 32.00%2C58.24 32.00%2C32.00 54.72%2C18.88' fill='%231e5bd0'/><polygon points='32.00%2C5.76 54.72%2C18.88 32.00%2C32.00 9.28%2C18.88' fill='%2393b9fb'/><polyline points='54.72%2C32.00 32.00%2C45.12' stroke='%233b82f6' stroke-width='3.20' fill='none'/><polyline points='9.28%2C32.00 32.00%2C45.12' stroke='%2393b9fb' stroke-width='3.20' fill='none'/></svg>" />
+    <script>
+      document.documentElement.dataset.theme = localStorage.getItem("ifcviewx.theme") || "dark";
+    </script>
+    <style>
+      /* The brand lives here, not in styles.css, because the splash paints
+         before that stylesheet loads in dev. styles.css reads the same tokens
+         for the top bar and the dropzone, so the mark is drawn once and every
+         surface that shows it agrees. Regenerate with `python dev/make_logo.py`
+         and paste assets/logo/embed.txt over the three lines below. */
+      :root {
+        --brand-tile: #0f1115;
+        --mark: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64' width='64' height='64' role='img' aria-label='IFCViewX'><polygon points='9.28%2C45.12 32.00%2C58.24 32.00%2C32.00 9.28%2C18.88' fill='%233b82f6'/><polygon points='54.72%2C45.12 32.00%2C58.24 32.00%2C32.00 54.72%2C18.88' fill='%231e5bd0'/><polygon points='32.00%2C5.76 54.72%2C18.88 32.00%2C32.00 9.28%2C18.88' fill='%2393b9fb'/><polygon points='50.18%2C42.50 45.63%2C45.12 45.63%2C39.87 50.18%2C37.25' fill='%233b82f6'/><polygon points='13.82%2C42.50 18.37%2C45.12 18.37%2C39.87 13.82%2C37.25' fill='%2393b9fb'/><polygon points='41.09%2C47.74 36.54%2C50.37 36.54%2C45.12 41.09%2C42.50' fill='%233b82f6'/><polygon points='22.91%2C47.74 27.46%2C50.37 27.46%2C45.12 22.91%2C42.50' fill='%2393b9fb'/><polygon points='50.18%2C32.00 45.63%2C34.62 45.63%2C29.38 50.18%2C26.75' fill='%233b82f6'/><polygon points='13.82%2C32.00 18.37%2C34.62 18.37%2C29.38 13.82%2C26.75' fill='%2393b9fb'/><polygon points='41.09%2C37.25 36.54%2C39.87 36.54%2C34.62 41.09%2C32.00' fill='%233b82f6'/><polygon points='22.91%2C37.25 27.46%2C39.87 27.46%2C34.62 22.91%2C32.00' fill='%2393b9fb'/></svg>");
+        --mark-sm: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64' width='64' height='64' role='img' aria-label='IFCViewX'><polygon points='9.28%2C45.12 32.00%2C58.24 32.00%2C32.00 9.28%2C18.88' fill='%233b82f6'/><polygon points='54.72%2C45.12 32.00%2C58.24 32.00%2C32.00 54.72%2C18.88' fill='%231e5bd0'/><polygon points='32.00%2C5.76 54.72%2C18.88 32.00%2C32.00 9.28%2C18.88' fill='%2393b9fb'/><polyline points='54.72%2C32.00 32.00%2C45.12' stroke='%233b82f6' stroke-width='3.20' fill='none'/><polyline points='9.28%2C32.00 32.00%2C45.12' stroke='%2393b9fb' stroke-width='3.20' fill='none'/></svg>");
+      }
+      :root[data-theme="light"] { --brand-tile: #eef0f4; }
+
+      #splash {
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 22px;
+        background: #0b0c0e;
+        transition: opacity 0.2s ease;
+      }
+      :root[data-theme="light"] #splash { background: #fbfbfc; }
+      #splash.done { opacity: 0; pointer-events: none; }
+      .splash-mark {
+        width: 44px;
+        height: 44px;
+        border-radius: 10px;
+        background: var(--brand-tile) var(--mark) center / 100% no-repeat;
+      }
+      .splash-bar { width: 128px; height: 2px; border-radius: 2px; background: rgba(128, 128, 128, 0.22); overflow: hidden; }
+      .splash-bar i { display: block; width: 38%; height: 100%; background: #3b82f6; animation: sl 1s ease-in-out infinite alternate; }
+      @keyframes sl { from { transform: translateX(-60%); } to { transform: translateX(220%); } }
+      @media (prefers-reduced-motion: reduce) { .splash-bar i { animation: none; } #splash { transition: none; } }
+    </style>
+  </head>
+  <body>
+    <div id="splash" aria-hidden="true">
+      <div class="splash-mark"></div>
+      <div class="splash-bar"><i></i></div>
+    </div>
+
+    <div id="app">
+      <header id="topbar">
+        <nav id="ribbon-tabs" role="tablist"></nav>
+        <span class="grow"></span>
+        <span id="topbar-right"></span>
+      </header>
+      <div id="ribbon"></div>
+      <div id="pending-bar" class="hidden"></div>
+
+      <main id="workspace">
+        <aside id="outliner">
+          <div class="panel-head">
+            <div class="seg" id="outliner-switch"></div>
+            <span class="grow"></span>
+            <span id="outliner-actions"></span>
+          </div>
+          <div class="panel-body" id="pane-tree"></div>
+          <div class="panel-body hidden" id="pane-types"></div>
+          <div class="panel-body hidden" id="pane-summary"></div>
+        </aside>
+
+        <div id="viewer-host">
+          <div id="dropzone">
+            <div class="dz-card">
+              <div class="dz-mark"></div>
+              <h1 class="dz-title">IFCViewX</h1>
+              <p class="dz-sub">Fast, private IFC viewing. Files never leave this machine.</p>
+              <button id="btn-open-first" type="button" class="btn primary lg">Open IFC file</button>
+              <p class="dz-hint">or drop a file anywhere</p>
+              <div class="dz-recent hidden" id="recent">
+                <div class="dz-recent-title">Recent</div>
+                <div id="recent-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <aside id="inspector">
+          <div class="panel-head">
+            <span class="panel-title" id="inspector-title">Properties</span>
+            <span class="grow"></span>
+            <span id="inspector-actions"></span>
+          </div>
+          <div class="panel-body" id="tab-properties"></div>
+          <div class="panel-body hidden" id="tab-filters"></div>
+          <div class="panel-body hidden" id="tab-ids"></div>
+          <div class="panel-body hidden" id="tab-bcf"></div>
+          <div class="panel-body hidden" id="tab-assistant"></div>
+          <div class="panel-body hidden" id="tab-schedule"></div>
+          <div class="panel-body hidden" id="tab-plugins"></div>
+          <div class="panel-body hidden" id="tab-activity"></div>
+        </aside>
+
+        <nav id="rail" role="tablist" aria-label="Inspector panels"></nav>
+      </main>
+
+      <footer id="statusbar"></footer>
+    </div>
+
+    <dialog id="settings-dialog">
+      <div class="dlg-head"><span>Settings</span><button class="icon-btn dlg-x" id="settings-close" type="button" aria-label="Close"></button></div>
+      <div class="dlg-body">
+        <div class="group-title">Rendering</div>
+        <div class="field">
+          <span class="field-label">Render scale<span class="tip">Lower renders fewer pixels; higher sharpens edges.</span></span>
+          <select id="set-scale">
+            <option value="0.5">50%</option>
+            <option value="0.75">75%</option>
+            <option value="1" selected>100%</option>
+            <option value="1.5">150%</option>
+            <option value="2">200%</option>
+          </select>
+        </div>
+        <label class="field check"><input type="checkbox" id="set-adaptive" checked /><span class="field-label">Adaptive resolution<span class="tip">Drops resolution while orbiting heavy scenes.</span></span></label>
+        <label class="field check"><input type="checkbox" id="set-doubleside" checked /><span class="field-label">Double-sided surfaces<span class="tip">Turn off for roughly double the fill rate; some models show holes.</span></span></label>
+        <label class="field check"><input type="checkbox" id="set-aa" checked /><span class="field-label">Antialiasing<span class="tip">Applies after reload.</span></span></label>
+        <label class="field check"><input type="checkbox" id="set-hud" /><span class="field-label">Performance HUD<span class="tip">Live render cost, draw calls and load timings.</span></span></label>
+
+        <div class="group-title">Assistant</div>
+        <p class="note">Runs in this browser with your own key. Provider, model and what the assistant may do all live in its own settings.</p>
+        <div class="field">
+          <span class="field-label">Provider and model<span class="hint" id="llm-summary">Not configured yet.</span></span>
+          <button class="btn" id="open-assistant" type="button">Open assistant</button>
+        </div>
+
+        <div class="tier-split">
+          <span class="tier-title">Local Studio (a separate app)</span>
+          <span class="tier-note">Everything above works in the browser alone. Local Studio is its own install and adds what a tab cannot do.</span>
+        </div>
+        <div class="field">
+          <span class="field-label">This studio<span class="hint" id="service-state">Web Studio: everything happens in this tab. Local Studio is a separate app.</span></span>
+          <button class="btn" id="open-connection" type="button">What's the difference?</button>
+        </div>
+        <div class="tier-list">
+          <div>Native Python console with the full API and no 30 MB download</div>
+          <div>Convert to .ifcx, so reopening is instant</div>
+          <div>MCP bridge for AI clients</div>
+          <div>Assistant key held by the service, never by this page</div>
+        </div>
+        <label class="field check"><input type="checkbox" id="set-convert" checked /><span class="field-label">Offer conversion for heavy models<span class="tip">web-ifc draws every file here. On a large or brep-heavy model, IfcOpenShell converts it once to .ifcx through Local Studio and every reopen is instant.</span></span></label>
+        <p class="note">Viewing, checks, schedules, filters, IDS, issues and model edits all run in this tab and never need it.</p>
+      </div>
+      <div class="dlg-foot"><button class="btn primary" id="settings-done" type="button">Done</button></div>
+    </dialog>
+
+    <dialog id="help-dialog">
+      <div class="dlg-head"><span>Keyboard shortcuts</span><button class="icon-btn dlg-x" id="help-close" type="button" aria-label="Close"></button></div>
+      <div class="dlg-body keys">
+        <div class="key-cols">
+          <section>
+            <div class="group-title">Camera</div>
+            <div class="key-row"><span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd></span>Front, right, top, isometric</div>
+            <div class="key-row"><span><kbd>F</kbd></span>Frame model</div>
+            <div class="key-row"><span><kbd>Shift</kbd><kbd>F</kbd></span>Frame selection</div>
+            <div class="key-row"><span>Double click</span>Frame element</div>
+
+            <div class="group-title">Selection</div>
+            <div class="key-row"><span>Click</span>Select one element</div>
+            <div class="key-row"><span><kbd>Ctrl</kbd>click</span>Add or remove one</div>
+            <div class="key-row"><span><kbd>Shift</kbd>click</span>Select a range in the tree</div>
+            <div class="key-row"><span><kbd>I</kbd></span>Isolate selection</div>
+            <div class="key-row"><span><kbd>H</kbd></span>Hide selection</div>
+            <div class="key-row"><span><kbd>A</kbd></span>Show all</div>
+            <div class="key-row"><span><kbd>Esc</kbd></span>Clear selection, or drop the span then the measure tool</div>
+            <div class="key-row"><span>Right click</span>Element actions</div>
+          </section>
+          <section>
+            <div class="group-title">Tools</div>
+            <div class="key-row"><span><kbd>M</kbd></span>Measure: click twice or drag; right-drag orbits</div>
+            <div class="key-row"><span><kbd>X</kbd></span>Section planes (X, Y, Z)</div>
+            <div class="key-row"><span><kbd>G</kbd></span>2D plan inset</div>
+            <div class="key-row"><span><kbd>S</kbd></span>Screenshot</div>
+            <div class="key-row"><span><kbd>V</kbd></span>Save viewpoint</div>
+
+            <div class="group-title">Workspace</div>
+            <div class="key-row"><span><kbd>Ctrl</kbd><kbd>K</kbd></span>Command palette</div>
+            <div class="key-row"><span><kbd>Ctrl</kbd><kbd>O</kbd></span>Open file</div>
+            <div class="key-row"><span><kbd>Ctrl</kbd><kbd>F1</kbd></span>Collapse or pin the ribbon</div>
+            <div class="key-row"><span><kbd>P</kbd></span>Properties</div>
+            <div class="key-row"><span><kbd>R</kbd></span>Filters</div>
+            <div class="key-row"><span><kbd>C</kbd></span>Assistant</div>
+            <div class="key-row"><span><kbd>Y</kbd></span>Python console (plugin)</div>
+            <div class="key-row"><span><kbd>L</kbd></span>Activity log</div>
+            <div class="key-row"><span><kbd>Ctrl</kbd><kbd>B</kbd></span>Toggle structure panel</div>
+            <div class="key-row"><span><kbd>\</kbd></span>Toggle inspector</div>
+            <div class="key-row"><span><kbd>Ctrl</kbd><kbd>Z</kbd> <kbd>Ctrl</kbd><kbd>Y</kbd></span>Undo, redo</div>
+            <div class="key-row"><span><kbd>Ctrl</kbd><kbd>,</kbd></span>Settings</div>
+            <div class="key-row"><span><kbd>?</kbd></span>This help</div>
+          </section>
+        </div>
+      </div>
+      <div class="dlg-foot"><button class="btn primary" id="help-done" type="button">Close</button></div>
+    </dialog>
+
+    <input id="file-input" type="file" accept=".ifc,.ifcx" hidden />
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
