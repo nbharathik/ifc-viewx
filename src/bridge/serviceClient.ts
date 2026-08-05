@@ -157,7 +157,20 @@ export class ServiceClient {
     });
     if (res.status === 401) throw new Error("This tab's session token is stale; reload the page.");
     if (res.status === 429) throw new Error("Too many failed attempts; wait a moment and retry.");
-    return (await res.json()) as T;
+    // A gateway error page is not JSON, and a 4xx body that happens to parse
+    // would otherwise be handed back as if the call had succeeded.
+    let data: unknown;
+    try {
+      data = await res.json();
+    } catch {
+      throw new Error(`${path} answered HTTP ${res.status} with a body that is not JSON.`);
+    }
+    if (!res.ok) {
+      const detail = (data as { message?: string; error?: string } | null)?.message
+        ?? (data as { error?: string } | null)?.error;
+      throw new Error(detail ?? `${path} failed (HTTP ${res.status}).`);
+    }
+    return data as T;
   }
 
   /** Upload once per model; the service stores it by content hash. */
@@ -187,9 +200,18 @@ export class ServiceClient {
     });
     let url = started.url;
     if (started.jobId) {
+      // One dropped poll during a multi-minute conversion is not a failure;
+      // the job keeps running, so the client keeps asking for a while.
+      let misses = 0;
       for (;;) {
         await new Promise((r) => setTimeout(r, 700));
-        const res = await fetch(`${this.origin}/jobs/${started.jobId}`, { headers: this.headers() });
+        let res: Response;
+        try {
+          res = await fetch(`${this.origin}/jobs/${started.jobId}`, { headers: this.headers() });
+        } catch {
+          if (++misses > 8) throw new Error("Lost contact with the local service during conversion.");
+          continue;
+        }
         if (!res.ok) {
           throw new Error(
             res.status === 404
@@ -197,6 +219,7 @@ export class ServiceClient {
               : `Job status failed (HTTP ${res.status}).`,
           );
         }
+        misses = 0;
         const job = (await res.json()) as {
           status: string;
           url?: string;

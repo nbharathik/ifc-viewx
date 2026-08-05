@@ -189,6 +189,11 @@ export class IfcModel {
   }
 
   // -- property sets ---------------------------------------------------------
+  /** The property sets attached to one element, by express id. */
+  setsOf(expressID: number): number[] {
+    return this.propertyIndex().get(expressID) ?? [];
+  }
+
   private propertyIndex(): Map<number, number[]> {
     if (this.psetIndex) return this.psetIndex;
     const map = new Map<number, number[]>();

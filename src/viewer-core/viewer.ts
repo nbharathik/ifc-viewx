@@ -123,6 +123,8 @@ export interface Viewer {
   warmup(): void;
   /** Cancel the in-flight load, if any. */
   cancelLoad(): void;
+  /** Drop the model on screen and every state derived from it. */
+  unload(options?: { keepError?: boolean }): void;
   getStats(): ModelStats | null;
   /** Entity counts per IFC class, computed on first call and then cached. */
   getCountsByType(): Promise<Record<string, number>>;
@@ -426,6 +428,8 @@ class ViewerImpl implements Viewer {
    */
   private ensureInit(): Promise<AsyncIfcEngine> {
     if (!this.initialized) {
+      // A rejected promise left in this slot would brick every later load with
+      // the same stale error, so a failed boot is forgotten and can be retried.
       this.initialized = (async () => {
         let engine: AsyncIfcEngine | null = null;
         const workerOpts = this.options.worker;
@@ -454,7 +458,10 @@ class ViewerImpl implements Viewer {
         }
         this.engine = new CachedEngine(engine);
         return this.engine;
-      })();
+      })().catch((err: unknown) => {
+        this.initialized = null;
+        throw err;
+      });
     }
     return this.initialized;
   }
@@ -605,6 +612,51 @@ class ViewerImpl implements Viewer {
     if (this.loading) this.engine?.cancel();
   }
 
+  /**
+   * Everything the load prologue resets, without a model to put back. The
+   * parser engine stays warm, so the next open is still a fast one, and the
+   * model-loaded listeners fire so panels rebuild from an empty viewer.
+   */
+  unload(options: { keepError?: boolean } = {}): void {
+    this.loadToken += 1;
+    if (this.loading) this.engine?.cancel();
+    this.loading = false;
+    this.ready = false;
+    // A failed load unloads too, and its own card is the only explanation.
+    if (!options.keepError) this.errorCard.hide();
+    this.loadingOverlay?.hide();
+    this.scene.setHighlighted([]);
+    this.scene.clearModel();
+    if (this.currentModelID !== null) {
+      this.engine?.dispose(this.currentModelID);
+      this.currentModelID = null;
+    }
+    if (this.selection.size) {
+      this.selection.clear();
+      this.primary = null;
+      this.emitSelection();
+    }
+    this.rules = [];
+    this.hiddenIds.clear();
+    this.loadedCategories.clear();
+    this.cachedTree = null;
+    this.nodeIndex = null;
+    this.subtreeCache.clear();
+    this.propsCache.clear();
+    this.stats = null;
+    this.timeline = null;
+    if (this.sections.length) {
+      this.sections = [];
+      this.emitSection();
+    }
+    this.setPlanView(false);
+    this.setMeasuring(false);
+    this.resetMeasure();
+    this.syncMeasureOverlay();
+    for (const listener of this.modelLoadedListeners) listener();
+    this.commitVisibility();
+  }
+
   getStats(): ModelStats | null {
     return this.stats;
   }
@@ -612,7 +664,11 @@ class ViewerImpl implements Viewer {
   async getCountsByType(): Promise<Record<string, number>> {
     if (this.stats?.countsByType) return this.stats.countsByType;
     if (this.currentModelID === null || !this.engine) return {};
+    const token = this.loadToken;
     const counts = await this.engine.getCountsByType(this.currentModelID);
+    // Counts for the model that was open when this started say nothing about
+    // the one that replaced it while it ran.
+    if (token !== this.loadToken) return {};
     if (this.stats) this.stats.countsByType = counts;
     return counts;
   }
@@ -635,12 +691,16 @@ class ViewerImpl implements Viewer {
     if (this.currentModelID === null || !this.engine) return null;
     const hit = this.propsCache.get(expressID);
     if (hit !== undefined) return hit;
+    const token = this.loadToken;
     let props: ItemProperties | null;
     try {
       props = await this.engine.getItemProperties(this.currentModelID, expressID);
     } catch {
       props = null;
     }
+    // A request issued against the previous model resolves after the switch;
+    // caching it would answer for an id that belongs to a different file now.
+    if (token !== this.loadToken) return null;
     if (this.propsCache.size >= PROPS_CACHE_SIZE) {
       this.propsCache.delete(this.propsCache.keys().next().value as number);
     }
@@ -913,15 +973,21 @@ class ViewerImpl implements Viewer {
     // stream in behind it.
     this.scene.setCategoryVisible(category, visible);
     if (visible && !this.loadedCategories.has(category)) {
+      const token = this.loadToken;
       this.loadedCategories.add(category);
       try {
         await this.engine.loadCategory(this.currentModelID, category, (meshes) => {
-          this.scene.addMeshes(meshes);
+          // A model switch mid-stream would otherwise pour the old model's
+          // spaces into the new model's batcher.
+          if (token === this.loadToken) this.scene.addMeshes(meshes);
         });
       } catch (err) {
         this.loadedCategories.delete(category);
         throw err;
       }
+      if (token !== this.loadToken) return;
+      // Subtree lists computed before these arrived are short by exactly them.
+      this.subtreeCache.clear();
     }
     this.applyVisibility();
   }
@@ -1315,7 +1381,8 @@ class ViewerImpl implements Viewer {
       a.href = url;
       a.download = `ifcviewx-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.png`;
       a.click();
-      URL.revokeObjectURL(url);
+      // Revoking in the same task cancels the download on some browsers.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     });
   }
 

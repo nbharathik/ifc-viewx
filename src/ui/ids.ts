@@ -63,10 +63,14 @@ const children = (node: Element, name: string): Element[] =>
   [...node.children].filter((item) => item.localName === name);
 const attribute = (node: Element, name: string): string => node.getAttribute(name) ?? "";
 
-/** Never-matching pattern for regexes IDS allows but JavaScript rejects. */
+/**
+ * Never-matching pattern for regexes IDS allows but JavaScript rejects. XSD
+ * patterns are case sensitive, so a case-insensitive flag would accept values
+ * the specification forbids.
+ */
 function regex(source: string): RegExp {
   try {
-    return new RegExp(`^(?:${source})$`, "i");
+    return new RegExp(`^(?:${source})$`);
   } catch {
     return /$^/;
   }
@@ -366,11 +370,13 @@ export class IdsPanel {
     let failedSpecs = 0;
     let applicable = 0;
     let unreadable = 0;
+    let capped = 0;
     try {
       await runIds(
         this.actions.viewer,
         (result) => {
           if (result.failures.length) failedSpecs++;
+          if (result.truncated) capped++;
           applicable += result.applicable;
           unreadable += result.unreadable;
           this.results.appendChild(this.renderResult(result));
@@ -386,20 +392,29 @@ export class IdsPanel {
     // A geometry-only file would otherwise pass everything for the wrong reason.
     const blind = applicable === 0 && unreadable > 0;
     const total = document_.specs.length;
+    // A capped scan has not seen the whole model, so "pass" would be a claim
+    // the run never earned.
+    const cap = capped ? ` · ${capped} capped, so not every element was checked` : "";
     const outcome = blind
       ? "Nothing could be read from this file. Open the .ifc rather than the converted .ifcx."
       : failedSpecs
-        ? `${failedSpecs} of ${total} specifications have failures`
-        : `All ${total} specifications pass`;
+        ? `${failedSpecs} of ${total} specifications have failures${cap}`
+        : capped
+          ? `No failures found, but ${capped} of ${total} specifications were capped before the end`
+          : `All ${total} specifications pass`;
     this.say(outcome);
     this.status.classList.toggle("error", blind);
-    this.actions.log(outcome, failedSpecs || blind ? "error" : "success");
+    this.actions.log(outcome, failedSpecs || blind ? "error" : capped ? "info" : "success");
   }
 
   private renderResult(result: SpecResult): HTMLElement {
     const { spec } = result;
     const failed = result.failures.length;
-    const severity = failed ? "err" : result.applicable === 0 ? "muted" : "ok";
+    // A spec whose requirements are all facet kinds this checker does not
+    // implement has not passed; nothing about it was tested.
+    const untested =
+      spec.requirements.length > 0 && spec.requirements.every((facet) => !facet.supported);
+    const severity = failed ? "err" : result.applicable === 0 || untested || result.truncated ? "muted" : "ok";
     const head = h("button", { class: "spec-head", type: "button", "aria-expanded": "false" }, [
       h("span", { class: `dot ${severity}` }),
       h("span", { class: "grow", text: spec.name, title: spec.description || spec.name }),
@@ -417,6 +432,11 @@ export class IdsPanel {
     if (unchecked.length) {
       body.appendChild(
         h("div", { class: "note", text: `Not checked here: ${[...new Set(unchecked.map((facet) => facet.kind))].join(", ")}` }),
+      );
+    }
+    if (untested) {
+      body.appendChild(
+        h("div", { class: "note", text: "Nothing in this specification could be checked, so the count is not a pass." }),
       );
     }
     if (result.truncated) {

@@ -43,7 +43,11 @@ const cells = (line: string): string[] =>
 export function codeBlock(code: string, lang = ""): HTMLElement {
   const copy = h("button", { class: "icon-btn sm ghost", type: "button", title: "Copy" }, [icon("copy")]);
   copy.addEventListener("click", () => {
-    void navigator.clipboard?.writeText(code).then(() => toast("Copied", "success"));
+    if (!navigator.clipboard) return toast("The browser blocked the clipboard", "error");
+    void navigator.clipboard
+      .writeText(code)
+      .then(() => toast("Copied", "success"))
+      .catch(() => toast("The browser blocked the clipboard", "error"));
   });
   // With no language there is nothing to label, so the button floats in the
   // corner rather than reserving a strip of its own.

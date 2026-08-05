@@ -166,11 +166,16 @@ export class Shell {
     const rail = $("rail");
     for (const tab of TABS) {
       const badge = h("span", { class: "tab-badge hidden" });
+      const first = tab.id === "properties";
       const button = h("button", {
-        class: `rail-btn${tab.id === "properties" ? " active" : ""}`,
+        class: `rail-btn${first ? " active" : ""}`,
+        id: `rail-${tab.id}`,
         type: "button",
         role: "tab",
-        "aria-selected": String(tab.id === "properties"),
+        "aria-selected": String(first),
+        "aria-controls": `tab-${tab.id}`,
+        // Roving focus: one stop for the whole rail, arrows walk it.
+        tabindex: first ? "0" : "-1",
         title: tab.key ? `${tab.label}  ${tab.key}` : tab.label,
         "aria-label": tab.label,
       }, [icon(tab.icon, 16), badge]);
@@ -179,10 +184,27 @@ export class Shell {
         if (this.activeTab === tab.id && this.isPanelOpen("inspector")) this.togglePanel("inspector");
         else this.selectTab(tab.id);
       });
+      button.addEventListener("keydown", (e) => this.railKey(e));
       this.tabButtons.set(tab.id, button);
       this.tabBadges.set(tab.id, badge);
       rail.appendChild(button);
     }
+  }
+
+  /** Arrow keys walk the rail, Home and End jump to its ends. */
+  private railKey(e: KeyboardEvent): void {
+    const order = TABS.map((tab) => tab.id);
+    const at = order.indexOf(this.activeTab);
+    const next =
+      e.key === "ArrowDown" || e.key === "ArrowRight" ? (at + 1) % order.length
+      : e.key === "ArrowUp" || e.key === "ArrowLeft" ? (at - 1 + order.length) % order.length
+      : e.key === "Home" ? 0
+      : e.key === "End" ? order.length - 1
+      : -1;
+    if (next < 0) return;
+    e.preventDefault();
+    this.selectTab(order[next]);
+    this.tabButtons.get(order[next])?.focus();
   }
 
   // -- state ----------------------------------------------------------------
@@ -194,13 +216,22 @@ export class Shell {
     for (const [id, button] of this.tabButtons) {
       button.classList.toggle("active", id === tab);
       button.setAttribute("aria-selected", String(id === tab));
+      button.tabIndex = id === tab ? 0 : -1;
     }
     for (const item of TABS) this.panes.get(item.id)?.classList.toggle("hidden", item.id !== tab);
-    if (tab === "activity") this.setTabBadge("activity", 0);
+    if (tab === "activity") {
+      this.activityCount = 0;
+      this.setTabBadge("activity", 0);
+    }
     if (!this.mounted.has(tab)) {
       this.mounted.add(tab);
       this.actions.tabShown(tab);
     }
+  }
+
+  /** A panel whose lazy build failed is not mounted, so it can be retried. */
+  unmount(tab: TabId): void {
+    this.mounted.delete(tab);
   }
 
   setOutlinerPane(pane: PaneId): void {
@@ -296,16 +327,19 @@ export class Shell {
   log(message: string, kind: "info" | "success" | "error" = "info", notify = false): void {
     const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     const mark = { info: "info", success: "check-circle", error: "alert" }[kind];
+    const list = this.activityList;
+    // Follow the tail only when the reader is already at it.
+    const follow = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
     this.activityEmpty.classList.add("hidden");
-    this.activityList.classList.remove("hidden");
-    this.activityList.appendChild(
+    list.classList.remove("hidden");
+    list.appendChild(
       h("div", { class: `log-row ${kind}` }, [
         icon(mark, 12),
         h("span", { class: "grow", text: message }),
         h("span", { class: "time", text: time }),
       ]),
     );
-    this.activityList.scrollTop = this.activityList.scrollHeight;
+    if (follow) list.scrollTop = list.scrollHeight;
     if (this.activeTab !== "activity") this.setTabBadge("activity", ++this.activityCount);
     if (notify) toast(message, kind);
   }

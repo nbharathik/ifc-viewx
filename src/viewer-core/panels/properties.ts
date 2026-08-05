@@ -6,13 +6,18 @@ import { ensurePanelStyles } from './styles.js';
 
 const INFO_ICON =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="7.8" r="1" fill="currentColor" stroke="none"/></svg>';
+const COPY_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>';
 
 /** Long IFC floats are unreadable; keep the exact value in the title. */
 function formatNumber(value: number): string {
   if (Number.isInteger(value)) return value.toLocaleString();
   const abs = Math.abs(value);
   const digits = abs >= 100 ? 2 : abs >= 1 ? 3 : 4;
-  return Number(value.toFixed(digits)).toLocaleString(undefined, { maximumFractionDigits: digits });
+  const rounded = Number(value.toFixed(digits));
+  // A quantity smaller than the rounding step is not zero; say what it is.
+  if (rounded === 0) return value.toExponential(2);
+  return rounded.toLocaleString(undefined, { maximumFractionDigits: digits });
 }
 
 function formatValue(value: IfcProperty['value']): { text: string; isNull: boolean } {
@@ -96,12 +101,18 @@ export class PropertiesPanel {
       return;
     }
 
+    // The worker takes a moment on a heavy model, and leaving the previous
+    // element's values up meanwhile reads as if they belonged to this one.
+    const pending = setTimeout(() => {
+      if (seq === this.renderSeq) this.body.replaceChildren(this.empty('Reading properties'));
+    }, 120);
     let props: ItemProperties | null;
     try {
       props = await this.source.getProperties(expressID);
     } catch {
       props = null;
     }
+    clearTimeout(pending);
     if (seq !== this.renderSeq) return; // a newer selection superseded this one
 
     if (!props) {
@@ -207,17 +218,32 @@ export class PropertiesPanel {
       val.textContent = text;
       if (isNull) {
         val.classList.add('ifc-null');
+        line.append(key, val);
       } else {
         const exact = String(row.value);
-        val.title = exact === text ? 'Click to copy' : `${exact}\nClick to copy`;
-        val.addEventListener('click', () => {
-          void navigator.clipboard?.writeText(exact).then(() => {
-            val.textContent = 'Copied';
-            setTimeout(() => (val.textContent = text), 700);
-          });
+        val.title = exact === text ? row.name : exact;
+        // A copy button rather than a clickable cell: the cell has to stay
+        // selectable, and overwriting it with "Copied" destroyed what was read.
+        const copy = doc.createElement('button');
+        copy.type = 'button';
+        copy.className = 'ifc-copy';
+        copy.title = `Copy ${row.name}`;
+        copy.setAttribute('aria-label', `Copy ${row.name}`);
+        copy.innerHTML = COPY_ICON;
+        copy.addEventListener('click', () => {
+          const done = (ok: boolean): void => {
+            copy.classList.toggle('ifc-copy--ok', ok);
+            copy.title = ok ? 'Copied' : 'The browser blocked the clipboard';
+            setTimeout(() => {
+              copy.classList.remove('ifc-copy--ok');
+              copy.title = `Copy ${row.name}`;
+            }, 900);
+          };
+          if (!navigator.clipboard) return done(false);
+          void navigator.clipboard.writeText(exact).then(() => done(true), () => done(false));
         });
+        line.append(key, val, copy);
       }
-      line.append(key, val);
       section.appendChild(line);
     }
     return section;

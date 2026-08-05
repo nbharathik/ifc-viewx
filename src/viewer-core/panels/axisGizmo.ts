@@ -222,6 +222,9 @@ export class AxisGizmo {
 
     if (this.frame) cancelAnimationFrame(this.frame);
     this.frame = 0;
+    // The pose left over from the last snap is not this snap's starting point,
+    // and comparing against it would abort the flight on its first frame.
+    this.expected = null;
     const angle = Math.acos(Math.max(-1, Math.min(1, vx * dir[0] + vy * dir[1] + vz * dir[2])));
     const still = this.canvas.ownerDocument.defaultView?.matchMedia(
       '(prefers-reduced-motion: reduce)',

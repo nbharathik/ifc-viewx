@@ -291,7 +291,7 @@ class ModelStore {
       void this.touch(sha);
       return { manifest, file, end };
     } catch {
-      if (exists) void this.remove(sha);
+      if (exists) void this.removeContainer(sha);
       return null;
     }
   }
@@ -315,7 +315,7 @@ class ModelStore {
           await this.touch(sha, bytes);
           await this.evict();
         } else {
-          await this.remove(sha);
+          await this.removeContainer(sha);
         }
       });
     } catch {
@@ -380,11 +380,26 @@ class ModelStore {
     }
   }
 
-  private async remove(sha: string): Promise<void> {
-    await this.removeFiles(sha);
+  /**
+   * Drop only the parsed container. The gzipped source is what backs the
+   * recent-models list, so a failed or corrupt container write must not take
+   * the model out of Recent along with it.
+   */
+  private async removeContainer(sha: string): Promise<void> {
+    try {
+      await this.dir.removeEntry(`${sha}.ifcx`);
+    } catch {
+      // already gone
+    }
+    let orphan = false;
     await this.mutateIndex((index) => {
-      delete index[sha];
+      const entry = index[sha];
+      if (!entry) return;
+      if (entry.name) entry.bytes = 0;
+      else orphan = true;
+      if (orphan) delete index[sha];
     });
+    if (orphan) await this.removeFiles(sha);
   }
 
   async list(): Promise<CachedModel[]> {

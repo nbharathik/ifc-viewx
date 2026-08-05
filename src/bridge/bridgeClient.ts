@@ -10,6 +10,8 @@ export interface BridgeClientOptions {
 }
 
 const DEFAULT_URL = "ws://127.0.0.1:8765";
+/** Comfortably inside the service's own websocket frame limit. */
+const MAX_FRAME_CHARS = 8e6;
 
 export class BridgeClient {
   private ws: WebSocket | null = null;
@@ -57,17 +59,30 @@ export class BridgeClient {
     }
     if (msg.id === undefined || !msg.method) return;
     const handler = this.handlers.get(msg.method);
+    // The socket can close while a handler runs, and send() on a closed socket
+    // throws straight past the catch that is meant to report the failure.
+    const reply = (payload: unknown): void => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      try {
+        ws.send(JSON.stringify(payload));
+      } catch {
+        // Nothing left to answer on.
+      }
+    };
     try {
       if (!handler) throw new Error(`unknown method: ${msg.method}`);
       const result = await handler(msg.params ?? {});
-      ws.send(JSON.stringify({ id: msg.id, result: result ?? null }));
+      const body = JSON.stringify({ id: msg.id, result: result ?? null });
+      // A whole spatial tree can outrun the service's frame limit, and a frame
+      // that never arrives reads as a hang rather than as a size problem.
+      if (body.length > MAX_FRAME_CHARS) {
+        throw new Error(
+          `result is ${(body.length / 1e6).toFixed(1)} MB, over the ${MAX_FRAME_CHARS / 1e6} MB frame limit; ask for a narrower slice`,
+        );
+      }
+      reply({ id: msg.id, result: result ?? null });
     } catch (err) {
-      ws.send(
-        JSON.stringify({
-          id: msg.id,
-          error: err instanceof Error ? err.message : String(err),
-        }),
-      );
+      reply({ id: msg.id, error: err instanceof Error ? err.message : String(err) });
     }
   }
 

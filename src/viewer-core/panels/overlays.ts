@@ -131,7 +131,15 @@ export class ErrorCard {
     this.message.className = 'ifc-error-message';
     this.message.setAttribute('data-testid', 'error-message');
 
-    card.append(title, this.message);
+    // Without a way out, a failed load parks a card over the viewport for the
+    // rest of the session: hide() is otherwise only reached by the next load.
+    const dismiss = doc.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'ifc-error-close';
+    dismiss.textContent = 'Dismiss';
+    dismiss.addEventListener('click', () => this.hide());
+
+    card.append(title, this.message, dismiss);
     this.root.appendChild(card);
     container.appendChild(this.root);
   }

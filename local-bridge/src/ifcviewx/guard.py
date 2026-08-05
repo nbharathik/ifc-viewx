@@ -59,6 +59,9 @@ DUNDER_TEXT = re.compile(r"^__\w+__$")
 #: str.format resolves attributes at the C level, past the runtime getattr
 #: guard, so the only place to stop it is the source.
 FORMAT_DUNDER = re.compile(r"\{[^{}]*\.__")
+#: Callables that resolve an attribute name in C, past `_safe_getattr`. Without
+#: these, `attrgetter("__cla" + "ss__")` walks straight out of the sandbox.
+DENIED_ATTRS = frozenset({"attrgetter", "methodcaller", "Formatter", "format_map", "write"})
 MAX_CODE_CHARS = 100_000
 
 
@@ -92,6 +95,8 @@ class _Walker(ast.NodeVisitor):
     def visit_Name(self, node: ast.Name) -> None:
         if node.id in DENIED_NAMES:
             self.fail(f"{node.id}() is not allowed")
+        elif node.id in DENIED_ATTRS:
+            self.fail(f'"{node.id}" is not allowed')
         elif _is_dunder(node.id):
             self.fail(f'"{node.id}" is not allowed')
         self.generic_visit(node)
@@ -99,13 +104,21 @@ class _Walker(ast.NodeVisitor):
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if _is_dunder(node.attr):
             self.fail(f'access to "{node.attr}" is not allowed')
+        elif node.attr in DENIED_ATTRS:
+            # write() reaches the filesystem through C++, under the audit hook
+            # rather than through it. The service saves the edit for you.
+            self.fail(f'access to "{node.attr}" is not allowed')
         self.generic_visit(node)
 
     def visit_Constant(self, node: ast.Constant) -> None:
-        # Blocks getattr(obj, "__class__") and dict-key escapes alike.
+        # Blocks getattr(obj, "__class__") and dict-key escapes alike. The test
+        # is "contains", not "is": `"__cla" + "ss__"` is two harmless-looking
+        # literals that the compiler joins into a dunder the guard never sees.
         if isinstance(node.value, str):
             if DUNDER_TEXT.match(node.value):
                 self.fail(f'the name "{node.value}" is not allowed')
+            elif "__" in node.value:
+                self.fail('a string holding "__" is not allowed')
             elif FORMAT_DUNDER.search(node.value):
                 self.fail('reaching a "__" attribute through a format string is not allowed')
         self.generic_visit(node)

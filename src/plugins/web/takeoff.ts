@@ -51,7 +51,7 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
       button("CSV", () => exportCsv()),
       button("Copy", () => (rows.length ? copyTable(REPORT, reportRows()) : api.log("Nothing to copy yet", "error"))),
     ),
-    hint("info", "Volumes and areas come from the file's quantity sets. Elements without them fall back to their bounding box, which the coverage column reports."),
+    hint("info", "Volume, area and length are the file's own authored quantities, in the file's own units. Box m³ is measured from the geometry instead, and Coverage says how much of the row is authored."),
     status.root,
     summary,
     table,

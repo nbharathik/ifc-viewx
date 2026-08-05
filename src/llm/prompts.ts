@@ -95,7 +95,13 @@ export function extractCode(reply: string): ExtractedCode | null {
 
   const python = /```python[ \t]*(query|edit)?\s*\n([\s\S]*?)```/.exec(reply);
   if (python) {
-    const kind = python[1] === "edit" || /def\s+edit\s*\(/.test(python[2]) ? "edit" : "query";
+    // An explicit label wins: a read-only script that happens to define an
+    // edit() helper is still the query the model said it was.
+    const kind =
+      python[1] === "edit" ? "edit"
+      : python[1] === "query" ? "query"
+      : /def\s+edit\s*\(/.test(python[2]) ? "edit"
+      : "query";
     found.push({ at: python.index, block: { code: python[2].trim(), kind } });
   }
 
@@ -115,7 +121,9 @@ export function extractCode(reply: string): ExtractedCode | null {
  * print the same JSON twice.
  */
 export function stripBlock(reply: string, code: string): string {
+  // The info string is whatever the model wrote on the fence line, hyphens and
+  // all: a narrower class would skip that opener and pair the fences off by one.
   return reply
-    .replace(/```[\w ]*\n([\s\S]*?)```/g, (whole, body: string) => (body.trim() === code ? "" : whole))
+    .replace(/```[^\n]*\n([\s\S]*?)```/g, (whole, body: string) => (body.trim() === code ? "" : whole))
     .trim();
 }

@@ -115,41 +115,46 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
           new Worker(new URL("../../viewer-core/engine/worker.entry.ts", import.meta.url), { type: "module" }),
       },
     });
-    await engine.init();
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const meta = await engine.loadModel({ kind: "bytes", bytes }, { skipGeometry: true });
-    const elements: Array<{ id: number; type: string; name: string; storey: string }> = [];
-    walk(meta.tree, "", elements);
+    // A parse failure used to leave this worker alive with the whole model in
+    // it, so the teardown is on every exit rather than on the happy path.
+    try {
+      await engine.init();
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const meta = await engine.loadModel({ kind: "bytes", bytes }, { skipGeometry: true });
+      const elements: Array<{ id: number; type: string; name: string; storey: string }> = [];
+      walk(meta.tree, "", elements);
 
-    const out = new Map<string, Snapshot>();
-    let done = 0;
-    let next = 0;
-    const pump = async (): Promise<void> => {
-      for (;;) {
-        const at = next++;
-        if (at >= elements.length) return;
-        const element = elements[at];
-        const properties = await engine?.getItemProperties(meta.modelID, element.id).catch(() => null);
-        done += 1;
-        if (done % 25 === 0 || done === elements.length) onProgress(done, elements.length);
-        if (!properties) continue;
-        const values: Record<string, Value> = {};
-        let globalId = "";
-        for (const attribute of properties.attributes) {
-          if (attribute.name === "GlobalId") globalId = String(attribute.value ?? "");
-          if (!IGNORED.has(attribute.name)) values[attribute.name] = attribute.value;
+      const out = new Map<string, Snapshot>();
+      let done = 0;
+      let next = 0;
+      const pump = async (): Promise<void> => {
+        for (;;) {
+          const at = next++;
+          if (at >= elements.length) return;
+          const element = elements[at];
+          const properties = await engine?.getItemProperties(meta.modelID, element.id).catch(() => null);
+          done += 1;
+          if (done % 25 === 0 || done === elements.length) onProgress(done, elements.length);
+          if (!properties) continue;
+          const values: Record<string, Value> = {};
+          let globalId = "";
+          for (const attribute of properties.attributes) {
+            if (attribute.name === "GlobalId") globalId = String(attribute.value ?? "");
+            if (!IGNORED.has(attribute.name)) values[attribute.name] = attribute.value;
+          }
+          for (const set of properties.psets) {
+            for (const property of set.properties) values[`${set.name}.${property.name}`] = property.value;
+          }
+          if (globalId) out.set(globalId, { type: element.type, name: element.name, storey: element.storey, values });
         }
-        for (const set of properties.psets) {
-          for (const property of set.properties) values[`${set.name}.${property.name}`] = property.value;
-        }
-        if (globalId) out.set(globalId, { type: element.type, name: element.name, storey: element.storey, values });
-      }
-    };
-    await Promise.all(Array.from({ length: Math.max(1, Math.min(WINDOW, elements.length)) }, pump));
-    engine.dispose(meta.modelID);
-    engine.terminate();
-    engine = null;
-    return out;
+      };
+      await Promise.all(Array.from({ length: Math.max(1, Math.min(WINDOW, elements.length)) }, pump));
+      engine.dispose(meta.modelID);
+      return out;
+    } finally {
+      engine?.terminate();
+      engine = null;
+    }
   };
 
   const diff = (current: ElementRow[], baseline: Map<string, Snapshot>): void => {

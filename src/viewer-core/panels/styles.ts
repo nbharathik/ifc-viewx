@@ -158,14 +158,20 @@ const CSS = `
   flex: 0 0 auto;
   cursor: pointer;
   opacity: 0;
+  /* An opacity-0 element still takes the tap: on a touch screen that is an
+     invisible control that hides geometry. */
+  pointer-events: none;
   display: inline-flex;
   align-items: center;
   color: var(--ifc-fg-3, #a5adbc);
 }
 .ifc-tree-eye svg { width: 13px; height: 13px; display: block; }
-.ifc-tree-row:hover .ifc-tree-eye { opacity: 0.85; }
+.ifc-tree-row:hover .ifc-tree-eye, .ifc-tree-row--selected .ifc-tree-eye { opacity: 0.85; pointer-events: auto; }
+@media (hover: none) {
+  .ifc-tree-eye { opacity: 0.6; pointer-events: auto; }
+}
 .ifc-tree-eye:hover { color: var(--ifc-fg, #f4f6f9); opacity: 1; }
-.ifc-tree-row--hidden .ifc-tree-eye { opacity: 0.85; }
+.ifc-tree-row--hidden .ifc-tree-eye { opacity: 0.85; pointer-events: auto; }
 .ifc-tree-row--hidden .ifc-tree-label { opacity: 0.6; }
 /* Names win the space fight in a narrow panel; the type stays in Properties. */
 @container (max-width: 240px) {
@@ -232,8 +238,9 @@ const CSS = `
 }
 .ifc-row {
   display: grid;
-  grid-template-columns: minmax(0, 40%) minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: minmax(0, 40%) minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
   padding: 3px 4px;
   border-radius: var(--ifc-radius, 4px);
 }
@@ -243,14 +250,33 @@ const CSS = `
   color: var(--ifc-fg, #f4f6f9);
   word-break: break-word;
   font-variant-numeric: tabular-nums;
-  cursor: copy;
 }
-.ifc-null { color: var(--ifc-fg-3, #a5adbc); opacity: 0.78; cursor: default; }
+.ifc-null { color: var(--ifc-fg-3, #a5adbc); opacity: 0.78; grid-column: 2 / span 2; }
+/* Copy is a control of its own so the value stays selectable text. */
+.ifc-copy {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--ifc-radius, 4px);
+  background: none;
+  color: var(--ifc-fg-3, #a5adbc);
+  cursor: pointer;
+  opacity: 0;
+}
+.ifc-copy svg { width: 12px; height: 12px; }
+.ifc-row:hover .ifc-copy, .ifc-copy:focus-visible { opacity: 1; }
+.ifc-copy:hover { color: var(--ifc-fg, #f4f6f9); background: var(--ifc-hover, rgba(255, 255, 255, 0.05)); }
+.ifc-copy--ok { opacity: 1; color: #4ade80; }
 
-/* Measure + section handles */
-.ifc-measuring canvas { cursor: crosshair; }
-.ifc-over-handle canvas { cursor: grab; }
-.ifc-dragging-section canvas { cursor: grabbing; }
+/* Measure + section handles. Scoped to the render surface: the axis gizmo is
+   a sibling canvas in the same container and must keep its own cursor. */
+.ifc-measuring > canvas:first-of-type { cursor: crosshair; }
+.ifc-over-handle > canvas:first-of-type { cursor: grab; }
+.ifc-dragging-section > canvas:first-of-type { cursor: grabbing; }
 /* One number over the middle of the span. Everything else about the
    measurement lives in the panel, where it does not sit on the model. */
 .ifc-measure-label {
@@ -364,6 +390,9 @@ const CSS = `
 .ifc-error-card {
   pointer-events: auto;
   max-width: 440px;
+  /* A long parser message must stay readable rather than grow past the view. */
+  max-height: calc(100% - 32px);
+  overflow-y: auto;
   background: var(--ifc-surface, #171a20);
   border: 1px solid var(--ifc-err, #f87171);
   border-radius: 10px;
@@ -372,6 +401,18 @@ const CSS = `
 }
 .ifc-error-title { font-weight: 600; margin-bottom: 6px; color: var(--ifc-err, #f87171); }
 .ifc-error-message { font-size: calc(11.5px * var(--ui, 1)); white-space: pre-wrap; word-break: break-word; color: var(--ifc-fg-2, #cbd1dc); }
+.ifc-error-close {
+  margin-top: 12px;
+  padding: 5px 12px;
+  border: 1px solid var(--ifc-line, #23272f);
+  border-radius: var(--ifc-radius, 4px);
+  background: none;
+  color: var(--ifc-fg-2, #cbd1dc);
+  font: inherit;
+  font-size: calc(11.5px * var(--ui, 1));
+  cursor: pointer;
+}
+.ifc-error-close:hover { background: var(--ifc-hover, rgba(255, 255, 255, 0.05)); color: var(--ifc-fg, #f4f6f9); }
 
 /* Orientation gizmo: 2D canvas, so only its frame is styled here. */
 .ifc-axis-gizmo {
@@ -401,6 +442,9 @@ const CSS = `
   font-family: var(--ifc-mono, monospace);
   font-size: calc(10.5px * var(--ui, 1));
   font-variant-numeric: tabular-nums;
+  /* A readout, not a surface: a drag that starts here should still orbit. */
+  pointer-events: none;
+  user-select: none;
   z-index: 7;
 }
 .ifc-perf--visible { display: block; }

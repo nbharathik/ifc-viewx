@@ -37,7 +37,11 @@ export interface ToolCallView {
 /** Copy-to-clipboard affordance shared by messages and the escalation card. */
 function copyButton(read: () => string): HTMLButtonElement {
   return iconButton("copy", "Copy", () => {
-    void navigator.clipboard?.writeText(read()).then(() => toast("Copied", "success"));
+    if (!navigator.clipboard) return toast("The browser blocked the clipboard", "error");
+    void navigator.clipboard
+      .writeText(read())
+      .then(() => toast("Copied", "success"))
+      .catch(() => toast("The browser blocked the clipboard", "error"));
   }, "icon-btn sm ghost");
 }
 
@@ -51,12 +55,14 @@ export interface EscalationActions {
 export interface AssistantCallbacks extends EscalationActions {
   onSend(text: string): void;
   onNewChat(): void;
+  /** Abandon the turn in flight; the panel goes back to accepting input. */
+  onStop(): void;
   /** The provider, model or mode changed: whoever shows them should re-read. */
   onSettingsChange(): void;
 }
 
 export class AssistantPanel {
-  private readonly messages = h("div", { class: "msgs hidden" });
+  private readonly messages = h("div", { class: "msgs hidden", role: "log", "aria-live": "polite", "aria-label": "Assistant transcript" });
   private readonly setup = h("div", { class: "ai-setup hidden" });
   private readonly welcome: HTMLElement;
   private readonly chips = h("div", { class: "chips" });
@@ -81,6 +87,8 @@ export class AssistantPanel {
   /** Whether the inline connection card is up, so it is built only on change. */
   private setupShown = false;
   private setupDismissed = false;
+  /** A turn is in flight, so the send button is a stop button instead. */
+  private busy = false;
 
   constructor(
     host: HTMLElement,
@@ -93,10 +101,11 @@ export class AssistantPanel {
       this.grow();
       callbacks.onSend(text);
     };
-    this.send.addEventListener("click", submit);
+    this.send.addEventListener("click", () => (this.busy ? callbacks.onStop() : submit()));
     this.input.addEventListener("input", () => this.grow());
     this.input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) {
+      // An IME candidate is confirmed with Enter, and that Enter is not a send.
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
         submit();
       }
@@ -104,6 +113,9 @@ export class AssistantPanel {
 
     this.settings = new AssistantSettings({
       onChange: () => callbacks.onSettingsChange(),
+      // Two live copies of the same fields would overwrite each other on save,
+      // so the inline card stands down whenever the dialog takes over.
+      onOpen: () => this.closeSetup(),
       openConsole: () => callbacks.openConsole(""),
       openLocal: () => callbacks.openLocal(),
     });
@@ -154,7 +166,9 @@ export class AssistantPanel {
     this.chips.replaceChildren(
       ...SUGGESTIONS[mode].map((text) => {
         const chip = h("button", { class: "chip", type: "button", text });
-        chip.addEventListener("click", () => this.callbacks.onSend(text));
+        chip.addEventListener("click", () => {
+          if (!this.busy) this.callbacks.onSend(text);
+        });
         return chip;
       }),
     );
@@ -231,11 +245,20 @@ export class AssistantPanel {
     this.input.style.height = `${Math.min(this.input.scrollHeight, 120)}px`;
   }
 
+  /** True while the reader is at the end, which is when following is wanted. */
+  private atBottom(): boolean {
+    const box = this.messages;
+    return box.scrollHeight - box.scrollTop - box.clientHeight < 48;
+  }
+
   private push(node: HTMLElement): void {
+    // Following the tail is right until the user scrolls back to read: after
+    // that, yanking them to the bottom on every append is the wrong answer.
+    const follow = this.atBottom();
     this.welcome.classList.add("hidden");
     this.messages.classList.remove("hidden");
     this.messages.appendChild(node);
-    this.messages.scrollTop = this.messages.scrollHeight;
+    if (follow) this.messages.scrollTop = this.messages.scrollHeight;
   }
 
   addMessage(role: "user" | "assistant" | "system", text: string): void {
@@ -283,7 +306,8 @@ export class AssistantPanel {
     const expand = (open: boolean): void => {
       head.setAttribute("aria-expanded", String(open));
       body.classList.toggle("hidden", !open);
-      this.messages.scrollTop = this.messages.scrollHeight;
+      // Keep the card the user just clicked in view, rather than the tail.
+      head.scrollIntoView({ block: "nearest" });
     };
     head.addEventListener("click", () => expand(head.getAttribute("aria-expanded") !== "true"));
 
@@ -374,7 +398,11 @@ export class AssistantPanel {
   }
 
   setBusy(busy: boolean): void {
-    this.send.disabled = busy;
+    this.busy = busy;
+    // The one control that stays live: a turn nobody can stop is a hang.
+    this.send.replaceChildren(icon(busy ? "x" : "message", 14));
+    this.send.title = busy ? "Stop" : "Send  Enter";
+    this.send.classList.toggle("stop", busy);
     this.input.disabled = busy;
     this.typing.classList.toggle("hidden", !busy);
     clearInterval(this.clock);

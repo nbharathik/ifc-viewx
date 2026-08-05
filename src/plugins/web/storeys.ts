@@ -68,10 +68,17 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
   /** Cut just under the level above, so its floor slab stops blocking the view. */
   const applyCut = (): void => {
     const storey = storeys[active];
-    if (!cut || !storey) return api.viewer.clearSection();
+    if (!cut || !storey) {
+      // Only the plugin's own horizontal cut goes; planes the user set with the
+      // section tool are not this plugin's to throw away.
+      const kept = api.viewer.getSections().filter((section) => section.axis !== "y");
+      if (kept.length !== api.viewer.getSections().length) api.viewer.setSections(kept);
+      return;
+    }
     const above = storeys[active - 1];
     const offset = above ? (above.base + storey.top) / 2 : storey.top;
-    api.viewer.setSections([{ axis: "y", offset, flip: false }]);
+    const others = api.viewer.getSections().filter((section) => section.axis !== "y");
+    api.viewer.setSections([...others, { axis: "y", offset, flip: false }]);
   };
 
   const showAll = (): void => {

@@ -106,7 +106,14 @@ export function icon(name: string, size = 15): SVGSVGElement {
  * second line: why something is unavailable, or what it needs.
  */
 export function infoIcon(text: string, name = "info", note = ""): HTMLElement {
-  const mark = h("span", { class: "info-i", tabindex: "0", role: "note" }, [icon(name, 12)]);
+  const mark = h("span", {
+    class: "info-i",
+    tabindex: "0",
+    role: "note",
+    // The bubble is a hover surface; the words have to reach a reader that
+    // never hovers, so they are the element's own accessible name.
+    "aria-label": note ? `${text} ${note}` : text,
+  }, [icon(name, 12)]);
   attachTip(mark, text, note);
   return mark;
 }
@@ -175,17 +182,25 @@ export function iconButton(
  * closes on outside pointerdown, Escape, scroll or blur. Anchors count as
  * inside, so a toggle button can close what it opened.
  */
-let layer: { nodes: HTMLElement[]; close: () => void } | null = null;
+let layer: { nodes: HTMLElement[]; close: () => void; opener: HTMLElement | null } | null = null;
 
 export function closeLayer(): void {
   const current = layer;
   layer = null;
-  current?.close();
+  if (!current) return;
+  // Focus lives inside what is about to be removed more often than not, so
+  // hand it back to the control that opened the layer rather than to <body>.
+  const inside =
+    document.activeElement instanceof HTMLElement &&
+    current.nodes.some((node) => node.contains(document.activeElement));
+  current.close();
+  if (inside && current.opener?.isConnected) current.opener.focus();
 }
 
 export function openLayer(nodes: HTMLElement[], close: () => void): void {
+  const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   closeLayer();
-  layer = { nodes, close };
+  layer = { nodes, close, opener };
 }
 
 document.addEventListener(
@@ -225,10 +240,11 @@ const TOAST_ICON = { info: "info", success: "check-circle", error: "alert" } as 
 let toastHost: HTMLElement | null = null;
 
 export function toast(message: string, kind: "info" | "success" | "error" = "info"): void {
-  if (!toastHost) {
-    toastHost = h("div", { id: "toasts" });
-    document.body.appendChild(toastHost);
-  }
+  toastHost ??= h("div", { id: "toasts" });
+  // A modal dialog paints in the top layer, so a toast parked on <body> would
+  // sit behind its backdrop. It rides with whatever is on top instead.
+  const owner = document.querySelector<HTMLElement>("dialog[open]") ?? document.body;
+  if (toastHost.parentElement !== owner) owner.appendChild(toastHost);
   while (toastHost.childElementCount > 2) toastHost.firstElementChild?.remove();
   const node = h("div", { class: `toast ${kind}` }, [icon(TOAST_ICON[kind], 14), h("span", { text: message })]);
   const remove = (): void => node.remove();
@@ -325,15 +341,60 @@ export function lightDismiss(dialog: HTMLDialogElement): void {
   });
 }
 
+/**
+ * Yes or no over one sentence, for an action with nothing behind it. Native
+ * <dialog> so Escape and focus behave; removed on close so nothing piles up.
+ */
+export function confirmAction(
+  title: string,
+  detail: string,
+  confirmLabel: string,
+  onConfirm: () => void,
+): void {
+  const dialog = h("dialog", { class: "form-dialog", "aria-label": title });
+  const cancel = h("button", { class: "btn", type: "button", text: "Cancel" });
+  const confirm = h("button", { class: "btn primary", type: "button", text: confirmLabel });
+  cancel.addEventListener("click", () => dialog.close());
+  confirm.addEventListener("click", () => {
+    dialog.close();
+    onConfirm();
+  });
+  dialog.append(
+    h("div", { class: "dlg-head" }, [h("span", { text: title })]),
+    h("div", { class: "dlg-body" }, [h("p", { class: "note", text: detail })]),
+    h("div", { class: "dlg-foot" }, [cancel, confirm]),
+  );
+  dialog.addEventListener("close", () => dialog.remove());
+  lightDismiss(dialog);
+  document.body.appendChild(dialog);
+  dialog.showModal();
+  confirm.focus();
+}
+
+/** Up and down walk a menu, and opening one lands on its first entry. */
+export function menuKeys(menu: HTMLElement, focusFirst = true): void {
+  const rows = (): HTMLButtonElement[] => [...menu.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+  menu.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    const list = rows();
+    if (list.length === 0) return;
+    e.preventDefault();
+    const at = list.indexOf(document.activeElement as HTMLButtonElement);
+    const step = e.key === "ArrowDown" ? 1 : -1;
+    list[(at + step + list.length) % list.length].focus();
+  });
+  if (focusFirst) rows()[0]?.focus();
+}
+
 /** Build a dropdown list; the caller owns placement and dismissal. */
 export function buildMenu(items: MenuItem[]): HTMLElement {
   const drop = h("div", { class: "menu-drop", role: "menu" });
   for (const item of items) {
     if (item.separator) {
-      drop.appendChild(h("div", { class: "sep" }));
+      drop.appendChild(h("div", { class: "sep", role: "separator" }));
       continue;
     }
-    const entry = h("button", { type: "button", disabled: item.disabled }, [
+    const entry = h("button", { type: "button", role: "menuitem", disabled: item.disabled }, [
       h("span", { text: item.label ?? "" }),
     ]);
     if (item.shortcut) entry.appendChild(h("kbd", { text: item.shortcut }));
@@ -354,6 +415,22 @@ export type PopoverSide = "above" | "right";
  * A vertical rail of icons opens its options sideways, so they land next to
  * the icon that owns them and never cover the tool below it.
  */
+/**
+ * The box a popover has to stay inside: the nearest ancestor that clips, or
+ * the window. #viewer-host clips, so clamping to the window alone is what let
+ * the filter chip's panel run off the side of the viewport and get cut.
+ */
+function clipBox(node: HTMLElement): { left: number; right: number; top: number; bottom: number } {
+  for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+    const style = getComputedStyle(parent);
+    if (style.overflow !== "visible" || style.overflowX !== "visible" || style.overflowY !== "visible") {
+      const box = parent.getBoundingClientRect();
+      return { left: box.left, right: box.right, top: box.top, bottom: box.bottom };
+    }
+  }
+  return { left: 0, right: window.innerWidth, top: 0, bottom: window.innerHeight };
+}
+
 export function attachPopover(
   button: HTMLButtonElement,
   build: (pop: HTMLElement, close: () => void) => void,
@@ -366,14 +443,21 @@ export function attachPopover(
     build(pop, () => closeLayer());
     item.appendChild(pop);
     button.setAttribute("aria-expanded", "true");
-    // Keep the panel on screen when its anchor sits near a viewport edge.
+    // Keep the panel on screen when its anchor sits near an edge.
     const rect = pop.getBoundingClientRect();
+    const box = clipBox(pop);
+    const fit = (near: number, far: number, low: number, high: number): number =>
+      near < low + 8 ? low + 8 - near : Math.min(0, high - 8 - far);
     if (side === "right") {
-      const shift = rect.top < 8 ? 8 - rect.top : Math.min(0, window.innerHeight - 8 - rect.bottom);
+      const shift = fit(rect.top, rect.bottom, box.top, box.bottom);
       if (shift) pop.style.marginTop = `${shift}px`;
+      const sideways = fit(rect.left, rect.right, box.left, box.right);
+      if (sideways) pop.style.marginLeft = `${sideways}px`;
     } else {
-      const shift = rect.left < 8 ? 8 - rect.left : Math.min(0, window.innerWidth - 8 - rect.right);
+      const shift = fit(rect.left, rect.right, box.left, box.right);
       if (shift) pop.style.marginLeft = `${shift}px`;
+      const vertical = fit(rect.top, rect.bottom, box.top, box.bottom);
+      if (vertical) pop.style.marginTop = `${vertical}px`;
     }
     openLayer([pop, button], () => {
       pop.remove();
@@ -400,10 +484,10 @@ export function showContextMenu(
   if (title) menu.appendChild(h("div", { class: "head" }, [title]));
   for (const entry of entries) {
     if (entry.separator) {
-      menu.appendChild(h("div", { class: "sep" }));
+      menu.appendChild(h("div", { class: "sep", role: "separator" }));
       continue;
     }
-    const button = h("button", { type: "button" }, [h("span", { text: entry.label ?? "" })]);
+    const button = h("button", { type: "button", role: "menuitem" }, [h("span", { text: entry.label ?? "" })]);
     if (entry.count !== undefined) {
       button.appendChild(h("span", { class: "count", text: String(entry.count) }));
     }
@@ -418,6 +502,7 @@ export function showContextMenu(
   menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
   openLayer([menu], () => menu.remove());
+  menuKeys(menu);
 }
 
 // -- command palette --------------------------------------------------------
@@ -449,6 +534,8 @@ export class CommandPalette {
   /** Snapshot taken on open: building it per keystroke is what made it lag. */
   private pool: Command[] = [];
   private cursor = 0;
+  /** Where focus came from, so closing puts it back rather than on <body>. */
+  private opener: HTMLElement | null = null;
 
   constructor(private readonly source: () => Command[]) {}
 
@@ -464,11 +551,14 @@ export class CommandPalette {
   close(): void {
     this.backdrop?.remove();
     this.backdrop = null;
+    if (this.opener?.isConnected) this.opener.focus();
+    this.opener = null;
   }
 
   open(): void {
     closeLayer();
     this.close();
+    this.opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     this.cursor = 0;
     this.pool = this.source().filter((c) => !c.disabled);
     const input = h("input", {
@@ -535,6 +625,21 @@ export class CommandPalette {
       this.cursor = 0;
       render();
     });
+    // Escape and Tab are bound to the panel, not the field: once focus moves
+    // to a result row the palette must still be dismissable and still trap.
+    panel.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        return this.close();
+      }
+      if (e.key !== "Tab") return;
+      const stops = panel.querySelectorAll<HTMLElement>("input, button");
+      if (stops.length === 0) return;
+      const edge = e.shiftKey ? stops[0] : stops[stops.length - 1];
+      if (document.activeElement !== edge) return;
+      e.preventDefault();
+      (e.shiftKey ? stops[stops.length - 1] : stops[0]).focus();
+    });
     input.addEventListener("keydown", (e) => {
       if (e.key === "Escape") return this.close();
       if (e.key === "ArrowDown" || (e.key === "n" && e.ctrlKey)) {
@@ -591,12 +696,16 @@ export function makeResizer(options: {
     role: "separator",
     tabindex: "0",
     "aria-label": "Resize panel",
+    "aria-orientation": "vertical",
+    "aria-valuemin": String(min),
+    "aria-valuemax": String(max),
   });
 
   let queued = 0;
   let target = 0;
   const apply = (width: number): void => {
     target = clamp(width);
+    handle.setAttribute("aria-valuenow", String(Math.round(target)));
     if (queued) return;
     queued = requestAnimationFrame(() => {
       queued = 0;

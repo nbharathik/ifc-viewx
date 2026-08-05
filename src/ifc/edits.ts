@@ -98,10 +98,66 @@ function summarise(op: EditOp, touched: number): string {
   }
 }
 
+/** Relationships that list many elements: the deleted one leaves the list. */
+const REL_LISTS: Array<[string, string]> = [
+  ["IfcRelContainedInSpatialStructure", "RelatedElements"],
+  ["IfcRelAggregates", "RelatedObjects"],
+  ["IfcRelDefinesByProperties", "RelatedObjects"],
+  ["IfcRelDefinesByType", "RelatedObjects"],
+  ["IfcRelAssociatesMaterial", "RelatedObjects"],
+  ["IfcRelAssociatesClassification", "RelatedObjects"],
+  ["IfcRelAssignsToGroup", "RelatedObjects"],
+];
+
+/** Relationships that exist for one pair only: they go with the element. */
+const REL_PAIRS: Array<[string, string[]]> = [
+  ["IfcRelVoidsElement", ["RelatingBuildingElement", "RelatedOpeningElement"]],
+  ["IfcRelFillsElement", ["RelatingOpeningElement", "RelatedBuildingElement"]],
+  ["IfcRelSpaceBoundary", ["RelatingSpace", "RelatedBuildingElement"]],
+];
+
+/**
+ * Take the elements out of every relationship that names them, before the
+ * lines themselves go. DeleteLine on its own leaves those relationships
+ * pointing at an express id that is not in the file any more, which is a
+ * broken model that most readers refuse.
+ */
+function detachElements(model: IfcModel, ids: Set<number>): void {
+  for (const [relType, field] of REL_LISTS) {
+    for (const rid of model.byType(relType, false)) {
+      const rel = model.line(rid);
+      const list = rel?.[field];
+      if (!rel || !Array.isArray(list)) continue;
+      const handles = list as Array<{ value?: number }>;
+      const kept = handles.filter((handle) => handle.value === undefined || !ids.has(handle.value));
+      if (kept.length === handles.length) continue;
+      if (kept.length === 0) {
+        model.api.DeleteLine(model.id, rid);
+        continue;
+      }
+      rel[field] = kept as never;
+      model.write(rel);
+    }
+  }
+  for (const [relType, fields] of REL_PAIRS) {
+    for (const rid of model.byType(relType, false)) {
+      const rel = model.line(rid);
+      if (!rel) continue;
+      const touched = fields.some((field) => {
+        const value = (rel[field] as { value?: number } | null)?.value;
+        return value !== undefined && ids.has(value);
+      });
+      if (touched) model.api.DeleteLine(model.id, rid);
+    }
+  }
+}
+
 export function applyEdit(model: IfcModel, op: EditOp): EditOutcome {
   const before = signatures(model);
   const entityCountBefore = before.size;
   const affected: string[] = [];
+
+  if (op.op === "deleteElements") detachElements(model, new Set(op.ids));
 
   if (op.op === "setAttribute" && !TEXT_ATTRIBUTES.has(op.attribute)) {
     throw new Error(
@@ -158,6 +214,8 @@ function applyToOne(
   }
 
   if (op.op === "renameByPattern") {
+    // An empty separator splices the replacement between every character.
+    if (!op.find) throw new Error("renameByPattern needs a non-empty find");
     const current = String(val(line.Name) ?? "");
     const next = current.split(op.find).join(op.replace);
     if (next === current) return;
@@ -174,6 +232,18 @@ function applyToOne(
   if (guid) affected.push(guid);
 }
 
+/**
+ * An IFC value holder carries its own type (IfcBoolean, IfcInteger, ...), and
+ * dropping a string into one silently produces a file no reader agrees with.
+ * A holder is only rewritten when the new value has the shape it already held.
+ */
+function fitsHolder(previous: unknown, value: string | number | boolean | null): boolean {
+  if (previous === null || previous === undefined) return true;
+  if (typeof previous === typeof value) return true;
+  // web-ifc reports IFC booleans as the STEP tokens ".T." and ".F.".
+  return typeof value === "boolean" && typeof previous === "string" && /^\.[TFU]\.$/.test(previous);
+}
+
 function writeExistingProperty(
   model: IfcModel,
   expressID: number,
@@ -181,15 +251,9 @@ function writeExistingProperty(
   property: string,
   value: string | number | boolean | null,
 ): boolean {
-  for (const rid of model.byType("IfcRelDefinesByProperties", false)) {
-    const rel = model.line(rid);
-    if (!rel) continue;
-    const owners = Array.isArray(rel.RelatedObjects)
-      ? (rel.RelatedObjects as Array<{ value?: number }>).map((o) => o.value)
-      : [];
-    if (!owners.includes(expressID)) continue;
-    const setID = (rel.RelatingPropertyDefinition as { value?: number } | null)?.value;
-    if (setID === undefined) continue;
+  // The model already indexes property sets by owner; rescanning every
+  // IfcRelDefinesByProperties per element made setProperty quadratic.
+  for (const setID of model.setsOf(expressID)) {
     const set = model.line(setID);
     if (!set || String(val(set.Name) ?? "") !== setName) continue;
     for (const handle of (set.HasProperties as Array<{ value?: number }> | undefined) ?? []) {
@@ -197,8 +261,16 @@ function writeExistingProperty(
       const line = model.line(handle.value);
       if (!line || String(val(line.Name) ?? "") !== property) continue;
       const holder = line.NominalValue as { value?: unknown } | null | undefined;
-      if (holder && typeof holder === "object") holder.value = value;
-      else line.NominalValue = { type: 1, value } as never;
+      if (holder && typeof holder === "object") {
+        if (!fitsHolder(holder.value, value)) {
+          throw new Error(
+            `${setName}.${property} holds a ${typeof holder.value}, not a ${typeof value}`,
+          );
+        }
+        holder.value = value;
+      } else {
+        line.NominalValue = { type: 1, value } as never;
+      }
       model.write(line);
       return true;
     }

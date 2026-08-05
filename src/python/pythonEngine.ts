@@ -78,6 +78,9 @@ export class PythonEngine {
     this.worker = worker;
     const done = await this.request({ type: "init", id: 0 }, INIT_TIMEOUT_MS);
     if (done.type === "initDone" && done.error) {
+      // A worker that failed to boot is still running and still assigned; the
+      // next ensureReady would overwrite the field and orphan it.
+      this.terminate();
       throw new Error(done.error);
     }
   }
@@ -108,7 +111,14 @@ export class PythonEngine {
         reject(new Error(`Python operation timed out after ${timeoutMs / 1000}s`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      this.worker?.postMessage(outgoing, transfer ?? []);
+      if (!this.worker) {
+        // Without this the caller waits out the whole timeout for a message
+        // that was never sent, which reads as a hang rather than a failure.
+        this.pending.delete(id);
+        clearTimeout(timer);
+        return reject(new Error("The Python runtime is not running."));
+      }
+      this.worker.postMessage(outgoing, transfer ?? []);
     });
   }
 

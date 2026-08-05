@@ -180,17 +180,24 @@ export class WorkerEngine implements AsyncIfcEngine {
   private async ensureWorker(): Promise<Worker> {
     if (this.worker) return this.worker;
     if (!this.spawning) {
-      this.spawning = spawnParserWorker(this.options.spawn).then((worker) => {
-        worker.addEventListener('message', (e: MessageEvent<WorkerResponse>) =>
-          this.onMessage(e.data),
-        );
-        worker.addEventListener('error', (e: ErrorEvent) =>
-          this.failAll(new Error(e.message || 'parser worker crashed')),
-        );
-        this.worker = worker;
-        this.spawning = null;
-        return worker;
-      });
+      this.spawning = spawnParserWorker(this.options.spawn)
+        .then((worker) => {
+          worker.addEventListener('message', (e: MessageEvent<WorkerResponse>) =>
+            this.onMessage(e.data),
+          );
+          worker.addEventListener('error', (e: ErrorEvent) =>
+            this.failAll(new Error(e.message || 'parser worker crashed')),
+          );
+          this.worker = worker;
+          this.spawning = null;
+          return worker;
+        })
+        .catch((err: unknown) => {
+          // A rejected promise kept here would re-throw the same stale error
+          // for every later load instead of trying to spawn again.
+          this.spawning = null;
+          throw err;
+        });
     }
     return this.spawning;
   }

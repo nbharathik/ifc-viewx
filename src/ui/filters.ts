@@ -209,11 +209,12 @@ export class FilterPanel {
     placeholder: "Filter by class, storey or name",
     spellcheck: "false",
   });
-  private readonly setName = h("input", { type: "text", placeholder: "Pset (blank searches attributes)" });
-  private readonly propName = h("input", { type: "text", placeholder: "Property" });
-  private readonly propValue = h("input", { type: "text", placeholder: "Value (blank means present)" });
-  private readonly op = h("select");
+  private readonly setName = h("input", { type: "text", placeholder: "Pset (blank searches all of them)", "aria-label": "Property set" });
+  private readonly propName = h("input", { type: "text", placeholder: "Property", "aria-label": "Property name" });
+  private readonly propValue = h("input", { type: "text", placeholder: "Value (blank means present)", "aria-label": "Property value" });
+  private readonly op = h("select", { "aria-label": "Comparison" });
   private readonly status = h("div", { class: "status-line" });
+  private readonly clearAll: HTMLButtonElement;
 
   constructor(
     host: HTMLElement,
@@ -226,8 +227,9 @@ export class FilterPanel {
       h("option", { value: "not", text: "is not" }),
     );
 
-    const clearAll = h("button", { class: "link-btn", type: "button", text: "Clear all" });
+    const clearAll = h("button", { class: "link-btn hidden", type: "button", text: "Clear all" });
     clearAll.addEventListener("click", () => store.clear());
+    this.clearAll = clearAll;
 
     const runProp = h("button", { class: "btn accent", type: "button", text: "Apply" });
     runProp.addEventListener("click", () => void this.runProperty(runProp).catch((err: Error) => {
@@ -329,8 +331,14 @@ export class FilterPanel {
       );
       return;
     }
+    // Storeys are appended after every class, so a slice off the end would
+    // hide them entirely on a model with many classes: interleave instead.
+    const shown = rows.length > ROW_LIMIT
+      ? [...rows.filter((row) => row.icon !== "cube").slice(0, ROW_LIMIT / 2),
+         ...rows.filter((row) => row.icon === "cube")].slice(0, ROW_LIMIT)
+      : rows;
     this.results.replaceChildren(
-      ...rows.slice(0, ROW_LIMIT).map((row) => {
+      ...shown.map((row) => {
         const show = h("button", { class: "filter-row pick grow", type: "button", title: `Show only ${row.label}` }, [
           icon(row.icon, 13),
           h("span", { class: "grow", text: row.label }),
@@ -346,13 +354,20 @@ export class FilterPanel {
         return h("div", { class: "filter-pair" }, [show, hide]);
       }),
     );
+    if (rows.length > shown.length) {
+      this.results.appendChild(
+        h("div", { class: "note", text: `${rows.length - shown.length} more; type to narrow the list.` }),
+      );
+    }
   }
 
   private matchNames(text: string): number[] {
     const ids: number[] = [];
     const walk = (node: SpatialNode): void => {
       if ((node.name ?? "").toLowerCase().includes(text)) {
-        ids.push(...this.viewer.getSubtreeElementIds(node.expressID));
+        // A storey can hold tens of thousands of elements, and spreading that
+        // into push() blows the argument limit; append them one at a time.
+        for (const id of this.viewer.getSubtreeElementIds(node.expressID)) ids.push(id);
       }
       node.children.forEach(walk);
     };
@@ -366,6 +381,8 @@ export class FilterPanel {
 
   private renderRules(): void {
     const entries = this.store.entries();
+    // Nothing applied, nothing to clear: an always-on control is a dead one.
+    this.clearAll.classList.toggle("hidden", entries.length === 0);
     if (entries.length === 0) {
       this.rules.replaceChildren(
         h("div", { class: "note", text: "Nothing filtered. The whole model is visible." }),
@@ -399,7 +416,9 @@ export class FilterPanel {
       pool,
       (props) => {
         const values = readProperty(props, set, name);
-        if (!wanted) return values.length > 0;
+        // "is not" with no value asks for the elements that lack the property,
+        // which is the opposite of what a bare presence test returns.
+        if (!wanted) return op === "not" ? values.length === 0 : values.length > 0;
         const hit = values.some((value) =>
           op === "contains" ? value.toLowerCase().includes(wanted) : value.toLowerCase() === wanted,
         );
@@ -417,6 +436,13 @@ export class FilterPanel {
     this.status.textContent = `${found.ids.length.toLocaleString()} of ${found.scanned.toLocaleString()} matched${
       found.truncated ? `, scan capped at ${SCAN_LIMIT.toLocaleString()}` : ""
     }`;
+    // A capped scan cannot answer for the rest, and a keep rule would hide
+    // every unscanned element as if it had been tested and failed.
+    if (found.truncated) {
+      this.status.classList.add("error");
+      this.status.textContent += `. Narrow the view to under ${SCAN_LIMIT.toLocaleString()} elements first.`;
+      return;
+    }
     this.store.add({ label, mode: "keep", ids: found.ids });
   }
 }

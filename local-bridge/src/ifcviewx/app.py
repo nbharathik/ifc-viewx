@@ -165,6 +165,15 @@ def _get_job(job_id: str) -> dict | None:
         return dict(job) if job else None
 
 
+def _job_for_sha(sha: str) -> str | None:
+    """The conversion already running for this model, if there is one."""
+    with _jobs_lock:
+        for job_id, job in _jobs.items():
+            if job.get("sha") == sha and job.get("status") not in TERMINAL_STATUS:
+                return job_id
+    return None
+
+
 def _prune() -> None:
     """Drop long-finished jobs and results whose file the store already swept.
 
@@ -480,6 +489,12 @@ def create_app(hub: BrowserHub) -> FastAPI:
         if store.converted_path(sha).is_file():
             return JSONResponse({"status": "done", "percent": 100, "url": f"/models/{sha}.ifcx"})
         _prune()
+        # Two conversions of one model would write the same .ifcx.part, and the
+        # loser's half-written file would be published under a cache key that is
+        # never checked again. The second caller joins the first job instead.
+        running = _job_for_sha(sha)
+        if running:
+            return JSONResponse({"jobId": running, "status": _get_job(running)["status"]})
         job_id = uuid.uuid4().hex
         _set_job(job_id, status="queued", sha=sha, percent=0)
         threading.Thread(

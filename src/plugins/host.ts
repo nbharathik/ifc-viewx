@@ -488,6 +488,8 @@ interface Running {
   manifest: PluginManifest;
   host: HTMLElement;
   instance: PluginInstance | null;
+  /** Handed to mount() when the payload arrived before the module did. */
+  pending?: unknown;
 }
 
 const OPEN_KEY = "ifcviewx.plugins.open";
@@ -611,7 +613,9 @@ export class PluginHost {
   restore(): void {
     let ids: string[] = [];
     try {
-      ids = JSON.parse(localStorage.getItem(OPEN_KEY) ?? "[]") as string[];
+      const stored: unknown = JSON.parse(localStorage.getItem(OPEN_KEY) ?? "[]");
+      // Anything but an array of ids would throw out of startup on the for-of.
+      ids = Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
     } catch {
       ids = [];
     }
@@ -621,10 +625,14 @@ export class PluginHost {
   async open(id: string, reveal = true, payload?: unknown): Promise<void> {
     const manifest = findPlugin(id);
     if (!manifest?.load) return;
-    if (this.running.has(id)) {
+    const live = this.running.get(id);
+    if (live) {
       this.select(id);
       if (reveal) this.actions.showPanel();
-      this.running.get(id)?.instance?.receive?.(payload);
+      // Its module may still be importing, in which case there is nothing to
+      // hand the payload to yet; mount() takes it instead.
+      if (live.instance) live.instance.receive?.(payload);
+      else live.pending = payload;
       return;
     }
     const host = h("div", { class: "plug-host" });
@@ -636,9 +644,13 @@ export class PluginHost {
     this.persist();
     try {
       const module = await manifest.load();
-      if (!this.running.has(id)) return;
-      entry.instance = module.mount(host, this.api(manifest), payload) ?? null;
+      // Closed and reopened while the module was importing: this entry is the
+      // old one, and mounting into its detached host would be invisible.
+      if (this.running.get(id) !== entry) return;
+      entry.instance = module.mount(host, this.api(manifest), entry.pending ?? payload) ?? null;
+      entry.pending = undefined;
     } catch (err) {
+      if (this.running.get(id) !== entry) return;
       host.replaceChildren(
         emptyState("alert", `${manifest.name} failed to start`, err instanceof Error ? err.message : String(err)),
       );

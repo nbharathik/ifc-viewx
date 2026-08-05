@@ -12,7 +12,7 @@ import builtins
 import io
 import json
 import zlib
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from typing import Any, Callable
 
 from .guard import ALLOWED_IMPORTS, check
@@ -74,6 +74,28 @@ def _open(path: str):
     import ifcopenshell
 
     return ifcopenshell.open(path)
+
+
+@contextmanager
+def _no_model_writes():
+    """Close the one file-write route the audit hook cannot see.
+
+    IfcOpenShell writes through C++, so `model.write("/anywhere")` never raises
+    the `open` audit event the sandbox denies. The method is taken off the class
+    for the length of the job; the service still writes the result itself.
+    """
+    import ifcopenshell
+
+    original = ifcopenshell.file.write
+
+    def denied(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("blocked by sandbox: job code may not write files")
+
+    ifcopenshell.file.write = denied  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        ifcopenshell.file.write = original  # type: ignore[method-assign]
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +167,7 @@ def python(job: dict) -> dict:
     }
     buffer = io.StringIO()
     try:
-        with redirect_stdout(buffer):
+        with redirect_stdout(buffer), _no_model_writes():
             exec(code, namespace)  # noqa: S102 - guarded source, isolated process
             result = namespace.get("result")
             if mode == "edit" and result is None and callable(namespace.get("edit")):

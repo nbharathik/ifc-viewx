@@ -46,16 +46,20 @@ def test_runtime_import_hook_blocks_disallowed_modules(env, sample_ifc, monkeypa
     assert jobs._safe_import("json").__name__ == "json"
 
 
-def test_runtime_getattr_guard_blocks_computed_dunder(env, sample_ifc) -> None:
-    """The static guard cannot see "__cl" + "ass__"; the runtime getattr can."""
+def test_computed_dunder_is_blocked(env, sample_ifc) -> None:
+    """A split dunder is caught by the source rule, and by getattr behind it."""
     outcome = _python(sample_ifc, 'c = getattr((), "__cl" + "ass__")\nresult = str(c)')
-    assert outcome["error"] == "exception"
-    assert "not allowed" in outcome["message"]
+    assert outcome["error"] == "rejected_by_guard"
+
+    from ifcviewx import jobs
+
+    with pytest.raises(AttributeError):
+        jobs._safe_getattr((), "__cl" + "ass__")
 
 
-def test_audit_hook_blocks_a_spawn_reached_by_attrgetter(env, sample_ifc) -> None:
-    """operator.attrgetter reaches classes past the getattr guard, but the audit
-    hook still denies the one thing that would do harm: spawning a process."""
+def test_attrgetter_route_to_a_spawn_is_blocked(env, sample_ifc) -> None:
+    """operator.attrgetter resolves attribute names in C, past the runtime
+    getattr guard, so the source rule refuses it outright."""
     code = (
         "import operator\n"
         "ga = lambda o, n: operator.attrgetter(n)(o)\n"
@@ -67,8 +71,16 @@ def test_audit_hook_blocks_a_spawn_reached_by_attrgetter(env, sample_ifc) -> Non
     )
     outcome = _python(sample_ifc, code)
     assert outcome.get("resultJson") != '"PWNED"'
-    assert outcome["error"] == "exception"
-    assert "blocked by sandbox" in outcome["message"]
+    assert outcome["error"] == "rejected_by_guard"
+
+
+def test_job_code_cannot_write_the_model_anywhere(env, sample_ifc, tmp_path) -> None:
+    """model.write goes through C++, so the audit hook never sees it."""
+    target = tmp_path / "escaped.ifc"
+    code = f"def edit(model):\n    model.write({str(target)!r})\n    return {{'summary': 'x'}}\n"
+    outcome = _python(sample_ifc, code, "edit", tmp_path / "out.ifc")
+    assert not target.exists()
+    assert outcome["error"] in {"rejected_by_guard", "exception"}
 
 
 def test_exceptions_come_back_as_reports(env, sample_ifc) -> None:

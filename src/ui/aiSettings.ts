@@ -44,6 +44,8 @@ const HOW: Array<[string, string, string]> = [
 export interface AiSettingsActions {
   /** The provider, model or key changed: whoever shows them should re-read. */
   onChange(): void;
+  /** The dialog is taking over the connection fields; drop any other copy. */
+  onOpen?(): void;
   /** Open the Python Console, which is the only thing that runs code. */
   openConsole(): void;
   /** Open the Studio dialog, which says what Local Studio adds. */
@@ -55,6 +57,7 @@ export class AssistantSettings {
   private readonly toolsHost = h("div");
   private readonly connHost = h("div");
   private readonly proxyNote = h("div", { class: "note hidden" });
+  private proxied = false;
 
   constructor(private readonly actions: AiSettingsActions) {
     this.dialog = h("dialog", { id: "assistant-dialog" }, [
@@ -91,16 +94,28 @@ export class AssistantSettings {
   }
 
   open(): void {
+    this.actions.onOpen?.();
     // Rebuilt on every open: the same fields also live in the panel, and two
     // copies of one setting must never disagree about what is stored.
     this.connHost.replaceChildren(...connectionFields(() => this.actions.onChange()));
+    this.applyProxy();
     if (!this.dialog.open) this.dialog.showModal();
   }
 
-  /** Local Studio holds the key: the fields stay, but they do nothing. */
+  /** Local Studio holds the key: the fields stay, visibly out of service. */
   setProxy(active: boolean): void {
+    this.proxied = active;
     this.proxyNote.textContent = active ? "Local Studio holds the key. These fields are unused." : "";
     this.proxyNote.classList.toggle("hidden", !active);
+    this.applyProxy();
+  }
+
+  /** A field that does nothing should not accept a key or send a request. */
+  private applyProxy(): void {
+    this.connHost.classList.toggle("off", this.proxied);
+    for (const node of this.connHost.querySelectorAll("input, select, button")) {
+      (node as HTMLInputElement).disabled = this.proxied;
+    }
   }
 
   /**
@@ -297,10 +312,13 @@ export function connectionFields(onChange: () => void): HTMLElement[] {
     say("busy", "Reading the model list");
     void listModels(read())
       .then((list) => {
+        if (!model.isConnected) return;
         setOptions(list);
         say("idle", `${list.length} models offered. Pick one, then Verify.`);
       })
-      .catch((err: unknown) => say("fail", err instanceof Error ? err.message : String(err)))
+      .catch((err: unknown) => {
+        if (model.isConnected) say("fail", err instanceof Error ? err.message : String(err));
+      })
       .finally(() => (browse.disabled = false));
   };
 
@@ -319,6 +337,9 @@ export function connectionFields(onChange: () => void): HTMLElement[] {
   };
 
   provider.addEventListener("change", () => {
+    // A key belongs to the provider it was issued by; carrying it across would
+    // send one vendor's secret to another vendor's host on the next request.
+    apiKey.value = "";
     syncProvider(true);
     invalidate();
   });
@@ -329,12 +350,16 @@ export function connectionFields(onChange: () => void): HTMLElement[] {
     say("busy", `Asking ${current.model || "the endpoint"} to answer`);
     void verifyModel(current)
       .then((result) => {
+        // These fields may have been replaced while the request was out; a
+        // detached copy must not write its own snapshot over what replaced it.
+        if (!model.isConnected) return;
         verified = result.model;
         persist();
         say("ok", `${result.model} answered in ${result.ms} ms`);
         toast("Model verified", "success");
       })
       .catch((err: unknown) => {
+        if (!model.isConnected) return;
         verified = "";
         persist();
         say("fail", `Not loaded. ${err instanceof Error ? err.message : String(err)}`);

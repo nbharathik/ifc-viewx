@@ -2,7 +2,7 @@
 // model they belong to and travel as a .bcfzip (BCF 2.1). Cameras are written
 // in viewer world coordinates: they round trip here exactly, and land close in
 // other tools when the model shares that origin.
-import { h, icon, iconButton, toast } from "./kit.js";
+import { confirmAction, h, icon, iconButton, toast } from "./kit.js";
 import { emptyState } from "./shell.js";
 import type { CameraPose, SectionState, Viewer } from "../viewer-core/viewer.js";
 
@@ -448,11 +448,15 @@ export class BcfPanel {
     const url = URL.createObjectURL(zip(files));
     const link = h("a", { href: url, download: `${this.actions.modelName().replace(/\.[^.]+$/, "") || "issues"}.bcfzip` });
     link.click();
-    URL.revokeObjectURL(url);
+    // Revoking in the same task cancels the download on some browsers.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
     this.actions.log(`Exported ${this.topics.length} issues as BCF`, "success");
   }
 
   private async import(file: File): Promise<void> {
+    // Topics are stored per model, so with nothing open save() is a no-op and
+    // the import would vanish at the next load without ever saying so.
+    if (!this.key()) throw new Error("Open a model first: issues are stored against the model they belong to.");
     const entries = await unzip(await file.arrayBuffer());
     const decoder = new TextDecoder();
     const folders = new Set([...entries.keys()].filter((name) => name.endsWith("markup.bcf")).map((name) => name.replace(/markup\.bcf$/, "")));
@@ -500,16 +504,30 @@ export class BcfPanel {
     this.list.replaceChildren(...this.topics.map((topic) => this.card(topic)));
   }
 
+  private comment(entry: { author: string; date: string; text: string }): HTMLElement {
+    return h("div", { class: "topic-comment" }, [
+      h("span", { class: "who", text: `${entry.author} · ${entry.date.slice(0, 10)}` }),
+      h("span", { text: entry.text }),
+    ]);
+  }
+
   private card(topic: Topic): HTMLElement {
     const open = this.expanded === topic.guid;
-    const head = h("button", { class: "topic-head", type: "button" }, [
+    const head = h("button", {
+      class: "topic-head",
+      type: "button",
+      "aria-expanded": String(open),
+    }, [
       h("span", { class: `dot ${topic.status === "Closed" || topic.status === "Resolved" ? "ok" : "err"}` }),
       h("span", { class: "grow", text: topic.title, title: topic.title }),
       h("span", { class: "n", text: topic.status }),
+      icon("chevron", 12),
     ]);
     head.addEventListener("click", () => {
       this.expanded = open ? null : topic.guid;
-      this.restore(topic);
+      // Only opening a topic restores its view. Closing one used to replay the
+      // viewpoint as well, throwing away the camera the user had just set.
+      if (!open) this.restore(topic);
       this.render();
     });
 
@@ -568,26 +586,29 @@ export class BcfPanel {
       });
     });
     const remove = iconButton("trash", "Delete issue", () => {
-      this.topics = this.topics.filter((item) => item.guid !== topic.guid);
-      this.save();
-      this.render();
+      confirmAction(
+        "Delete this issue?",
+        `"${topic.title}" and its comments are removed from this browser. There is no undo.`,
+        "Delete",
+        () => {
+          this.topics = this.topics.filter((item) => item.guid !== topic.guid);
+          this.save();
+          this.render();
+        },
+      );
     }, "icon-btn sm");
 
     const comments = h("div", { class: "topic-comments" });
-    for (const comment of topic.comments) {
-      comments.appendChild(
-        h("div", { class: "topic-comment" }, [
-          h("span", { class: "who", text: `${comment.author} · ${comment.date.slice(0, 10)}` }),
-          h("span", { text: comment.text }),
-        ]),
-      );
-    }
-    const draft = h("input", { type: "text", placeholder: "Add a comment" });
+    for (const comment of topic.comments) comments.appendChild(this.comment(comment));
+    const draft = h("input", { type: "text", placeholder: "Add a comment", "aria-label": "Add a comment" });
     draft.addEventListener("keydown", (e) => {
       if (e.key !== "Enter" || !draft.value.trim()) return;
       topic.comments.push({ guid: uuid(), date: new Date().toISOString(), author: this.author, text: draft.value.trim() });
       this.save();
-      this.render();
+      // Append in place and keep the caret here: a full re-render would drop
+      // the field the user is typing in, so a second comment needs a new click.
+      comments.appendChild(this.comment(topic.comments[topic.comments.length - 1]));
+      draft.value = "";
     });
 
     body.append(

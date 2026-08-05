@@ -194,6 +194,10 @@ def _color_of(material) -> tuple[float, float, float, float]:
 
 
 def _spatial_tree(model) -> dict:
+    """An empty tree beats an IndexError after the whole geometry pass."""
+    roots = model.by_type("IfcProject")
+    if not roots:
+        return {"expressID": 0, "type": "IfcProject", "name": None, "children": []}
     visited: set[int] = set()
 
     def node(el) -> dict:
@@ -211,7 +215,7 @@ def _spatial_tree(model) -> dict:
             "children": [node(c) for c in children if c.id() not in visited],
         }
 
-    return node(model.by_type("IfcProject")[0])
+    return node(roots[0])
 
 
 def convert(source: Path, target: Path, progress=None) -> dict:

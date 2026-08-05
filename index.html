@@ -60,7 +60,7 @@
         <span class="grow"></span>
         <span id="topbar-right"></span>
       </header>
-      <div id="ribbon"></div>
+      <div id="ribbon" role="tabpanel"></div>
       <div id="pending-bar" class="hidden"></div>
 
       <main id="workspace">
@@ -90,10 +90,12 @@
             </div>
           </div>
 
-          <div id="loading" class="hidden" aria-live="polite">
+          <div id="loading" class="hidden">
             <div class="load-card">
               <div class="load-mark"></div>
-              <div class="load-name" id="load-name">Opening</div>
+              <!-- The name changes once per load; the detail line changes on
+                   every progress callback, so only the name is announced. -->
+              <div class="load-name" id="load-name" aria-live="polite">Opening</div>
               <div class="load-track"><i id="load-fill"></i></div>
               <div class="load-detail" id="load-detail">Preparing</div>
               <button class="btn sm hidden" id="load-cancel" type="button">Cancel</button>
@@ -107,14 +109,14 @@
             <span class="grow"></span>
             <span id="inspector-actions"></span>
           </div>
-          <div class="panel-body" id="tab-properties"></div>
-          <div class="panel-body hidden" id="tab-filters"></div>
-          <div class="panel-body hidden" id="tab-ids"></div>
-          <div class="panel-body hidden" id="tab-bcf"></div>
-          <div class="panel-body hidden" id="tab-assistant"></div>
-          <div class="panel-body hidden" id="tab-schedule"></div>
-          <div class="panel-body hidden" id="tab-plugins"></div>
-          <div class="panel-body hidden" id="tab-activity"></div>
+          <div class="panel-body" id="tab-properties" role="tabpanel" tabindex="0" aria-labelledby="rail-properties"></div>
+          <div class="panel-body hidden" id="tab-filters" role="tabpanel" tabindex="0" aria-labelledby="rail-filters"></div>
+          <div class="panel-body hidden" id="tab-ids" role="tabpanel" tabindex="0" aria-labelledby="rail-ids"></div>
+          <div class="panel-body hidden" id="tab-bcf" role="tabpanel" tabindex="0" aria-labelledby="rail-bcf"></div>
+          <div class="panel-body hidden" id="tab-assistant" role="tabpanel" tabindex="0" aria-labelledby="rail-assistant"></div>
+          <div class="panel-body hidden" id="tab-schedule" role="tabpanel" tabindex="0" aria-labelledby="rail-schedule"></div>
+          <div class="panel-body hidden" id="tab-plugins" role="tabpanel" tabindex="0" aria-labelledby="rail-plugins"></div>
+          <div class="panel-body hidden" id="tab-activity" role="tabpanel" tabindex="0" aria-labelledby="rail-activity"></div>
         </aside>
 
         <nav id="rail" role="tablist" aria-label="Inspector panels"></nav>
@@ -123,12 +125,12 @@
       <footer id="statusbar"></footer>
     </div>
 
-    <dialog id="settings-dialog">
-      <div class="dlg-head"><span>Settings</span><button class="icon-btn dlg-x" id="settings-close" type="button" aria-label="Close"></button></div>
+    <dialog id="settings-dialog" aria-labelledby="settings-title">
+      <div class="dlg-head"><span id="settings-title">Settings</span><button class="icon-btn dlg-x" id="settings-close" type="button" aria-label="Close"></button></div>
       <div class="dlg-body">
         <div class="group-title">Rendering</div>
         <div class="field">
-          <span class="field-label">Render scale<span class="tip">Lower renders fewer pixels; higher sharpens edges.</span></span>
+          <label class="field-label" for="set-scale">Render scale<span class="tip">Lower renders fewer pixels; higher sharpens edges.</span></label>
           <select id="set-scale">
             <option value="0.5">50%</option>
             <option value="0.75">75%</option>
@@ -137,10 +139,10 @@
             <option value="2">200%</option>
           </select>
         </div>
-        <label class="field check"><input type="checkbox" id="set-adaptive" checked /><span class="field-label">Adaptive resolution<span class="tip">Drops resolution while orbiting heavy scenes.</span></span></label>
-        <label class="field check"><input type="checkbox" id="set-doubleside" checked /><span class="field-label">Double-sided surfaces<span class="tip">Turn off for roughly double the fill rate; some models show holes.</span></span></label>
-        <label class="field check"><input type="checkbox" id="set-aa" checked /><span class="field-label">Antialiasing<span class="tip">Applies after reload.</span></span></label>
-        <label class="field check"><input type="checkbox" id="set-hud" /><span class="field-label">Performance HUD<span class="tip">Live render cost, draw calls and load timings.</span></span></label>
+        <label class="field check"><input type="checkbox" id="set-adaptive" checked  aria-describedby="set-adaptive-tip" /><span class="field-label">Adaptive resolution<span class="tip" id="set-adaptive-tip">Drops resolution while orbiting heavy scenes.</span></span></label>
+        <label class="field check"><input type="checkbox" id="set-doubleside" checked  aria-describedby="set-doubleside-tip" /><span class="field-label">Double-sided surfaces<span class="tip" id="set-doubleside-tip">Turn off for roughly double the fill rate; some models show holes.</span></span></label>
+        <label class="field check"><input type="checkbox" id="set-aa" checked  aria-describedby="set-aa-tip" /><span class="field-label">Antialiasing<span class="tip" id="set-aa-tip">Applies after reload.</span></span></label>
+        <label class="field check"><input type="checkbox" id="set-hud"  aria-describedby="set-hud-tip" /><span class="field-label">Performance HUD<span class="tip" id="set-hud-tip">Live render cost, draw calls and load timings.</span></span></label>
 
         <div class="group-title">Assistant</div>
         <p class="note">Runs in this browser with your own key. Provider, model and what the assistant may do all live in its own settings.</p>
@@ -163,14 +165,14 @@
           <div>MCP bridge for AI clients</div>
           <div>Assistant key held by the service, never by this page</div>
         </div>
-        <label class="field check"><input type="checkbox" id="set-convert" checked /><span class="field-label">Offer conversion for heavy models<span class="tip">web-ifc draws every file here. On a large or brep-heavy model, IfcOpenShell converts it once to .ifcx through Local Studio and every reopen is instant.</span></span></label>
+        <label class="field check"><input type="checkbox" id="set-convert" checked  aria-describedby="set-convert-tip" /><span class="field-label">Offer conversion for heavy models<span class="tip" id="set-convert-tip">web-ifc draws every file here. On a large or brep-heavy model, IfcOpenShell converts it once to .ifcx through Local Studio and every reopen is instant.</span></span></label>
         <p class="note">Viewing, checks, schedules, filters, IDS, issues and model edits all run in this tab and never need it.</p>
       </div>
       <div class="dlg-foot"><button class="btn primary" id="settings-done" type="button">Done</button></div>
     </dialog>
 
-    <dialog id="help-dialog">
-      <div class="dlg-head"><span>Keyboard shortcuts</span><button class="icon-btn dlg-x" id="help-close" type="button" aria-label="Close"></button></div>
+    <dialog id="help-dialog" aria-labelledby="help-title">
+      <div class="dlg-head"><span id="help-title">Keyboard shortcuts</span><button class="icon-btn dlg-x" id="help-close" type="button" aria-label="Close"></button></div>
       <div class="dlg-body keys">
         <div class="key-cols">
           <section>

@@ -15,8 +15,8 @@ export interface ScheduleActions {
 }
 
 export class SchedulePanel {
-  private readonly type = h("select", { class: "grow" });
-  private readonly props = h("input", { type: "text", placeholder: "Pset.Property, Property", list: "schedule-props" });
+  private readonly type = h("select", { class: "grow", title: "Element class", "aria-label": "Element class" });
+  private readonly props = h("input", { type: "text", placeholder: "Pset.Property, Property", list: "schedule-props", "aria-label": "Property columns" });
   private readonly datalist = h("datalist", { id: "schedule-props" });
   private readonly runBtn = h("button", { class: "btn accent", type: "button", text: "Run" });
   private readonly exportBtn = h("button", { class: "btn", type: "button", title: "Download CSV" }, [icon("download", 14)]);
@@ -54,9 +54,24 @@ export class SchedulePanel {
       ...(types.length ? types : ["IfcElement"]).map((name) => h("option", { value: name, text: name })),
     );
     if (types.includes(current)) this.type.value = current;
+    // The table belongs to the model it was built from: exporting or clicking
+    // through the previous model's rows after a new one loads is nonsense.
+    this.clear();
+  }
+
+  /** Back to the empty state, with nothing left to export or select from. */
+  private clear(): void {
+    this.report = null;
+    this.exportBtn.disabled = true;
+    this.host.replaceChildren();
+    this.host.classList.add("hidden");
+    this.empty.classList.remove("hidden");
+    this.status.textContent = "";
+    this.status.classList.remove("error");
   }
 
   private async run(): Promise<void> {
+    if (this.runBtn.disabled) return;
     const type = this.type.value || "IfcElement";
     const properties = this.props.value
       .split(",")
@@ -73,6 +88,9 @@ export class SchedulePanel {
       this.report = report;
       this.render(report);
     } catch (err) {
+      // A failure with the previous run's table still on screen reads as if
+      // that table were the result; drop it, then say what went wrong.
+      this.clear();
       this.status.textContent = err instanceof Error ? err.message : String(err);
       this.status.classList.add("error");
     } finally {
@@ -89,6 +107,14 @@ export class SchedulePanel {
     this.status.textContent = `${report.returned.toLocaleString()} of ${report.total.toLocaleString()} ${report.type}${
       report.truncated ? " · truncated" : ""
     }`;
+    this.status.classList.remove("error");
+    // A class with no instances is an answer, not an empty grid of headers.
+    if (report.rows.length === 0) {
+      this.host.replaceChildren();
+      this.host.classList.add("hidden");
+      this.empty.classList.remove("hidden");
+      return;
+    }
     this.empty.classList.add("hidden");
     this.host.classList.remove("hidden");
 
@@ -113,8 +139,15 @@ export class SchedulePanel {
 
   private exportCsv(): void {
     if (!this.report) return;
-    const { columns, rows, type } = this.report;
+    const { columns, rows, type, truncated, total } = this.report;
     saveCsv(`${type}-schedule.csv`, columns, rows.map((row) => columns.map((name) => row[name] as Value)));
-    toast("Schedule exported as CSV", "success");
+    // The engine caps a run, so a CSV can be a slice; saying so beats a file
+    // that looks complete and is not.
+    toast(
+      truncated
+        ? `Exported ${rows.length.toLocaleString()} of ${total.toLocaleString()} rows: the run was capped`
+        : "Schedule exported as CSV",
+      truncated ? "info" : "success",
+    );
   }
 }

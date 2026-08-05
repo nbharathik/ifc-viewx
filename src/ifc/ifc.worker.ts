@@ -79,6 +79,9 @@ self.addEventListener("message", (event: MessageEvent<IfcRequest>) => {
       if (request.type === "setModel") {
         const engine = await ensureApi();
         if (model) engine.CloseModel(model.id);
+        // Cleared before the open: a throw in OpenModel would otherwise leave
+        // this pointing at the model that was just closed.
+        model = null;
         sourceBytes = new Uint8Array(request.bytes);
         const id = engine.OpenModel(sourceBytes.slice());
         model = new IfcModel(engine, id);

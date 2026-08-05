@@ -44,6 +44,12 @@ class BrowserHub:
         finally:
             if self._conn is websocket:
                 self._conn = None
+            # Nothing will answer these now; waiting out the full timeout only
+            # makes an MCP client look hung after the tab has already closed.
+            for future in list(self._pending.values()):
+                if not future.done():
+                    future.set_exception(RuntimeError("the viewer tab disconnected"))
+            self._pending.clear()
 
     def call(self, method: str, params: dict | None = None, timeout: float = 120.0) -> Any:
         """Thread-safe request to the browser. Raises on transport problems;

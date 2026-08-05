@@ -111,7 +111,9 @@ export function validate(model: IfcModel): ValidationReport {
   return {
     ok: counts.error === 0,
     schema: model.schema,
-    totals: { entities: model.api.GetMaxExpressID(model.id), rooted: rooted.length, elements: elements.length },
+    // GetMaxExpressID is the highest id in the file, not a count: a file with
+    // gaps or deletions has fewer entities than its last id suggests.
+    totals: { entities: model.guidIndex().size, rooted: rooted.length, elements: elements.length },
     counts,
     checks,
   };

@@ -21,9 +21,10 @@ import { Shell, emptyState, type PaneId, type TabId } from "./ui/shell.js";
 import { Dock, saveViewpoint as storeViewpoint } from "./ui/dock.js";
 import { Connection } from "./ui/connection.js";
 import { CommandRegistry } from "./ui/commands.js";
-import { Ribbon, type RibbonTab } from "./ui/ribbon.js";
+import { Ribbon, type RibbonControl, type RibbonTab } from "./ui/ribbon.js";
 import type { SchedulePanel } from "./ui/schedules.js";
-import { busyRow, CommandPalette, h, icon, lightDismiss, promptForm, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
+import { busyRow, CommandPalette, confirmAction, h, icon, lightDismiss, promptForm, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
+import { download } from "./plugins/kit.js";
 import { PluginHost, type PluginPython } from "./plugins/host.js";
 import { PluginBrowser } from "./plugins/browser.js";
 import { ServiceClient, type EditDiff } from "./bridge/serviceClient.js";
@@ -35,10 +36,35 @@ const $ = <T extends HTMLElement>(id: string): T => {
   return node as T;
 };
 
+// Startup is straight-line module code behind a full-screen splash. If any of
+// it throws (no WebGL, a blocked worker), the splash would spin forever over a
+// dead page, so the first thing registered is the way out of that.
+let booted = false;
+const bootFailed = (message: string): void => {
+  if (booted) return;
+  booted = true;
+  document.getElementById("splash")?.remove();
+  const card = document.querySelector("#dropzone .dz-card");
+  if (!card) return;
+  const note = document.createElement("p");
+  note.className = "dz-fatal";
+  note.textContent = `IFCViewX could not start: ${message || "unknown error"}`;
+  card.appendChild(note);
+};
+window.addEventListener("error", (e) => bootFailed(e.message));
+window.addEventListener("unhandledrejection", (e) =>
+  bootFailed(e.reason instanceof Error ? e.reason.message : String(e.reason)),
+);
+
 const dropzone = $("dropzone");
 const fileInput = $<HTMLInputElement>("file-input");
 const settingsDialog = $<HTMLDialogElement>("settings-dialog");
 const helpDialog = $<HTMLDialogElement>("help-dialog");
+
+/** showModal throws on a dialog that is already open, so ask first. */
+const openDialog = (dialog: HTMLDialogElement): void => {
+  if (!dialog.open) dialog.showModal();
+};
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -98,7 +124,7 @@ const service = new ServiceClient();
 const shell = new Shell({
   toggleTheme: () => toggleTheme(),
   openSettings: () => showSettings(),
-  openHelp: () => helpDialog.showModal(),
+  openHelp: () => openDialog(helpDialog),
   openPalette: () => palette.toggle(),
   clearSelection: () => viewer.clearSelection(),
   tabShown: (tab) => mountTab(tab),
@@ -137,6 +163,7 @@ new FilterChip(shell.viewerHost, filters);
 const connection = new Connection(service, { refresh: () => probeService() });
 shell.barSlot.appendChild(connection.chip);
 
+booted = true;
 const splash = document.getElementById("splash");
 splash?.classList.add("done");
 setTimeout(() => splash?.remove(), 240);
@@ -163,6 +190,7 @@ function assistant(): AssistantPanel {
     assistantUi = new AssistantPanel($("tab-assistant"), {
       onSend: (text) => void handleChat(text),
       onNewChat: () => newChat(),
+      onStop: () => stopChat(),
       onSettingsChange: () => refreshAssistantEngine(),
       openConsole: (code) => void plugins.open("python", true, code),
       openLocal: () => connection.open(),
@@ -287,12 +315,25 @@ async function raiseIssue(title: string, ids: number[]): Promise<void> {
   panel.capture(title, ids.length ? `${ids.length} elements do not meet this specification.` : "");
 }
 
+/** A panel that fails to arrive is not mounted, so opening the tab retries. */
+function mountLazy(tab: TabId, build: () => Promise<unknown>): void {
+  const host = $(`tab-${tab}`);
+  if (!host.childElementCount) host.appendChild(busyRow("Loading the panel"));
+  void build()
+    .then(() => host.querySelector(".busy-row")?.remove())
+    .catch((err: unknown) => {
+      host.replaceChildren(emptyState("alert", "This panel did not load", "Open the tab again to retry."));
+      shell.unmount(tab);
+      reportError(err);
+    });
+}
+
 function mountTab(tab: TabId): void {
   if (tab === "assistant") assistant();
   else if (tab === "filters") filterPanel();
-  else if (tab === "ids") void idsPanel().catch(reportError);
-  else if (tab === "bcf") void bcfPanel().catch(reportError);
-  else if (tab === "schedule") void schedulePanel().catch(reportError);
+  else if (tab === "ids") mountLazy(tab, idsPanel);
+  else if (tab === "bcf") mountLazy(tab, bcfPanel);
+  else if (tab === "schedule") mountLazy(tab, schedulePanel);
 }
 
 /** The type list is built the first time it is shown, like the tabs above. */
@@ -331,6 +372,15 @@ function toggleTheme(): void {
 function sniffSchema(bytes: Uint8Array): string | null {
   const head = new TextDecoder("latin1").decode(bytes.subarray(0, 4096));
   return /FILE_SCHEMA\s*\(\s*\(\s*'([^']+)'/i.exec(head)?.[1] ?? null;
+}
+
+/**
+ * STEP or the converted container, read from the bytes. The name lies: an edit
+ * made through Local Studio comes back as real STEP under a .ifcx file name,
+ * and trusting the extension there silently disarms the semantic engine.
+ */
+function isStep(bytes: Uint8Array): boolean {
+  return new TextDecoder("latin1").decode(bytes.subarray(0, 512)).includes("ISO-10303-21");
 }
 
 /** Byte-level substring search: a 50 MB file is never decoded just to find one token. */
@@ -413,28 +463,78 @@ const loadingUi = (() => {
   };
 })();
 
+/** Cleared by anything that shows the card again, so a drag cannot be eaten. */
+let dropzoneTimer = 0;
+
 function hideDropzone(animate: boolean): void {
   dropzone.classList.remove("dragging");
+  clearTimeout(dropzoneTimer);
   if (animate) {
     dropzone.classList.add("closing");
-    setTimeout(() => dropzone.classList.add("hidden"), 200);
+    dropzoneTimer = window.setTimeout(() => dropzone.classList.add("hidden"), 200);
   } else {
     dropzone.classList.add("hidden");
   }
 }
 
+/** Bring the drop card back, cancelling a fade that has not landed yet. */
+function showDropzone(): void {
+  clearTimeout(dropzoneTimer);
+  dropzone.classList.remove("hidden", "closing");
+}
+
+/** Forget the model at the app level. The viewer is the caller's business. */
+function dropModelState(): void {
+  activeBytes = null;
+  fileName = "";
+  schemaName = null;
+  checkpoints = [];
+  redoStack = [];
+  lastReport = null;
+  summaryDirty = true;
+  pythonSynced = false;
+  streamedCategories.clear();
+  ifc.setModel(null);
+  if (pendingEdit) discardPending();
+  service.forgetModel();
+  showDropzone();
+}
+
+/** A second open supersedes the first; only the newest one owns the chrome. */
+let loadSeq = 0;
+/** applyPending reloads with its own edit staged; every other load drops it. */
+let applying = false;
+
 async function loadBytes(bytes: Uint8Array, name: string, preserveCamera = false, adoptSha?: string): Promise<void> {
+  const mine = ++loadSeq;
+  // An edit staged against the model being replaced can never be applied to
+  // the one arriving, so it goes with the model it was written for.
+  if (pendingEdit && !applying) discardPending();
   const pose = preserveCamera ? viewer.getCamera() : null;
   shell.setStatus("Loading", "busy");
   loadingUi.show(name, () => viewer.cancelLoad());
   // Taken before the parser runs: viewer.load hands these bytes to a worker,
   // and a transferred buffer would leave the semantic engine with nothing.
-  const semanticCopy = name.toLowerCase().endsWith(".ifcx") ? null : bytes.slice();
+  const step = isStep(bytes);
+  const semanticCopy = step ? bytes.slice() : null;
   try {
     await viewer.load(bytes, { onProgress: (progress) => loadingUi.update(progress) });
+  } catch (err) {
+    // viewer.load drops whatever was on screen before it parses, so a failure
+    // leaves an empty viewport. App state has to follow it down instead of
+    // going on describing a model nobody can see any more.
+    if (mine === loadSeq) {
+      dropModelState();
+      // The panels read the viewer, so they only follow the model down if the
+      // viewer says it is gone. The error card is the one thing kept.
+      viewer.unload({ keepError: true });
+      updateModelChrome();
+    }
+    throw err;
   } finally {
-    loadingUi.hide();
+    if (mine === loadSeq) loadingUi.hide();
   }
+  if (mine !== loadSeq) return;
   if (pose) viewer.setCamera(pose);
   activeBytes = bytes;
   fileName = name;
@@ -449,6 +549,8 @@ async function loadBytes(bytes: Uint8Array, name: string, preserveCamera = false
   if (!preserveCamera) { checkpoints = []; redoStack = []; }
   hideDropzone(true);
   updateModelChrome();
+  // The tool catalog is gated on a model being open, so it has to be told.
+  refreshAssistantEngine();
   if (python.isReady()) void syncPython().catch(() => undefined);
   // The service must hold whatever the viewer is showing, including after an
   // edit or an undo, so the hand-over lives on the single load path. A model
@@ -523,72 +625,79 @@ async function openFile(file: File): Promise<void> {
  */
 let handingOver: Promise<void> | null = null;
 function handOverModel(): Promise<void> {
-  handingOver ??= (async () => {
-    if (!activeBytes || service.mode() !== "local" || fileName.endsWith(".ifcx")) return;
+  // Chained, not coalesced: a handover already running was started for the
+  // model that was open then, and answering a second request with it would
+  // leave the service holding something the viewer is no longer showing.
+  const bytes = activeBytes;
+  const name = fileName;
+  const run = async (): Promise<void> => {
+    if (!bytes || bytes !== activeBytes || service.mode() !== "local" || !isStep(bytes)) return;
     if (service.hasModel()) return;
     try {
-      await service.uploadModel(activeBytes, fileName);
+      await service.uploadModel(bytes, name);
+      if (bytes !== activeBytes) return service.forgetModel();
       shell.log("Model handed to the local service");
     } catch (err) {
       shell.log(err instanceof Error ? err.message : String(err), "error");
     }
     plugins.refresh();
     refreshAssistantEngine();
-  })().finally(() => {
-    handingOver = null;
-  });
+  };
+  handingOver = (handingOver ?? Promise.resolve()).catch(() => undefined).then(run);
   return handingOver;
 }
 
 function closeModel(): void {
-  activeBytes = null;
-  fileName = "";
-  schemaName = null;
-  checkpoints = [];
-  redoStack = [];
-  lastReport = null;
-  summaryDirty = true;
-  ifc.setModel(null);
-  if (pendingEdit) discardPending();
-  service.forgetModel();
-  dropzone.classList.remove("hidden", "closing");
+  dropModelState();
+  // The viewer holds the scene, the tree, the properties and every cache keyed
+  // to the model, so closing has to reach it or the panels keep describing a
+  // file the app has already forgotten.
+  viewer.unload();
   void renderRecents();
   updateModelChrome();
   refreshAssistantEngine();
   shell.log("Model closed");
 }
 
-function pushCheckpoint(bytes: Uint8Array): void {
-  checkpoints.push(bytes);
-  redoStack = [];
-  if (checkpoints.length > MAX_CHECKPOINTS) checkpoints.shift();
+/** Closing throws away edits that only live in this tab, so it asks first. */
+function closeOrConfirm(): void {
+  const staged = pendingEdit !== null;
+  if (!staged && checkpoints.length === 0) return closeModel();
+  confirmAction(
+    "Close this model?",
+    staged
+      ? "The staged edit and the undo history are dropped. Export first to keep them."
+      : "The undo history is dropped. Export first to keep the edits you applied.",
+    "Close",
+    closeModel,
+  );
 }
 
+// The stacks move only once the reload has landed: a load that fails or is
+// cancelled would otherwise take a checkpoint with it and leave nothing shown.
 async function undo(): Promise<void> {
-  const previous = checkpoints.pop();
-  if (!previous || !activeBytes) return;
-  redoStack.push(activeBytes);
+  const previous = checkpoints[checkpoints.length - 1];
+  const current = activeBytes;
+  if (!previous || !current) return;
   await loadBytes(previous, fileName, true);
+  checkpoints.pop();
+  redoStack.push(current);
   shell.log("Reverted to previous checkpoint", "info", true);
 }
 
 async function redo(): Promise<void> {
-  const next = redoStack.pop();
-  if (!next || !activeBytes) return;
-  checkpoints.push(activeBytes);
+  const next = redoStack[redoStack.length - 1];
+  const current = activeBytes;
+  if (!next || !current) return;
   await loadBytes(next, fileName, true);
+  redoStack.pop();
+  checkpoints.push(current);
   shell.log("Redid the edit", "info", true);
 }
 
 function exportModel(): void {
   if (!activeBytes) return;
-  const blob = new Blob([activeBytes.slice() as BlobPart], { type: "application/x-step" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = fileName || "model.ifc";
-  a.click();
-  URL.revokeObjectURL(url);
+  download(fileName || "model.ifc", activeBytes as BlobPart, "application/x-step");
   shell.log(`Exported ${fileName}`, "success", true);
 }
 
@@ -756,11 +865,14 @@ async function proposeEdit(code: string, source: "user" | "ai"): Promise<string>
 /** Route the runtime's progress lines to whoever asked for this run. */
 async function withPyStatus<T>(onStatus: ((text: string) => void) | undefined, run: () => Promise<T>): Promise<T> {
   const previous = pyStatus;
-  if (onStatus) pyStatus = onStatus;
+  const mine = onStatus ?? previous;
+  pyStatus = mine;
   try {
     return await run();
   } finally {
-    pyStatus = previous;
+    // Overlapping runs would restore each other's callback out of order and
+    // leave a closed panel's one installed, so only the current owner resets.
+    if (pyStatus === mine) pyStatus = previous;
   }
 }
 
@@ -804,6 +916,14 @@ function editReport(edit: {
     .join("\n");
 }
 
+/** An IFC attribute holds one value, so an object or array is a mistake. */
+function scalar(value: unknown): string | number | boolean {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  throw new Error("value must be a string, a number or a boolean");
+}
+
 /** Parse one ```edit block into a typed op, rejecting anything unknown. */
 function parseEditOp(raw: string): EditOp {
   let value: Record<string, unknown>;
@@ -816,10 +936,13 @@ function parseEditOp(raw: string): EditOp {
   if (ids.length === 0) throw new Error("ids is required; run a viewer find first");
   const op = String(value.op ?? "");
   if (op === "setAttribute") {
-    return { op, ids, attribute: String(value.attribute ?? ""), value: value.value as string };
+    return { op, ids, attribute: String(value.attribute ?? ""), value: scalar(value.value) };
   }
   if (op === "renameByPattern") {
-    return { op, ids, find: String(value.find ?? ""), replace: String(value.replace ?? "") };
+    const find = String(value.find ?? "");
+    // An empty separator splices the replacement between every character.
+    if (!find) throw new Error('renameByPattern needs a non-empty "find"');
+    return { op, ids, find, replace: String(value.replace ?? "") };
   }
   if (op === "setProperty") {
     return {
@@ -827,7 +950,7 @@ function parseEditOp(raw: string): EditOp {
       ids,
       set: String(value.set ?? ""),
       property: String(value.property ?? ""),
-      value: value.value as string,
+      value: scalar(value.value),
     };
   }
   if (op === "deleteElements") return { op, ids };
@@ -852,7 +975,7 @@ function renameSelection(): void {
       [{ key: "name", label: "Name", value: current, placeholder: "New name" }],
       "Stage edit",
       (values) => {
-        if (!values.name) return;
+        if (!values.name) return void toast("A name is required", "info");
         void proposeIfcEdit({ op: "setAttribute", ids, attribute: "Name", value: values.name }, "user")
           .catch(reportError);
       },
@@ -872,7 +995,9 @@ function setPropertyOnSelection(): void {
     ],
     "Stage edit",
     (values) => {
-      if (!values.set || !values.property) return;
+      if (!values.set || !values.property) {
+        return void toast("Name the property set and the property", "info");
+      }
       const raw = values.value;
       const parsed = raw === "true" ? true : raw === "false" ? false : Number(raw);
       void proposeIfcEdit(
@@ -967,10 +1092,20 @@ function proposalReport(edit: ProposedEdit, diff?: EditDiff): string {
 async function applyPending(): Promise<void> {
   if (!pendingEdit || !activeBytes) return;
   const edit = pendingEdit;
+  const previous = activeBytes;
+  // Staged until the reload lands: a failed apply that had already cleared the
+  // bar would lose the edit and leave a checkpoint that changed nothing.
+  applying = true;
+  try {
+    await loadBytes(edit.bytes, fileName, true);
+  } finally {
+    applying = false;
+  }
   pendingEdit = null;
   pendingBar.set(null);
-  pushCheckpoint(activeBytes);
-  await loadBytes(edit.bytes, fileName, true);
+  checkpoints.push(previous);
+  redoStack = [];
+  if (checkpoints.length > MAX_CHECKPOINTS) checkpoints.shift();
   shell.log(`Applied: ${edit.summary || "edit"}`, "success", true);
 }
 
@@ -1074,11 +1209,34 @@ function askModel(messages: ChatMessage[]): Promise<string> {
     loadSettings(),
     withSystem(messages),
     service.proxiesLlm() ? (turns) => service.chat(turns) : undefined,
+    chatAbort?.signal,
   );
+}
+
+/**
+ * One turn at a time. Stop and New chat both bump the generation, so a turn
+ * the user has walked away from can neither write into the transcript nor
+ * repopulate the history it was abandoned from.
+ */
+let chatSeq = 0;
+let chatAbort: AbortController | null = null;
+
+function stopChat(): void {
+  if (!chatAbort) return;
+  chatSeq += 1;
+  chatAbort.abort();
+  chatAbort = null;
+  const ui = assistant();
+  ui.setBusy(false);
+  ui.setStatus("");
+  ui.addMessage("system", "Stopped.");
 }
 
 async function handleChat(text: string): Promise<void> {
   const ui = assistant();
+  if (chatAbort) return void toast("The assistant is still answering", "info");
+  const mine = ++chatSeq;
+  chatAbort = new AbortController();
   shell.selectTab("assistant");
   ui.addMessage("user", text);
   ui.setBusy(true);
@@ -1089,13 +1247,19 @@ async function handleChat(text: string): Promise<void> {
     let rounds = 0;
     let reply = await askModel(history);
     for (;;) {
+      if (mine !== chatSeq) return;
       remember({ role: "assistant", content: reply });
       const extracted = extractCode(reply);
       // The call itself becomes a card below, so the prose keeps the sentence
       // that introduced it and loses the JSON: printing both says it twice.
       const prose = extracted ? stripBlock(reply, extracted.code) : reply;
       if (prose) ui.addMessage("assistant", prose);
-      if (!extracted || rounds >= MAX_TOOL_ROUNDS) break;
+      if (!extracted) break;
+      if (rounds >= MAX_TOOL_ROUNDS) {
+        // Ending on a silently dropped tool call looks like the turn stalled.
+        ui.addMessage("system", `Stopped after ${MAX_TOOL_ROUNDS} tool calls. Ask again to continue.`);
+        break;
+      }
       // Generated Python is always shown and never run, on every tier: the user
       // reads it and decides, and the loop ends there. Viewer actions and typed
       // edits are the assistant's own tools, so they are never escalated.
@@ -1122,11 +1286,13 @@ async function handleChat(text: string): Promise<void> {
       if (!done) {
         const giveUp = repairs >= MAX_REPAIRS;
         call.settle(report, false, !giveUp);
-        remember({ role: "user", content: repairPrompt(report) });
         if (giveUp) {
+          // No repair prompt on the way out: the transcript would end with an
+          // instruction to retry that nothing is going to answer.
           ui.addMessage("system", `Failed after ${MAX_REPAIRS + 1} attempts. The error is in the card above.`);
           break;
         }
+        remember({ role: "user", content: repairPrompt(report) });
         repairs += 1;
       } else {
         call.settle(report, true);
@@ -1139,10 +1305,16 @@ async function handleChat(text: string): Promise<void> {
       reply = await askModel(history);
     }
   } catch (err) {
-    ui.addMessage("system", `Error: ${err instanceof Error ? err.message : String(err)}`);
+    // An abort is the user pressing Stop, and stopChat already said so.
+    if (mine === chatSeq) {
+      ui.addMessage("system", `Error: ${err instanceof Error ? err.message : String(err)}`);
+    }
   } finally {
-    ui.setBusy(false);
-    ui.setStatus("");
+    if (mine === chatSeq) {
+      chatAbort = null;
+      ui.setBusy(false);
+      ui.setStatus("");
+    }
   }
 }
 
@@ -1152,8 +1324,14 @@ function withSystem(messages: ChatMessage[]): ChatMessage[] {
 }
 
 function newChat(): void {
+  // Fence the turn in flight before the transcript goes: otherwise its reply
+  // lands in the new chat and its tool reports go back into the history.
+  chatSeq += 1;
+  chatAbort?.abort();
+  chatAbort = null;
   history.length = 0;
   assistant().reset();
+  assistant().setBusy(false);
   shell.selectTab("assistant");
 }
 
@@ -1177,14 +1355,18 @@ function renderSummary(): void {
   }
 
   const page = h("div", { class: "page scroll" });
+  // A cache replay never parses, so a bare "0 ms" reads as a broken timer.
+  const replayed = stats.parseMs === 0 && stats.geometryMs === 0;
   const facts: Array<[string, string]> = [
     ["File", fileName],
     ["Schema", schemaName ?? "unknown"],
     ["Entities", stats.totalEntities.toLocaleString()],
     ["Meshes", stats.meshCount.toLocaleString()],
     ["Triangles", stats.triangleCount.toLocaleString()],
-    ["Parse", `${stats.parseMs.toFixed(0)} ms`],
-    ["Geometry", `${stats.geometryMs.toFixed(0)} ms`],
+    ["Parse", replayed ? "replayed from cache" : `${stats.parseMs.toFixed(0)} ms`],
+    ...(replayed
+      ? []
+      : [["Geometry", `${stats.geometryMs.toFixed(0)} ms`] as [string, string]]),
   ];
   const list = h("dl", { class: "kv" });
   for (const [key, value] of facts) {
@@ -1375,7 +1557,10 @@ function openRecent(sha: string, name: string): void {
   if (pendingEdit) discardPending();
   void loadCachedSource(sha)
     .then((bytes) => {
-      if (!bytes) return renderRecents();
+      if (!bytes) {
+        toast(`${name} is no longer cached. Open it from disk.`, "info");
+        return renderRecents();
+      }
       return loadBytes(bytes, name).then(() => shell.log(`Opened ${name}`, "success"));
     })
     .catch(reportError);
@@ -1445,6 +1630,8 @@ $("settings-close").addEventListener("click", () => settingsDialog.close());
 $("settings-done").addEventListener("click", () => settingsDialog.close());
 $("help-close").addEventListener("click", () => helpDialog.close());
 $("help-done").addEventListener("click", () => helpDialog.close());
+// The markup leaves these two empty; every other dialog close is an iconButton.
+for (const id of ["settings-close", "help-close"]) $(id).appendChild(icon("x"));
 lightDismiss(settingsDialog);
 lightDismiss(helpDialog);
 
@@ -1460,7 +1647,7 @@ function showSettings(): void {
     : !isConfigured(llm)
       ? "Not configured yet."
       : `${provider.label} · ${llm.model}, ${isVerified(llm) ? "verified" : "not verified yet"}.`;
-  settingsDialog.showModal();
+  openDialog(settingsDialog);
 }
 
 // ---------------------------------------------------------------------------
@@ -1471,7 +1658,7 @@ const registry = new CommandRegistry();
 registry.add([
   { id: "file.open", label: "Open", icon: "folder", section: "File", shortcut: "Ctrl+O", hint: "Open an IFC or .ifcx file", run: () => fileInput.click() },
   { id: "file.export", label: "Export", icon: "download", section: "File", hint: "Download the active IFC", enabled: hasModel, run: exportModel },
-  { id: "file.close", label: "Close", icon: "x", section: "File", enabled: hasModel, run: closeModel },
+  { id: "file.close", label: "Close", icon: "x", section: "File", enabled: hasModel, run: closeOrConfirm },
   { id: "file.screenshot", label: "Screenshot", icon: "camera", section: "File", shortcut: "S", enabled: hasModel, run: () => { viewer.screenshot(); shell.log("Screenshot saved", "success", true); } },
   { id: "file.viewpoint", label: "Viewpoint", icon: "bookmark", section: "File", shortcut: "V", enabled: hasModel, run: saveViewpoint },
   { id: "file.convert", label: "Convert", icon: "refresh", section: "Local Studio", tier: "local", available: () => canLocal("convert"), hint: "IfcOpenShell → .ifcx, then reopens are instant", enabled: hasModel, run: () => void convertWithService() },
@@ -1529,7 +1716,7 @@ registry.add([
   { id: "app.connection", label: "Studio", icon: "plug", section: "Application", hint: "Web Studio or Local Studio", run: () => connection.open() },
   { id: "app.theme", label: "Theme", icon: "moon", section: "Application", run: toggleTheme },
   { id: "app.settings", label: "Settings", icon: "settings", section: "Application", shortcut: "Ctrl+,", run: () => showSettings() },
-  { id: "app.help", label: "Shortcuts", icon: "help", section: "Application", shortcut: "?", run: () => helpDialog.showModal() },
+  { id: "app.help", label: "Shortcuts", icon: "help", section: "Application", shortcut: "?", run: () => openDialog(helpDialog) },
   { id: "app.palette", label: "Command palette", icon: "command", section: "Application", shortcut: "Ctrl+K", run: () => palette.toggle() },
   { id: "app.ribbon", label: "Collapse ribbon", icon: "chevron", section: "Application", shortcut: "Ctrl+F1", run: () => ribbon.setCollapsed(!ribbon.isCollapsed()) },
 ]);
@@ -1690,8 +1877,8 @@ const RIBBON: RibbonTab[] = [
   },
 ];
 
-function buildScaleControl(): { el: HTMLElement } {
-  const select = h("select", { class: "rib-select", title: "Render scale" });
+function buildScaleControl(): RibbonControl {
+  const select = h("select", { class: "rib-select", title: "Render scale", "aria-label": "Render scale" });
   for (const [value, label] of [["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.5", "150%"], ["2", "200%"]]) {
     select.appendChild(h("option", { value, text: label }));
   }
@@ -1702,7 +1889,15 @@ function buildScaleControl(): { el: HTMLElement } {
     viewer.setRenderScale(settings.scale);
     persistSettings();
   });
-  return { el: h("div", { class: "rib-field" }, [h("label", { text: "Render scale" }), select]) };
+  return {
+    el: h("div", { class: "rib-field" }, [h("label", { text: "Render scale" }), select]),
+    // The same value lives in the Settings dialog; whichever is edited, this
+    // reads the stored one back rather than showing the value it was built at.
+    sync: () => {
+      const stored = String(settings.scale);
+      if (select.value !== stored) select.value = stored;
+    },
+  };
 }
 
 const ribbon = new Ribbon($("ribbon-tabs"), $("ribbon"), registry, RIBBON);
@@ -1919,6 +2114,7 @@ bridge.register("get_properties", async (params) => {
 });
 bridge.register("set_visibility", (params) => {
   const id = Number(params.express_id);
+  if (!Number.isFinite(id) || id <= 0) throw new Error("express_id required");
   viewer.setSubtreeVisible(id, Boolean(params.visible));
   return { expressId: id, visible: Boolean(params.visible) };
 });
@@ -1950,7 +2146,7 @@ let dragDepth = 0;
 window.addEventListener("dragenter", (e) => {
   e.preventDefault();
   dragDepth += 1;
-  dropzone.classList.remove("hidden", "closing");
+  showDropzone();
   dropzone.classList.add("dragging");
 });
 window.addEventListener("dragover", (e) => e.preventDefault());
@@ -1967,14 +2163,22 @@ window.addEventListener("drop", (e) => {
   dropzone.classList.remove("dragging");
   if (activeBytes) dropzone.classList.add("hidden");
   const file = e.dataTransfer?.files?.[0];
-  if (file) void openFile(file).catch(reportError);
+  if (!file) return void toast("Drop an .ifc or .ifcx file", "info");
+  if (!/\.(ifc|ifcx|ifczip)$/i.test(file.name)) {
+    return void toast(`${file.name} is not an IFC file`, "error");
+  }
+  void openFile(file).catch(reportError);
 });
 
 window.addEventListener("keydown", (e) => {
   const target = e.target as HTMLElement | null;
+  // A modal dialog owns the keyboard: the app behind it is inert, so a stray
+  // S would download a screenshot of a viewport nobody can see.
+  if (document.querySelector("dialog[open]")) return;
   const typing =
     target instanceof HTMLInputElement ||
     target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
     target?.isContentEditable === true;
 
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {

@@ -189,6 +189,8 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
   let tested = 0;
   let truncated = false;
   let running = false;
+  /** Bumped by every model change, so a sweep in flight knows it is stale. */
+  let models = 0;
 
   const status = progress();
   const results = h("div", { class: "plug-results" });
@@ -260,6 +262,7 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
       return;
     }
     running = true;
+    const generation = models;
     const a = boxesFor(api.viewer, setA);
     const b = boxesFor(api.viewer, setB);
     status.set(0, a.length, `Indexing ${b.length.toLocaleString()} elements`);
@@ -268,11 +271,15 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
       const result = await sweepBoxes(a, b, tolerance, (done, total, found) =>
         status.set(done, total, `Sweeping ${found.toLocaleString()} hits so far`),
       );
+      // Express ids from the model this started against mean something else in
+      // the one that replaced it while the sweep ran.
+      if (generation !== models) return;
       ({ hits, tested, truncated } = result);
     } finally {
       status.hide();
       running = false;
     }
+    if (generation !== models) return;
     api.log(`Clash sweep: ${hits.length.toLocaleString()} hit(s) across ${tested.toLocaleString()} pair tests`, hits.length ? "info" : "success");
     paint();
   };
@@ -340,6 +347,7 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
 
   return {
     modelChanged: () => {
+      models += 1;
       hits = [];
       tested = 0;
       truncated = false;

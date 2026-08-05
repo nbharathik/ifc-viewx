@@ -58,9 +58,13 @@ function framePose(
   dir: THREE.Vector3,
   fovDeg: number,
   margin = 1.15,
+  aspect = 1,
 ): CameraPose {
   const fov = (fovDeg * Math.PI) / 180;
-  const distance = (Math.max(radius, 0.5) / Math.sin(fov / 2)) * margin;
+  // A viewport narrower than it is tall has a smaller horizontal field, so
+  // framing on the vertical one alone lets the model spill off the sides.
+  const half = aspect < 1 ? 2 * Math.atan(Math.tan(fov / 2) * aspect) : fov;
+  const distance = (Math.max(radius, 0.5) / Math.sin(half / 2)) * margin;
   const position = center.clone().add(dir.clone().normalize().multiplyScalar(distance));
   return {
     position: [position.x, position.y, position.z],
@@ -87,6 +91,8 @@ export class ViewerControls {
   private downY = 0;
   /** A tool owns the left button; orbit is on the right one meanwhile. */
   private toolActive = false;
+  /** Tears down an in-flight claim(), so dispose cannot leave listeners on. */
+  private claimed: (() => void) | null = null;
   /** The press a tool claimed also owns the click its release produces. */
   private toolClaimed = false;
 
@@ -187,15 +193,24 @@ export class ViewerControls {
   ): void {
     down.stopPropagation();
     down.preventDefault();
+    // One pointer owns the gesture: a second finger's release would otherwise
+    // end the first one's drag, at the second one's coordinates.
+    const id = down.pointerId;
     // pointercancel too: a touch-scroll takeover or palm rejection never fires
     // pointerup, and the stale listeners would replay on the next gesture.
+    const onMove = (e: PointerEvent): void => {
+      if (e.pointerId === id) move(e);
+    };
     const onUp = (e: PointerEvent): void => {
-      this.doc.removeEventListener('pointermove', move);
+      if (e.pointerId !== id) return;
+      this.doc.removeEventListener('pointermove', onMove);
       this.doc.removeEventListener('pointerup', onUp);
       this.doc.removeEventListener('pointercancel', onUp);
+      this.claimed = null;
       up(e);
     };
-    this.doc.addEventListener('pointermove', move);
+    this.claimed = () => onUp(new PointerEvent('pointercancel', { pointerId: id }));
+    this.doc.addEventListener('pointermove', onMove);
     this.doc.addEventListener('pointerup', onUp);
     this.doc.addEventListener('pointercancel', onUp);
   }
@@ -243,7 +258,7 @@ export class ViewerControls {
     const radius =
       new THREE.Vector3(b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z).length() * 0.5;
     const dir = new THREE.Vector3(...VIEW_DIRECTIONS[view]);
-    const pose = framePose(center, radius, dir, this.scene.camera.fov);
+    const pose = framePose(center, radius, dir, this.scene.camera.fov, 1.15, this.scene.camera.aspect);
     this.applyNearFar(radius);
     this.setPose(pose);
     return pose;
@@ -262,8 +277,16 @@ export class ViewerControls {
     const radius = box.getSize(new THREE.Vector3()).length() * 0.5;
     const current = this.scene.camera.position.clone().sub(this.orbit.target);
     const dir = current.lengthSq() > 1e-6 ? current : new THREE.Vector3(1, 0.8, 1);
-    const pose = framePose(center, radius, dir, this.scene.camera.fov, 1.3);
-    this.applyNearFar(radius);
+    const pose = framePose(center, radius, dir, this.scene.camera.fov, 1.3, this.scene.camera.aspect);
+    // Sized from the model, not from the element: a far plane set by a door
+    // radius clips the building the door is standing in.
+    const scene = this.scene.getBounds();
+    const span = new THREE.Vector3(
+      scene.max.x - scene.min.x,
+      scene.max.y - scene.min.y,
+      scene.max.z - scene.min.z,
+    ).length();
+    this.applyNearFar(radius, Number.isFinite(span) ? span : radius);
     this.setPose(pose);
     return pose;
   }
@@ -288,10 +311,11 @@ export class ViewerControls {
     ];
   }
 
-  private applyNearFar(radius: number): void {
+  /** `reach` is what must stay visible; `radius` only sets near-plane detail. */
+  private applyNearFar(radius: number, reach = radius): void {
     const cam = this.scene.camera;
     cam.near = Math.max(radius / 1000, 0.001);
-    cam.far = Math.max(radius * 1000, 100);
+    cam.far = Math.max(Math.max(radius, reach) * 1000, 100);
     cam.updateProjectionMatrix();
   }
 
@@ -383,6 +407,8 @@ export class ViewerControls {
   }
 
   dispose(): void {
+    // A drag in flight holds document-level listeners that would outlive this.
+    this.claimed?.();
     this.orbit.dispose();
     const dom = this.scene.renderer.domElement;
     this.container.removeEventListener('pointerdown', this.grabHandler, true);

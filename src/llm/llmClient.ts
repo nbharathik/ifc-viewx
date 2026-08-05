@@ -218,19 +218,21 @@ export async function verifyModel(settings: LlmSettings): Promise<VerifyResult> 
 
   const anthropic = provider.wire === "anthropic";
   const started = performance.now();
-  const res = await reach(
-    `${base}${anthropic ? "/v1/messages" : "/chat/completions"}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders(provider, settings) },
-      body: JSON.stringify({
-        model,
-        max_tokens: VERIFY_TOKENS,
-        messages: [{ role: "user", content: "Reply with the single word: ready" }],
-      }),
-    },
-    base,
-  );
+  const url = `${base}${anthropic ? "/v1/messages" : "/chat/completions"}`;
+  const headers = { "Content-Type": "application/json", ...authHeaders(provider, settings) };
+  const body = {
+    model,
+    max_tokens: VERIFY_TOKENS,
+    messages: [{ role: "user", content: "Reply with the single word: ready" }],
+  };
+  let res: Response;
+  try {
+    res = anthropic
+      ? await fetch(url, { method: "POST", headers, body: JSON.stringify(body) })
+      : await postOpenAi(url, headers, body);
+  } catch {
+    throw new Error(`Could not reach ${base}. Check the server is running and allows requests from this page.`);
+  }
   if (!res.ok) throw new Error(await errorDetail(res));
 
   // A 200 is not proof on its own: a wrong base URL can serve a web page, and
@@ -262,6 +264,7 @@ export async function chat(
   settings: LlmSettings,
   messages: ChatMessage[],
   proxy?: (messages: ChatMessage[]) => Promise<string>,
+  signal?: AbortSignal,
 ): Promise<string> {
   if (proxy) return proxy(messages);
   if (!settings.model) throw new Error("Choose an assistant provider and model in Settings first.");
@@ -270,21 +273,46 @@ export async function chat(
     throw new Error(`${provider.label} needs an API key. Paste one in Settings.`);
   }
   return provider.wire === "anthropic"
-    ? chatAnthropic(settings, messages)
-    : chatOpenAi(settings, messages);
+    ? chatAnthropic(settings, messages, signal)
+    : chatOpenAi(settings, messages, signal);
 }
 
-async function chatOpenAi(settings: LlmSettings, messages: ChatMessage[]): Promise<string> {
-  const response = await fetch(`${endpointOf(settings)}/chat/completions`, {
+/**
+ * Post an OpenAI-wire body, renaming the token cap once if the server asks.
+ * Reasoning models (o-series, gpt-5) reject `max_tokens` outright and want
+ * `max_completion_tokens`, so sending only one of them locks those out.
+ */
+async function postOpenAi(
+  url: string,
+  headers: Record<string, string>,
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const response = await fetch(url, { method: "POST", signal, headers, body: JSON.stringify(body) });
+  if (response.status !== 400) return response;
+  const detail = await errorDetail(response.clone());
+  if (!/max_completion_tokens/i.test(detail)) return response;
+  const { max_tokens: cap, ...rest } = body;
+  return fetch(url, {
     method: "POST",
-    headers: {
+    signal,
+    headers,
+    body: JSON.stringify({ ...rest, max_completion_tokens: cap }),
+  });
+}
+
+async function chatOpenAi(settings: LlmSettings, messages: ChatMessage[], signal?: AbortSignal): Promise<string> {
+  const response = await postOpenAi(
+    `${endpointOf(settings)}/chat/completions`,
+    {
       "Content-Type": "application/json",
       ...authHeaders(findProvider(settings.provider), settings),
     },
     // Without a cap a self-hosted server allows the whole context window, and
     // a reasoning model will spend it: one tool choice ran past 15k tokens.
-    body: JSON.stringify({ model: settings.model, messages, max_tokens: MAX_TOKENS }),
-  });
+    { model: settings.model, messages, max_tokens: MAX_TOKENS },
+    signal,
+  );
   if (!response.ok) {
     throw new Error(`LLM request failed (HTTP ${response.status}): ${await errorDetail(response)}`);
   }
@@ -305,13 +333,14 @@ async function chatOpenAi(settings: LlmSettings, messages: ChatMessage[]): Promi
   return content;
 }
 
-async function chatAnthropic(settings: LlmSettings, messages: ChatMessage[]): Promise<string> {
+async function chatAnthropic(settings: LlmSettings, messages: ChatMessage[], signal?: AbortSignal): Promise<string> {
   const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
   const turns = messages
     .filter((m) => m.role !== "system")
     .map((m) => ({ role: m.role, content: m.content }));
   const response = await fetch(`${endpointOf(settings)}/v1/messages`, {
     method: "POST",
+    signal,
     headers: {
       "Content-Type": "application/json",
       ...authHeaders(findProvider(settings.provider), settings),

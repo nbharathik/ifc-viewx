@@ -5,7 +5,7 @@
 // Collapsed, the strip takes no height and a tab click opens it as a flyout
 // that closes after one command (the PowerPoint behaviour, at a lighter
 // weight). The choice persists.
-import { buildMenu, closeLayer, h, icon, openLayer, type MenuItem } from "./kit.js";
+import { buildMenu, closeLayer, h, icon, menuKeys, openLayer, type MenuItem } from "./kit.js";
 import type { CommandRegistry } from "./commands.js";
 
 export interface RibbonControl {
@@ -61,6 +61,7 @@ export class Ribbon {
         role: "tab",
         text: tab.label,
         "aria-selected": "false",
+        "aria-controls": "ribbon",
       });
       button.addEventListener("click", () => this.onTabClick(tab.id));
       button.addEventListener("dblclick", () => this.setCollapsed(!this.collapsed));
@@ -102,6 +103,12 @@ export class Ribbon {
     localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0");
     if (collapsed) closeLayer();
     this.flyout = false;
+    this.paintCollapsed();
+  }
+
+  /** Keep a collapsed ribbon open for the life of a dropdown, and no longer. */
+  private hold(on: boolean): void {
+    this.flyout = on;
     this.paintCollapsed();
   }
 
@@ -194,19 +201,27 @@ export class Ribbon {
       button.addEventListener("click", () => {
         if (button.getAttribute("aria-expanded") === "true") return closeLayer();
         // A dropdown claims the transient layer, which would dismiss the
-        // flyout it sits in; pin the ribbon instead of vanishing under it.
-        if (this.flyout) this.setCollapsed(false);
+        // flyout it sits in; hold the ribbon open without touching the
+        // stored preference, which the user set deliberately.
+        const pinned = this.flyout;
+        if (pinned) this.hold(true);
+        // The ribbon strip clips its overflow, so a drop parked inside the
+        // anchor would be cut off after a few pixels. It lives on <body> and
+        // is placed against the button instead.
         const drop = buildMenu(item.items());
-        button.parentElement?.appendChild(drop);
+        drop.classList.add("floating");
+        document.body.appendChild(drop);
         button.setAttribute("aria-expanded", "true");
-        // Keep it on screen when the anchor sits near the right edge.
-        const rect = drop.getBoundingClientRect();
-        const overflow = rect.right - (window.innerWidth - 8);
-        if (overflow > 0) drop.style.marginLeft = `${-overflow}px`;
+        const at = button.getBoundingClientRect();
+        const box = drop.getBoundingClientRect();
+        drop.style.left = `${Math.max(8, Math.min(at.left, window.innerWidth - box.width - 8))}px`;
+        drop.style.top = `${Math.min(at.bottom + 5, window.innerHeight - box.height - 8)}px`;
         openLayer([drop, button], () => {
           drop.remove();
           button.setAttribute("aria-expanded", "false");
+          if (pinned) this.hold(false);
         });
+        menuKeys(drop);
       });
       return h("div", { class: "rib-anchor" }, [button]);
     }

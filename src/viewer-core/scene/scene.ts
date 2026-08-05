@@ -110,6 +110,8 @@ export class SceneController {
     live: THREE.MeshBasicMaterial;
   } | null = null;
   private plan = false;
+  /** Kept because clearModel builds a fresh batcher, which defaults to on. */
+  private doubleSided = true;
   private readonly planCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 1000);
   /** Section handles live in their own scene so clipping can be turned off. */
   private readonly gizmoScene = new THREE.Scene();
@@ -875,6 +877,7 @@ export class SceneController {
   }
 
   setDoubleSided(double: boolean): void {
+    this.doubleSided = double;
     this.batcher.setDoubleSided(double);
   }
 
@@ -929,6 +932,7 @@ export class SceneController {
     this.scene.remove(this.batcher.group);
     this.batcher.dispose();
     this.batcher = new ModelBatcher();
+    this.batcher.setDoubleSided(this.doubleSided);
     this.scene.add(this.batcher.group);
   }
 

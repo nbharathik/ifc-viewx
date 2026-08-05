@@ -63,6 +63,14 @@ export function elementCounts(viewer: Viewer): Record<string, number> {
   return counts;
 }
 
+/**
+ * Names come out of the file, so they are quoted and stripped of the line
+ * breaks that would let a crafted model write its own instructions into the
+ * system prompt. The brief is data about the model, never a message from it.
+ */
+const quote = (text: string): string =>
+  JSON.stringify(text.replace(/[\r\n]+/g, " ").slice(0, 120));
+
 export function buildModelBrief(viewer: Viewer, fileName: string, schema: string | null): string | null {
   const stats = viewer.getStats();
   const tree = viewer.getSpatialTree();
@@ -76,10 +84,10 @@ export function buildModelBrief(viewer: Viewer, fileName: string, schema: string
   }
   const top = [...byType.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
   return [
-    `Loaded model: ${fileName}${schema ? ` (${schema})` : ""}`,
+    `Loaded model: ${quote(fileName)}${schema ? ` (${quote(schema)})` : ""}`,
     `Entities: ${stats.totalEntities}, placed elements: ${elements.length}, triangles: ${stats.triangleCount}`,
-    `Storeys: ${[...byStorey.entries()].map(([n, c]) => `${n} (${c})`).join(", ") || "(none)"}`,
-    `Element types: ${top.map(([t, c]) => `${t} x${c}`).join(", ")}`,
+    `Storeys: ${[...byStorey.entries()].map(([n, c]) => `${quote(n)} (${c})`).join(", ") || "(none)"}`,
+    `Element types: ${top.map(([t, c]) => `${quote(t)} x${c}`).join(", ")}`,
   ].join("\n");
 }
 
@@ -115,8 +123,12 @@ export async function runViewerAction(
   }
   const kind = String(action.action ?? "");
   const id = Number(action.id);
+  // Number(null) is 0 and Number(true) is 1, so a malformed array would pass
+  // the non-empty guard below and report touching elements that do not exist.
   const ids = Array.isArray(action.ids)
-    ? action.ids.map(Number).filter(Number.isFinite)
+    ? action.ids.filter((value) => typeof value === "number" || typeof value === "string")
+        .map(Number)
+        .filter((value) => Number.isFinite(value) && value > 0)
     : [];
   const tree = viewer.getSpatialTree();
 
@@ -141,7 +153,10 @@ export async function runViewerAction(
       });
     }
     case "counts":
-      return JSON.stringify(await viewer.getCountsByType());
+      // Placed elements, which is what the tool description promises and what
+      // every other count in the app means. The raw entity histogram counts
+      // types, styles and relationships as well.
+      return JSON.stringify(elementCounts(viewer));
     case "storeys": {
       if (!tree) throw new Error("no model loaded");
       const rows = new Map<string, Map<string, number>>();

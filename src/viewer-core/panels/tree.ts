@@ -82,6 +82,7 @@ export class TreePanel {
   private selected = new Set<number>();
   /** Where a Shift-click range starts, in flat-index space. */
   private anchor = -1;
+  private resize: ResizeObserver | null = null;
 
   constructor(
     container: HTMLElement,
@@ -129,8 +130,16 @@ export class TreePanel {
     this.body.appendChild(this.spacer);
     this.body.addEventListener('scroll', () => this.schedulePaint(), { passive: true });
     this.window.addEventListener('click', (e) => this.onClick(e));
+    this.window.setAttribute('role', 'tree');
+    this.window.setAttribute('aria-label', 'Spatial structure');
     this.root.appendChild(this.body);
     container.appendChild(this.root);
+    // A taller panel exposes rows the virtualizer never painted, and only a
+    // scroll would have brought them in.
+    if (typeof ResizeObserver !== 'undefined') {
+      this.resize = new ResizeObserver(() => this.schedulePaint());
+      this.resize.observe(this.body);
+    }
 
     this.render();
     this.syncSearch();
@@ -142,6 +151,9 @@ export class TreePanel {
         this.expanded.clear();
         this.savedExpanded = null;
         this.isolated = false;
+        // A flat index from the previous model is not a range start in this one.
+        this.anchor = -1;
+        this.selected.clear();
         this.body.scrollTop = 0;
         this.render();
         this.syncSearch();
@@ -484,6 +496,13 @@ export class TreePanel {
     el.dataset.id = String(node.expressID);
     el.title = `${node.name ?? '(unnamed)'} · ${node.type}`;
     if (selected) el.setAttribute('data-selected', 'true');
+    // The rows are the tree, so they say so: a virtualized list still has to
+    // report its real depth and its position within the whole model.
+    el.setAttribute('role', 'treeitem');
+    el.setAttribute('aria-level', String(this.depth[index] + 1));
+    el.setAttribute('aria-selected', String(selected));
+    el.setAttribute('aria-posinset', String(index + 1));
+    el.setAttribute('aria-setsize', String(this.rows.length));
 
     const toggle = this.doc.createElement('span');
     const open = this.expanded.has(node.expressID);
@@ -491,7 +510,12 @@ export class TreePanel {
       open ? ' ifc-tree-toggle--open' : ''
     }`;
     toggle.dataset.act = 'toggle';
-    if (node.children.length) toggle.innerHTML = CHEVRON;
+    if (node.children.length) {
+      toggle.innerHTML = CHEVRON;
+      toggle.setAttribute('role', 'button');
+      toggle.setAttribute('aria-label', open ? 'Collapse' : 'Expand');
+      el.setAttribute('aria-expanded', String(open));
+    }
     el.appendChild(toggle);
 
     // A hit marks what matched, in the name or in the class, so the row says
@@ -516,6 +540,8 @@ export class TreePanel {
       eye.className = 'ifc-tree-eye';
       eye.dataset.act = 'eye';
       eye.setAttribute('data-testid', `tree-eye-${node.expressID}`);
+      eye.setAttribute('role', 'button');
+      eye.setAttribute('aria-label', `${visible ? 'Hide' : 'Show'} ${node.name ?? node.type}`);
       eye.innerHTML = visible ? EYE : EYE_OFF;
       eye.title = visible ? 'Hide' : 'Show';
       el.appendChild(eye);
@@ -618,6 +644,7 @@ export class TreePanel {
   dispose(): void {
     cancelAnimationFrame(this.frame);
     cancelAnimationFrame(this.filterFrame);
+    this.resize?.disconnect();
     for (const off of this.unsubs) off();
     this.root.remove();
   }

@@ -29,6 +29,7 @@ export class IfcEngine {
   private readonly pending = new Map<number, Pending>();
   private bytes: Uint8Array | null = null;
   private pushed = false;
+  private pushing: Promise<void> | null = null;
 
   constructor(private readonly wasmPath: string) {}
 
@@ -63,8 +64,12 @@ export class IfcEngine {
       entry.reject(err);
     }
     this.pending.clear();
+    // Dropping the reference is not enough: the thread stays alive with a
+    // parsed model and its wasm heap until it is told to stop.
+    this.worker?.terminate();
     this.worker = null;
     this.pushed = false;
+    this.pushing = null;
   }
 
   private send(request: IfcRequest, transfer: Transferable[] = []): Promise<IfcResponse> {
@@ -85,9 +90,20 @@ export class IfcEngine {
   setModel(bytes: Uint8Array | null): void {
     this.bytes = bytes;
     this.pushed = false;
+    this.pushing = null;
   }
 
-  private async ready(): Promise<void> {
+  private ready(): Promise<void> {
+    // Single-flight: checks and schedules both call this, and without the
+    // shared promise each would copy and transfer the whole model on its own.
+    this.pushing ??= this.push().catch((err: unknown) => {
+      this.pushing = null;
+      throw err;
+    });
+    return this.pushing;
+  }
+
+  private async push(): Promise<void> {
     if (this.pushed) return;
     if (!this.bytes) {
       throw new Error(
