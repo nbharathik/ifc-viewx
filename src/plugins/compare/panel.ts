@@ -3,12 +3,8 @@
 // The baseline is parsed in its own worker with geometry skipped, so a second
 // model costs parse time and property reads but no GPU memory. Matching is by
 // GlobalId, which is what survives a round trip through authoring tools.
-import { h } from "../../ui/kit.js";
-import { emptyState } from "../../ui/shell.js";
-import { bar, button, note, page, progress, saveCsv, stats, type ElementRow, type Value } from "../kit.js";
-import { WorkerEngine } from "../../viewer-core/engine/workerEngine.js";
-import type { PluginApi, PluginInstance } from "../host.js";
-import type { SpatialNode } from "../../viewer-core/viewer.js";
+import { bar, button, elementsOf, emptyState, h, note, openSideModel, page, progress, saveCsv, stats } from "@ifcviewx/sdk";
+import type { ElementRow, PluginContext, PluginInstance, SideModel, Value } from "@ifcviewx/sdk";
 
 interface Snapshot {
   type: string;
@@ -34,14 +30,14 @@ interface Entry {
 
 type View = "added" | "removed" | "changed";
 
-const SPATIAL = new Set(["IfcProject", "IfcSite", "IfcBuilding", "IfcBuildingStorey"]);
 const WINDOW = 12;
 const LIST_LIMIT = 300;
 /** Attributes that differ on every reopen and say nothing about the design. */
 const IGNORED = new Set(["GlobalId", "OwnerHistory", "expressID"]);
 
-export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
-  let engine: WorkerEngine | null = null;
+export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
+  let side: SideModel | null = null;
+  let closed = false;
   let baselineName = "";
   let added: Entry[] = [];
   let removed: Entry[] = [];
@@ -66,7 +62,7 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
       button("Choose baseline IFC", () => picker.click(), "accent"),
       button("Isolate added", () => isolate(added)),
       button("Isolate changed", () => isolate(changed)),
-      button("Show all", () => api.viewer.showAll()),
+      button("Show all", () => ctx.showAll()),
       button("CSV", () => exportCsv()),
     ),
     picker,
@@ -77,24 +73,24 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
   );
 
   const isolate = (entries: Entry[]): void => {
-    if (entries.length === 0) return void api.log("Nothing in that group", "error");
-    api.viewer.isolate(entries.map((entry) => entry.id));
+    if (entries.length === 0) return void ctx.log("Nothing in that group", "error");
+    ctx.isolate(entries.map((entry) => entry.id));
   };
 
   const compare = async (file: File): Promise<void> => {
     if (busy) return;
-    if (!api.modelKey()) return void api.log("Open a model before comparing", "error");
+    if (!ctx.model().key) return void ctx.log("Open a model before comparing", "error");
     busy = true;
     baselineName = file.name;
     try {
       status.set(0, 1, `Indexing the open model`);
-      const current = await api.index().build((done, total) => status.set(done, total, `Indexing the open model ${done.toLocaleString()} of ${total.toLocaleString()}`));
+      const current = await ctx.index().build((done, total) => status.set(done, total, `Indexing the open model ${done.toLocaleString()} of ${total.toLocaleString()}`));
       status.set(0, 1, `Parsing ${file.name}`);
       const baseline = await readBaseline(file, (done, total) => status.set(done, total, `Reading ${file.name} ${done.toLocaleString()} of ${total.toLocaleString()}`));
       diff(current, baseline);
-      api.log(`Compared against ${file.name}: ${added.length} added, ${removed.length} removed, ${changed.length} changed`, "success");
+      ctx.log(`Compared against ${file.name}: ${added.length} added, ${removed.length} removed, ${changed.length} changed`, "success");
     } catch (err) {
-      api.log(err instanceof Error ? err.message : String(err), "error");
+      ctx.log(err instanceof Error ? err.message : String(err), "error");
     } finally {
       status.hide();
       busy = false;
@@ -106,23 +102,16 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
     file: File,
     onProgress: (done: number, total: number) => void,
   ): Promise<Map<string, Snapshot>> => {
-    engine?.terminate();
-    engine = new WorkerEngine({
-      wasmPath: `${import.meta.env.BASE_URL}wasm/`,
-      wasmAbsolute: true,
-      spawn: {
-        factory: () =>
-          new Worker(new URL("../../viewer-core/engine/worker.entry.ts", import.meta.url), { type: "module" }),
-      },
-    });
+    side?.close();
+    const model = await openSideModel(new Uint8Array(await file.arrayBuffer()));
+    side = model;
     // A parse failure used to leave this worker alive with the whole model in
     // it, so the teardown is on every exit rather than on the happy path.
     try {
-      await engine.init();
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const meta = await engine.loadModel({ kind: "bytes", bytes }, { skipGeometry: true });
-      const elements: Array<{ id: number; type: string; name: string; storey: string }> = [];
-      walk(meta.tree, "", elements);
+      // The panel can be closed while the parse above is still running, and by
+      // then there is nothing to hand back.
+      if (closed) return new Map();
+      const elements = elementsOf(model.tree);
 
       const out = new Map<string, Snapshot>();
       let done = 0;
@@ -132,7 +121,7 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
           const at = next++;
           if (at >= elements.length) return;
           const element = elements[at];
-          const properties = await engine?.getItemProperties(meta.modelID, element.id).catch(() => null);
+          const properties = await model.properties(element.id);
           done += 1;
           if (done % 25 === 0 || done === elements.length) onProgress(done, elements.length);
           if (!properties) continue;
@@ -149,11 +138,10 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
         }
       };
       await Promise.all(Array.from({ length: Math.max(1, Math.min(WINDOW, elements.length)) }, pump));
-      engine.dispose(meta.modelID);
       return out;
     } finally {
-      engine?.terminate();
-      engine = null;
+      model.close();
+      side = null;
     }
   };
 
@@ -226,8 +214,8 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
       ]);
       if (view !== "removed") {
         row.addEventListener("click", () => {
-          api.viewer.select(entry.id);
-          api.viewer.fitToElement(entry.id);
+          ctx.select(entry.id);
+          ctx.frame(entry.id);
         });
       } else {
         row.classList.add("dim");
@@ -250,7 +238,7 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
   };
 
   const exportCsv = (): void => {
-    if (!baselineName) return void api.log("Run a comparison first", "error");
+    if (!baselineName) return void ctx.log("Run a comparison first", "error");
     const rows: Array<Array<Value>> = [];
     for (const entry of added) rows.push(["added", entry.globalId, entry.type, entry.name, entry.storey, "", "", ""]);
     for (const entry of removed) rows.push(["removed", entry.globalId, entry.type, entry.name, entry.storey, "", "", ""]);
@@ -259,31 +247,27 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
         rows.push(["changed", entry.globalId, entry.type, entry.name, entry.storey, change.key, show(change.from), show(change.to)]);
       }
     }
-    saveCsv(`compare-${api.modelName() || "model"}.csv`, ["Kind", "GlobalId", "Class", "Name", "Storey", "Property", "Was", "Now"], rows);
+    saveCsv(`compare-${ctx.model().name || "model"}.csv`, ["Kind", "GlobalId", "Class", "Name", "Storey", "Property", "Was", "Now"], rows);
   };
 
   host.appendChild(root);
   paint();
 
+  ctx.on("model", () => {
+    added = [];
+    removed = [];
+    changed = [];
+    unchanged = 0;
+    baselineName = "";
+    paint();
+  });
+
   return {
-    dispose: () => engine?.terminate(),
-    modelChanged: () => {
-      added = [];
-      removed = [];
-      changed = [];
-      unchanged = 0;
-      baselineName = "";
-      paint();
+    dispose: () => {
+      closed = true;
+      side?.close();
     },
   };
-}
-
-function walk(node: SpatialNode | null, storey: string, out: Array<{ id: number; type: string; name: string; storey: string }>): void {
-  if (!node) return;
-  let current = storey;
-  if (node.type === "IfcBuildingStorey") current = node.name ?? "(unnamed storey)";
-  else if (!SPATIAL.has(node.type)) out.push({ id: node.expressID, type: node.type, name: node.name ?? "", storey });
-  for (const child of node.children) walk(child, current, out);
 }
 
 function flatten(row: ElementRow): Record<string, Value> {

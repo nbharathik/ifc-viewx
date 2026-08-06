@@ -4,7 +4,7 @@
 // table exports as CSV.
 import { h, icon, spinner, toast } from "./kit.js";
 import { emptyState } from "./shell.js";
-import { saveCsv, type Value } from "../plugins/kit.js";
+import { saveCsv, type Value } from "../sdk/data.js";
 import type { ScheduleReport } from "../ifc/ifcEngine.js";
 
 export interface ScheduleActions {

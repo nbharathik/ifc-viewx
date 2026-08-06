@@ -3,13 +3,11 @@
 // Authored Qto values win; the bounding box only fills the gaps, and the
 // coverage column says how much of a row is real so nobody quotes an estimate
 // by accident.
-import { h } from "../../ui/kit.js";
-import { emptyState } from "../../ui/shell.js";
 import {
-  bar, button, copyTable, grid, hint, note, page, progress, saveCsv, select, stats,
+  bar, button, copyTable, emptyState, grid, h, hint, note, page, progress, saveCsv, select, stats,
   type ElementRow, type GridRow,
-} from "../kit.js";
-import type { PluginApi, PluginInstance } from "../host.js";
+} from "@ifcviewx/sdk";
+import type { PluginContext } from "@ifcviewx/sdk";
 
 /** Quantity names in priority order; the first one present wins. */
 const VOLUME = ["NetVolume", "GrossVolume", "Volume"];
@@ -31,8 +29,8 @@ interface Group {
   authored: number;
 }
 
-export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
-  let groupBy = api.read<GroupBy>("groupBy", "type");
+export function mount(host: HTMLElement, ctx: PluginContext): void {
+  let groupBy = ctx.read<GroupBy>("groupBy", "type");
   let rows: ElementRow[] = [];
   let busy = false;
 
@@ -43,13 +41,13 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
     bar(
       select([["type", "By class"], ["storey", "By storey"], ["both", "Class and storey"]], groupBy, (value) => {
         groupBy = value as GroupBy;
-        api.write("groupBy", groupBy);
+        ctx.write("groupBy", groupBy);
         paint();
       }),
       button("Rebuild", () => void load(true)),
-      button("Show all", () => api.viewer.showAll()),
+      button("Show all", () => ctx.showAll()),
       button("CSV", () => exportCsv()),
-      button("Copy", () => (rows.length ? copyTable(REPORT, reportRows()) : api.log("Nothing to copy yet", "error"))),
+      button("Copy", () => (rows.length ? copyTable(REPORT, reportRows()) : ctx.log("Nothing to copy yet", "error"))),
     ),
     hint("info", "Volume, area and length are the file's own authored quantities, in the file's own units. Box m³ is measured from the geometry instead, and Coverage says how much of the row is authored."),
     status.root,
@@ -59,17 +57,17 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
 
   const load = async (force = false): Promise<void> => {
     if (busy) return;
-    const index = api.index();
+    const index = ctx.index();
     if (force) index.invalidate();
-    if (!api.modelKey()) {
+    if (!ctx.model().loaded) {
       table.replaceChildren(emptyState("cube", "No model loaded", "Open an IFC file to take off quantities."));
       return;
     }
     busy = true;
     status.set(0, 1, "Reading quantities");
-    const key = api.modelKey();
+    const key = ctx.model().key;
     rows = await index.build((done, total) => status.set(done, total, `Reading quantities ${done.toLocaleString()} of ${total.toLocaleString()}`));
-    if (key !== api.modelKey()) {
+    if (key !== ctx.model().key) {
       busy = false;
       return void load();
     }
@@ -96,7 +94,7 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
       group.volume += volume ?? 0;
       group.area += area ?? 0;
       group.length += length ?? 0;
-      group.box += boxVolume(api, row.id);
+      group.box += boxVolume(ctx, row.id);
       if (volume !== null || area !== null) group.authored += 1;
     }
     return [...map.values()].sort((a, b) => b.volume - a.volume || b.count - a.count);
@@ -138,8 +136,8 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
       ],
       title: `Isolate ${group.count} element(s)`,
       pick: () => {
-        api.viewer.isolate(group.ids);
-        api.log(`Isolated ${group.count.toLocaleString()} element(s) in ${group.key}`);
+        ctx.isolate(group.ids);
+        ctx.log(`Isolated ${group.count.toLocaleString()} element(s) in ${group.key}`);
       },
     }));
     table.replaceChildren(grid(["Group", "Count", "Volume m³", "Area m²", "Length m", "Box m³", "Coverage"], gridRows));
@@ -160,20 +158,18 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
     ]);
 
   const exportCsv = (): void => {
-    if (rows.length === 0) return void api.log("Nothing to export yet", "error");
-    saveCsv(`takeoff-${api.modelName() || "model"}.csv`, REPORT, reportRows());
+    if (rows.length === 0) return void ctx.log("Nothing to export yet", "error");
+    saveCsv(`takeoff-${ctx.model().name || "model"}.csv`, REPORT, reportRows());
   };
+
+  ctx.on("model", () => {
+    rows = [];
+    paint();
+    void load();
+  });
 
   host.appendChild(root);
   void load();
-
-  return {
-    modelChanged: () => {
-      rows = [];
-      paint();
-      void load();
-    },
-  };
 }
 
 /** First matching quantity on the element, whatever set it lives in. */
@@ -188,8 +184,8 @@ function pick(row: ElementRow, names: string[]): number | null {
   return null;
 }
 
-function boxVolume(api: PluginApi, id: number): number {
-  const bounds = api.viewer.getElementBounds(id);
+function boxVolume(ctx: PluginContext, id: number): number {
+  const bounds = ctx.bounds(id);
   if (!bounds) return 0;
   return (
     Math.max(0, bounds.max.x - bounds.min.x) *

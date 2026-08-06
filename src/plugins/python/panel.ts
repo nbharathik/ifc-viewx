@@ -1,13 +1,13 @@
 // Python console: the same execution pipeline the assistant uses, with a human
 // writing the code. Queries return a value, edits run on a copy and land in the
 // pending bar for approval. The panel never executes anything itself, it only
-// calls api.python, so the tier choice stays in one place.
+// calls ctx.python, so the tier choice stays in one place.
 //
 // The static guard is deliberately not in this path. It exists to check code an
 // LLM wrote; what you type here is your own, and running natively the service
 // applies its own guard regardless of who wrote it.
-import { h, icon, iconButton, toast } from "../../ui/kit.js";
-import type { PluginApi, PluginInstance } from "../host.js";
+import { h, icon, iconButton, toast } from "@ifcviewx/sdk";
+import type { PluginContext, PluginInstance } from "@ifcviewx/sdk";
 
 const START = `# The model is available as \`model\` (ifcopenshell.file).
 # Assign to \`result\` to display a value.
@@ -28,7 +28,7 @@ const SNIPPETS: Array<[string, string]> = [
   ],
 ];
 
-export function mount(host: HTMLElement, api: PluginApi, payload?: unknown): PluginInstance {
+export function mount(host: HTMLElement, ctx: PluginContext, payload?: unknown): PluginInstance {
   const code = h("textarea", { class: "code", spellcheck: "false" });
   const output = h("pre", { class: "output" });
   const status = h("div", { class: "status-line" });
@@ -44,7 +44,7 @@ export function mount(host: HTMLElement, api: PluginApi, payload?: unknown): Plu
     title: "Execute on a copy and stage the result",
   });
 
-  code.value = typeof payload === "string" && payload.trim() ? payload : api.read("code", START);
+  code.value = typeof payload === "string" && payload.trim() ? payload : ctx.read("code", START);
 
   const setStatus = (text: string, isError = false): void => {
     status.textContent = text;
@@ -52,7 +52,7 @@ export function mount(host: HTMLElement, api: PluginApi, payload?: unknown): Plu
   };
 
   const syncTier = (): void => {
-    const native = api.python.runsNatively();
+    const native = ctx.python.runsNatively();
     tier.replaceChildren(icon(native ? "server" : "cube", 12), h("span", { text: native ? "native" : "in this tab" }));
     tier.title = native
       ? "Runs in the local service with the full IfcOpenShell API"
@@ -69,13 +69,13 @@ export function mount(host: HTMLElement, api: PluginApi, payload?: unknown): Plu
 
   const run = (mode: "query" | "edit"): void => {
     if (busy) return;
-    api.write("code", code.value);
+    ctx.write("code", code.value);
     setBusy(true);
     setStatus(mode === "edit" ? "Executing the edit on a copy" : "Running query");
     const call =
       mode === "edit"
-        ? api.python.propose(code.value, setStatus)
-        : api.python.query(code.value, setStatus);
+        ? ctx.python.propose(code.value, setStatus)
+        : ctx.python.query(code.value, setStatus);
     void call
       .then((text) => {
         output.textContent = text;
@@ -91,7 +91,7 @@ export function mount(host: HTMLElement, api: PluginApi, payload?: unknown): Plu
 
   runBtn.addEventListener("click", () => run("query"));
   editBtn.addEventListener("click", () => run("edit"));
-  code.addEventListener("change", () => api.write("code", code.value));
+  code.addEventListener("change", () => ctx.write("code", code.value));
   code.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
@@ -119,6 +119,7 @@ export function mount(host: HTMLElement, api: PluginApi, payload?: unknown): Plu
   });
 
   syncTier();
+  ctx.on("service", syncTier);
   host.appendChild(
     h("div", { class: "page" }, [
       code,
@@ -137,7 +138,6 @@ export function mount(host: HTMLElement, api: PluginApi, payload?: unknown): Plu
   );
 
   return {
-    serviceChanged: syncTier,
     // Reopened with code from the assistant: take it, do not run it. The user
     // reads what was generated before anything executes.
     receive(next) {
@@ -147,7 +147,7 @@ export function mount(host: HTMLElement, api: PluginApi, payload?: unknown): Plu
       code.focus();
     },
     dispose() {
-      api.write("code", code.value);
+      ctx.write("code", code.value);
     },
   };
 }

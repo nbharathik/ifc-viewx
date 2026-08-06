@@ -24,9 +24,10 @@ import { CommandRegistry } from "./ui/commands.js";
 import { Ribbon, type RibbonControl, type RibbonTab } from "./ui/ribbon.js";
 import type { SchedulePanel } from "./ui/schedules.js";
 import { busyRow, CommandPalette, confirmAction, h, icon, lightDismiss, promptForm, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
-import { download } from "./plugins/kit.js";
-import { PluginHost, type PluginPython } from "./plugins/host.js";
-import { PluginBrowser } from "./plugins/browser.js";
+import { download } from "./sdk/data.js";
+import type { PluginPython } from "./sdk/types.js";
+import { PluginHost } from "./plugins/runtime/host.js";
+import { PluginBrowser } from "./plugins/runtime/browser.js";
 import { ServiceClient, type EditDiff } from "./bridge/serviceClient.js";
 import { BridgeClient } from "./bridge/bridgeClient.js";
 
@@ -1154,7 +1155,7 @@ const semanticActions: SemanticActions = {
     return idsReport(viewer);
   },
   clash: async (a, b, tolerance) => {
-    const { clashReport } = await import("./plugins/web/clash.js");
+    const { clashReport } = await import("./ifc/clash.js");
     return clashReport(viewer, a, b, tolerance);
   },
 };

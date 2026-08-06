@@ -5,10 +5,12 @@
 // get back or a third to open it. Local Studio plugins are listed with
 // everything else so the catalog is honest about what exists, and what the app
 // already carries as a panel is a shortcut group rather than a second copy.
-import { h, icon, iconButton, lightDismiss, toast } from "../ui/kit.js";
-import { CATALOG, isBuiltIn, isLive, pluginDetails, type PluginHost, type PluginManifest } from "./host.js";
-import { INSTALL_CMD } from "../ui/connection.js";
-import type { ServiceClient } from "../bridge/serviceClient.js";
+import { h, icon, iconButton, lightDismiss, toast } from "../../ui/kit.js";
+import { INSTALL_CMD } from "../../ui/connection.js";
+import { CATALOG, isBuiltIn, isLive } from "../registry.js";
+import { pluginDetails, type PluginHost } from "./host.js";
+import type { PluginManifest } from "../../sdk/types.js";
+import type { ServiceClient } from "../../bridge/serviceClient.js";
 
 export interface BrowserActions {
   runCommand(id: string): void;
@@ -72,14 +74,19 @@ export class PluginBrowser {
     }
   }
 
+  private inFilter(plugin: PluginManifest, filter: string): boolean {
+    if (filter === "All") return true;
+    if (filter === "Running") return this.host.isOpen(plugin.id);
+    if (filter === "In this browser") return plugin.tier !== "local";
+    return plugin.tier === "local";
+  }
+
   private matches(): PluginManifest[] {
     const query = this.search.value.trim().toLowerCase();
     return CATALOG.filter((plugin) => {
-      if (this.filter === "Running" && !this.host.isOpen(plugin.id)) return false;
-      if (this.filter === "In this browser" && plugin.tier !== "web") return false;
-      if (this.filter === "Local Studio" && plugin.tier !== "local") return false;
+      if (!this.inFilter(plugin, this.filter)) return false;
       if (!query) return true;
-      const hay = `${plugin.name} ${plugin.tagline} ${plugin.category} ${plugin.keywords} ${plugin.about}`;
+      const hay = `${plugin.name} ${plugin.tagline} ${plugin.category} ${plugin.keywords} ${plugin.about} ${plugin.author ?? ""}`;
       return query.split(/\s+/).every((word) => hay.toLowerCase().includes(word));
     });
   }
@@ -99,16 +106,7 @@ export class PluginBrowser {
     if (running) entries.splice(1, 0, "Running");
     this.rail.replaceChildren();
     for (const entry of entries) {
-      const count =
-        entry === "Running"
-          ? running
-          : CATALOG.filter((p) =>
-              entry === "All"
-                ? true
-                : entry === "In this browser"
-                  ? p.tier === "web"
-                  : p.tier === "local",
-            ).length;
+      const count = CATALOG.filter((plugin) => this.inFilter(plugin, entry)).length;
       const button = h("button", {
         class: "plug-cat",
         type: "button",
@@ -135,7 +133,7 @@ export class PluginBrowser {
     }
     // Three groups, always in this order, so where a tool lives is structural
     // rather than something you have to read off a badge.
-    const web = found.filter((plugin) => plugin.tier === "web" && !isBuiltIn(plugin));
+    const web = found.filter((plugin) => plugin.tier === "web");
     const local = found.filter((plugin) => plugin.tier === "local");
     const builtIn = found.filter(isBuiltIn);
     if (web.length) {

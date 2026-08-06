@@ -23,8 +23,20 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
       - run: npm ci
       - run: npm run build
+      # The docs build into dist/docs, so one artifact carries both: the app at
+      # the root and the site under /docs/. It has to run after vite build,
+      # which empties dist. Failures here are not allowed to take the app down
+      # with them: a deploy without docs beats no deploy.
+      - run: pip install -r docs/requirements.txt
+        continue-on-error: true
+      - run: npm run docs:build
+        continue-on-error: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

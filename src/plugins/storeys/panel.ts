@@ -3,11 +3,8 @@
 // One click isolates a level and leaves the camera alone, which is what makes
 // stepping up and down readable. The ceiling cut puts a horizontal section at
 // the level above so you look down into the storey instead of at its slab.
-import { h, iconButton } from "../../ui/kit.js";
-import { emptyState } from "../../ui/shell.js";
-import { bar, button, note, page } from "../kit.js";
-import type { PluginApi, PluginInstance } from "../host.js";
-import type { SpatialNode } from "../../viewer-core/viewer.js";
+import { bar, button, emptyState, h, iconButton, note, page } from "@ifcviewx/sdk";
+import type { PluginContext, PluginInstance, SpatialNode } from "@ifcviewx/sdk";
 
 interface Storey {
   id: number;
@@ -17,17 +14,17 @@ interface Storey {
   top: number;
 }
 
-export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
+export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
   let storeys: Storey[] = [];
   let active = -1;
-  let cut = api.read("cut", false);
+  let cut = ctx.read("cut", false);
 
   const list = h("div", { class: "plug-results" });
   const head = h("div", {});
   const root = page(head, list);
 
   const collect = (): Storey[] => {
-    const tree = api.viewer.getSpatialTree();
+    const tree = ctx.tree();
     if (!tree) return [];
     const nodes: SpatialNode[] = [];
     const walk = (node: SpatialNode): void => {
@@ -36,11 +33,11 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
     };
     walk(tree);
     const found = nodes.map((node) => {
-      const ids = api.viewer.getSubtreeElementIds(node.expressID);
+      const ids = ctx.subtree(node.expressID);
       let base = Infinity;
       let top = -Infinity;
       for (const id of ids) {
-        const bounds = api.viewer.getElementBounds(id);
+        const bounds = ctx.bounds(id);
         if (!bounds) continue;
         base = Math.min(base, bounds.min.y);
         top = Math.max(top, bounds.max.y);
@@ -60,7 +57,7 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
     const storey = storeys[index];
     if (!storey) return;
     active = index;
-    api.viewer.isolate(storey.ids);
+    ctx.isolate(storey.ids);
     applyCut();
     paint();
   };
@@ -71,20 +68,20 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
     if (!cut || !storey) {
       // Only the plugin's own horizontal cut goes; planes the user set with the
       // section tool are not this plugin's to throw away.
-      const kept = api.viewer.getSections().filter((section) => section.axis !== "y");
-      if (kept.length !== api.viewer.getSections().length) api.viewer.setSections(kept);
+      const kept = ctx.sections().filter((section) => section.axis !== "y");
+      if (kept.length !== ctx.sections().length) ctx.setSections(kept);
       return;
     }
     const above = storeys[active - 1];
     const offset = above ? (above.base + storey.top) / 2 : storey.top;
-    const others = api.viewer.getSections().filter((section) => section.axis !== "y");
-    api.viewer.setSections([...others, { axis: "y", offset, flip: false }]);
+    const others = ctx.sections().filter((section) => section.axis !== "y");
+    ctx.setSections([...others, { axis: "y", offset, flip: false }]);
   };
 
   const showAll = (): void => {
     active = -1;
-    api.viewer.showAll();
-    api.viewer.clearSection();
+    ctx.showAll();
+    ctx.viewer.clearSection();
     paint();
   };
 
@@ -104,7 +101,7 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
     }
     const cutButton = button(cut ? "Ceiling cut on" : "Ceiling cut", () => {
       cut = !cut;
-      api.write("cut", cut);
+      ctx.write("cut", cut);
       applyCut();
       paint();
     }, cut ? "accent" : "");
@@ -148,11 +145,11 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
 
   host.appendChild(root);
   rebuild();
+  ctx.on("model", () => rebuild());
 
   return {
-    modelChanged: () => rebuild(),
     dispose: () => {
-      if (active >= 0) api.viewer.clearSection();
+      if (active >= 0) ctx.viewer.clearSection();
     },
   };
 }

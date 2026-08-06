@@ -3,13 +3,10 @@
 // The property index is shared with the other data plugins, so opening this
 // after a takeoff costs nothing. Only a page of rows is rendered; the filter,
 // the viewport actions and the CSV all work on the whole match set.
-import { h, iconButton } from "../../ui/kit.js";
-import { emptyState } from "../../ui/shell.js";
 import {
-  bar, button, copyTable, grid, note, page, progress, saveCsv, select,
-  type ElementRow, type GridRow, type Value,
-} from "../kit.js";
-import type { PluginApi, PluginInstance } from "../host.js";
+  bar, button, copyTable, emptyState, grid, h, iconButton, note, page, progress, saveCsv, select,
+  type ElementRow, type GridRow, type PluginContext, type Value,
+} from "@ifcviewx/sdk";
 
 const PAGE = 400;
 
@@ -27,9 +24,9 @@ const BASE: Column[] = [
   { key: "globalId", label: "GlobalId", read: (row) => row.globalId },
 ];
 
-export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
+export function mount(host: HTMLElement, ctx: PluginContext): void {
   let rows: ElementRow[] = [];
-  let extra: string[] = api.read<string[]>("columns", []);
+  let extra: string[] = ctx.read<string[]>("columns", []);
   let query = "";
   let typeFilter = "";
   let sortBy = 0;
@@ -51,7 +48,7 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
       search,
       button("Isolate", () => act("isolate")),
       button("Hide", () => act("hide")),
-      button("Show all", () => api.viewer.showAll()),
+      button("Show all", () => ctx.showAll()),
       button("CSV", () => exportCsv()),
       button("Copy", () => {
         const cols = columns();
@@ -97,32 +94,32 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
       for (const key of Object.keys(row.props)) counts.set(key, (counts.get(key) ?? 0) + 1);
     }
     const found = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([key]) => key);
-    if (found.length === 0) return void api.log(`${typeFilter} carries no property sets`, "error");
+    if (found.length === 0) return void ctx.log(`${typeFilter} carries no property sets`, "error");
     extra = [...new Set([...extra, ...found.slice(0, 30)])];
-    api.write("columns", extra);
+    ctx.write("columns", extra);
     paint();
-    api.log(`Added ${Math.min(found.length, 30)} column(s) from ${typeFilter}`);
+    ctx.log(`Added ${Math.min(found.length, 30)} column(s) from ${typeFilter}`);
   };
 
   const act = (mode: "isolate" | "hide"): void => {
     const ids = filtered().map((row) => row.id);
-    if (ids.length === 0) return void api.log("Nothing matches the filter", "error");
-    if (mode === "isolate") api.viewer.isolate(ids);
-    else api.viewer.setHidden(ids, true);
-    api.log(`${mode === "isolate" ? "Isolated" : "Hid"} ${ids.length.toLocaleString()} element(s)`);
+    if (ids.length === 0) return void ctx.log("Nothing matches the filter", "error");
+    if (mode === "isolate") ctx.isolate(ids);
+    else ctx.hide(ids);
+    ctx.log(`${mode === "isolate" ? "Isolated" : "Hid"} ${ids.length.toLocaleString()} element(s)`);
   };
 
   const load = async (): Promise<void> => {
     if (busy) return;
-    if (!api.modelKey()) {
+    if (!ctx.model().loaded) {
       table.replaceChildren(emptyState("cube", "No model loaded", "Open an IFC file to explore its data."));
       return;
     }
     busy = true;
     status.set(0, 1, "Indexing properties");
-    const key = api.modelKey();
-    rows = await api.index().build((done, total) => status.set(done, total, `Indexing ${done.toLocaleString()} of ${total.toLocaleString()} elements`));
-    if (key !== api.modelKey()) {
+    const key = ctx.model().key;
+    rows = await ctx.index().build((done, total) => status.set(done, total, `Indexing ${done.toLocaleString()} of ${total.toLocaleString()} elements`));
+    if (key !== ctx.model().key) {
       busy = false;
       return void load();
     }
@@ -139,7 +136,7 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
       return;
     }
     const types = [...new Set(rows.map((row) => row.type))].sort();
-    const keys = api.index().propertyKeys();
+    const keys = ctx.index().propertyKeys();
     controls.replaceChildren(
       bar(
         select([["", `All classes  ${rows.length.toLocaleString()}`], ...types.map((type) => [type, type] as [string, string])], typeFilter, (value) => {
@@ -152,7 +149,7 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
           (value) => {
             if (!value) return;
             extra = [...extra, value];
-            api.write("columns", extra);
+            ctx.write("columns", extra);
             paint();
           },
         ),
@@ -161,7 +158,7 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
         ...(typeFilter ? [button("All its columns", () => addClassColumns())] : []),
         ...(extra.length ? [button("Clear columns", () => {
           extra = [];
-          api.write("columns", extra);
+          ctx.write("columns", extra);
           paint();
         })] : []),
       ),
@@ -172,7 +169,7 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
         h("span", { text: key }),
         iconButton("x", `Remove ${key}`, () => {
           extra = extra.filter((other) => other !== key);
-          api.write("columns", extra);
+          ctx.write("columns", extra);
           paint();
         }, "icon-btn sm"),
       ]);
@@ -185,8 +182,8 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
     const gridRows: GridRow[] = shown.map((row) => ({
       cells: cols.map((column) => column.read(row)),
       pick: () => {
-        api.viewer.select(row.id);
-        api.viewer.fitToElement(row.id);
+        ctx.select(row.id);
+        ctx.frame(row.id);
       },
     }));
     table.replaceChildren(
@@ -202,22 +199,20 @@ export function mount(host: HTMLElement, api: PluginApi): PluginInstance {
   const exportCsv = (): void => {
     const cols = columns();
     const found = filtered();
-    if (found.length === 0) return void api.log("Nothing to export", "error");
+    if (found.length === 0) return void ctx.log("Nothing to export", "error");
     saveCsv(
-      `elements-${api.modelName() || "model"}.csv`,
+      `elements-${ctx.model().name || "model"}.csv`,
       cols.map((column) => column.label),
       found.map((row) => cols.map((column) => column.read(row))),
     );
   };
 
+  ctx.on("model", () => {
+    rows = [];
+    paint();
+    void load();
+  });
+
   host.appendChild(root);
   void load();
-
-  return {
-    modelChanged: () => {
-      rows = [];
-      paint();
-      void load();
-    },
-  };
 }

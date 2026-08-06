@@ -1,0 +1,51 @@
+site_name: IFCViewX
+site_description: Fast, private IFC viewing in the browser, with a plugin ecosystem
+site_url: https://nbharathik.github.io/ifc-viewx/docs/
+repo_url: https://github.com/nbharathik/ifc-viewx
+repo_name: nbharathik/ifc-viewx
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Dark
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Light
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - How the viewer works: how-it-works.md
+  - Plugins:
+      - Writing a plugin: plugins/index.md
+      - SDK reference: plugins/api.md
+      - Catalog: plugins/catalog.md
+  - Local Studio: local-studio.md
+  - Working on the repo: contributing.md
