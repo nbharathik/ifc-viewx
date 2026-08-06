@@ -1,7 +1,7 @@
 {
   "name": "ifc-viewer-browser",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Fast browser-based IFC viewer with Python (IfcOpenShell/Pyodide) editing, LLM assistance, and MCP bridge",
   "scripts": {
@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "check": "tsc --noEmit && node scripts/check-plugins.mjs",
     "new-plugin": "node scripts/new-plugin.mjs",
+    "bump": "node scripts/bump-version.mjs",
     "catalog": "node scripts/gen-catalog.mjs",
     "docs": "npm run catalog && mkdocs serve -a 127.0.0.1:8010",
     "docs:build": "npm run catalog && mkdocs build -d dist/docs"

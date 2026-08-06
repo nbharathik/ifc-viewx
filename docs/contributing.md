@@ -62,3 +62,19 @@ edits to it are overwritten.
 Push to `main` builds the viewer and this site and publishes both to GitHub
 Pages: the app at the root, the docs under `/docs/`. The Python package
 publishes from a tag.
+
+## Releasing ifcviewx
+
+```bash
+npm run bump -- 0.2.0
+git commit -am "release v0.2.0"
+git tag -a v0.2.0 -m "IFCViewX 0.2.0"
+git push origin main --follow-tags
+```
+
+`npm run bump` sets the same number in `package.json` and
+`local-bridge/pyproject.toml`; the workflow refuses a tag that disagrees with
+`pyproject.toml`, because PyPI never lets a version number be reused. The tag
+push builds the viewer, bundles it into the wheel, uploads to PyPI through a
+trusted publisher, and opens a GitHub release with the wheel and sdist
+attached. Re-running it for a version already on PyPI fails; bump instead.
