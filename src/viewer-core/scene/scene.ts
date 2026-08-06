@@ -117,6 +117,8 @@ export class SceneController {
   private sizedHeight = -1;
   /** Kept because clearModel builds a fresh batcher, which defaults to on. */
   private doubleSided = true;
+  /** Same reason: a fresh batcher would forget the ghost preference. */
+  private ghostHidden = false;
   private readonly planCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 1000);
   /** Section handles live in their own scene so clipping can be turned off. */
   private readonly gizmoScene = new THREE.Scene();
@@ -188,6 +190,27 @@ export class SceneController {
 
   setCategoryVisible(type: string, visible: boolean): void {
     this.batcher.setCategoryVisible(type, visible);
+  }
+
+  setGhostHidden(on: boolean): void {
+    this.ghostHidden = on;
+    this.batcher.setGhostHidden(on);
+  }
+
+  isGhostHidden(): boolean {
+    return this.ghostHidden;
+  }
+
+  setColorOverride(assignment: Map<number, number>, colors: Array<[number, number, number]>): void {
+    this.batcher.setColorOverride(assignment, colors);
+  }
+
+  clearColorOverride(): void {
+    this.batcher.clearColorOverride();
+  }
+
+  hasColorOverride(): boolean {
+    return this.batcher.hasColorOverride();
   }
 
   getCategoryVisible(type: string): boolean {
@@ -952,6 +975,7 @@ export class SceneController {
     this.batcher.dispose();
     this.batcher = new ModelBatcher();
     this.batcher.setDoubleSided(this.doubleSided);
+    this.batcher.setGhostHidden(this.ghostHidden);
     this.scene.add(this.batcher.group);
   }
 

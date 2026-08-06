@@ -1,0 +1,76 @@
+// The sample model is generated, so nothing catches a malformed entity except
+// a parse. This loads it through the same web-ifc build the viewer ships.
+import { describe, expect, it, beforeAll, afterAll } from "vitest";
+import { IfcAPI } from "web-ifc";
+
+import { sampleModel, SAMPLE_NAME } from "../src/ui/sample.js";
+
+let api: IfcAPI;
+let modelID: number;
+
+beforeAll(async () => {
+  api = new IfcAPI();
+  api.SetWasmPath("node_modules/web-ifc/", true);
+  await api.Init();
+  modelID = api.OpenModel(sampleModel());
+});
+
+afterAll(() => {
+  if (api && modelID !== undefined) api.CloseModel(modelID);
+});
+
+describe("sample model", () => {
+  it("has the header a viewer looks for", () => {
+    const text = new TextDecoder().decode(sampleModel());
+    expect(text.startsWith("ISO-10303-21;")).toBe(true);
+    expect(text).toContain("FILE_SCHEMA(('IFC4'))");
+    expect(text).toContain(SAMPLE_NAME);
+    expect(text.trimEnd().endsWith("END-ISO-10303-21;")).toBe(true);
+  });
+
+  it("opens in web-ifc without an error", () => {
+    expect(modelID).toBeGreaterThanOrEqual(0);
+    expect(api.IsModelOpen(modelID)).toBe(true);
+  });
+
+  it("produces the classes the sample promises", () => {
+    const found = new Map<string, number>();
+    const lines = api.GetAllLines(modelID);
+    for (let i = 0; i < lines.size(); i++) {
+      const id = lines.get(i);
+      const type = api.GetNameFromTypeCode(api.GetLineType(modelID, id));
+      found.set(type, (found.get(type) ?? 0) + 1);
+    }
+    // Two storeys of: slab, four walls, two columns, a door and a window.
+    expect(found.get("IfcWall")).toBe(8);
+    expect(found.get("IfcSlab")).toBe(2);
+    expect(found.get("IfcColumn")).toBe(4);
+    expect(found.get("IfcDoor")).toBe(2);
+    expect(found.get("IfcWindow")).toBe(2);
+    expect(found.get("IfcBuildingStorey")).toBe(2);
+    expect(found.get("IfcPropertySet")).toBe(8);
+  });
+
+  it("tessellates into real geometry", () => {
+    let meshes = 0;
+    let triangles = 0;
+    api.StreamAllMeshes(modelID, (mesh) => {
+      meshes += 1;
+      for (let i = 0; i < mesh.geometries.size(); i++) {
+        const placed = mesh.geometries.get(i);
+        const geometry = api.GetGeometry(modelID, placed.geometryExpressID);
+        triangles += geometry.GetIndexDataSize() / 3;
+      }
+    });
+    // Eighteen boxes, twelve triangles each, before any welding.
+    expect(meshes).toBe(18);
+    expect(triangles).toBeGreaterThanOrEqual(18 * 12);
+  });
+
+  it("reads back the property set the walls carry", () => {
+    const sets = api.GetLineIDsWithType(modelID, api.GetTypeCodeFromName("IFCPROPERTYSET"));
+    expect(sets.size()).toBe(8);
+    const first = api.GetLine(modelID, sets.get(0)) as { Name?: { value?: string } };
+    expect(first.Name?.value).toBe("Pset_WallCommon");
+  });
+});

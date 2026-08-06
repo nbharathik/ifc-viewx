@@ -76,6 +76,7 @@ const PATHS: Record<string, string> = {
   plug: '<path d="M9 3v6M15 3v6"/><path d="M6.5 9h11v2.5a5.5 5.5 0 0 1-11 0Z"/><path d="M12 17v4"/>',
   sliders: '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2.1"/><circle cx="10" cy="17" r="2.1"/>',
   funnel: '<path d="M3 5h18l-7 8.2V20l-4 1.6v-8.4Z"/>',
+  palette: '<path d="M12 3a9 9 0 1 0 0 18c1 0 1.6-.7 1.6-1.5 0-.4-.2-.8-.5-1.1-.3-.3-.4-.6-.4-1 0-.8.7-1.4 1.5-1.4H16a5 5 0 0 0 5-5c0-4.4-4-8-9-8Z"/><circle cx="7.5" cy="12" r="1.1" fill="currentColor" stroke="none"/><circle cx="10" cy="7.8" r="1.1" fill="currentColor" stroke="none"/><circle cx="15" cy="7.8" r="1.1" fill="currentColor" stroke="none"/>',
   clipboard: '<rect x="6" y="4.5" width="12" height="16" rx="2"/><path d="M9.5 4.5V3h5v1.5"/><path d="m9.5 12.5 2 2 3.5-4.5"/>',
   flag: '<path d="M5.5 21V3.6"/><path d="M5.5 4.6h12l-2.4 4 2.4 4h-12"/>',
   plus: '<path d="M12 5.5v13M5.5 12h13"/>',

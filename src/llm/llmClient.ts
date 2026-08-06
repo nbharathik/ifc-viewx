@@ -104,6 +104,18 @@ export interface ChatMessage {
   content: string;
 }
 
+/** Tokens the provider reported for one turn. Absent when it reported none. */
+export interface ChatUsage {
+  input: number;
+  output: number;
+}
+
+export interface ChatOptions {
+  /** Called with each chunk as it arrives. Its presence turns streaming on. */
+  onDelta?: (text: string) => void;
+  onUsage?: (usage: ChatUsage) => void;
+}
+
 const SETTINGS_KEY = "ifc-studio.llm-settings";
 
 /**
@@ -265,7 +277,10 @@ export async function chat(
   messages: ChatMessage[],
   proxy?: (messages: ChatMessage[]) => Promise<string>,
   signal?: AbortSignal,
+  options: ChatOptions = {},
 ): Promise<string> {
+  // The proxy holds the key on the service side and answers in one piece, so
+  // there is nothing to stream through it.
   if (proxy) return proxy(messages);
   if (!settings.model) throw new Error("Choose an assistant provider and model in Settings first.");
   const provider = findProvider(settings.provider);
@@ -273,9 +288,42 @@ export async function chat(
     throw new Error(`${provider.label} needs an API key. Paste one in Settings.`);
   }
   return provider.wire === "anthropic"
-    ? chatAnthropic(settings, messages, signal)
-    : chatOpenAi(settings, messages, signal);
+    ? chatAnthropic(settings, messages, signal, options)
+    : chatOpenAi(settings, messages, signal, options);
 }
+
+/**
+ * SSE `data:` payloads in order. Servers split events across chunks and some
+ * send comment lines as keep-alives, so the buffer is drained by blank line
+ * rather than by chunk.
+ */
+async function* sseData(response: Response): AsyncGenerator<string> {
+  const body = response.body;
+  if (!body) throw new Error("The server sent no response body to stream.");
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let split = buffer.indexOf("\n\n");
+      while (split !== -1) {
+        const event = buffer.slice(0, split);
+        buffer = buffer.slice(split + 2);
+        for (const line of event.split("\n")) {
+          if (line.startsWith("data:")) yield line.slice(5).trim();
+        }
+        split = buffer.indexOf("\n\n");
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+const asNumber = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
 
 /**
  * Post an OpenAI-wire body, renaming the token cap once if the server asks.
@@ -301,18 +349,25 @@ async function postOpenAi(
   });
 }
 
-async function chatOpenAi(settings: LlmSettings, messages: ChatMessage[], signal?: AbortSignal): Promise<string> {
-  const response = await postOpenAi(
-    `${endpointOf(settings)}/chat/completions`,
-    {
-      "Content-Type": "application/json",
-      ...authHeaders(findProvider(settings.provider), settings),
-    },
-    // Without a cap a self-hosted server allows the whole context window, and
-    // a reasoning model will spend it: one tool choice ran past 15k tokens.
-    { model: settings.model, messages, max_tokens: MAX_TOKENS },
-    signal,
-  );
+async function chatOpenAi(
+  settings: LlmSettings,
+  messages: ChatMessage[],
+  signal?: AbortSignal,
+  options: ChatOptions = {},
+): Promise<string> {
+  const headers = {
+    "Content-Type": "application/json",
+    ...authHeaders(findProvider(settings.provider), settings),
+  };
+  const url = `${endpointOf(settings)}/chat/completions`;
+  // Without a cap a self-hosted server allows the whole context window, and
+  // a reasoning model will spend it: one tool choice ran past 15k tokens.
+  const body = { model: settings.model, messages, max_tokens: MAX_TOKENS };
+  if (options.onDelta) {
+    const streamed = await streamOpenAi(url, headers, body, signal, options);
+    if (streamed !== null) return streamed;
+  }
+  const response = await postOpenAi(url, headers, body, signal);
   if (!response.ok) {
     throw new Error(`LLM request failed (HTTP ${response.status}): ${await errorDetail(response)}`);
   }
@@ -333,24 +388,146 @@ async function chatOpenAi(settings: LlmSettings, messages: ChatMessage[], signal
   return content;
 }
 
-async function chatAnthropic(settings: LlmSettings, messages: ChatMessage[], signal?: AbortSignal): Promise<string> {
+/**
+ * Streams an OpenAI-wire reply, or returns null so the caller falls back to the
+ * one-shot request. Servers that do not support SSE are common on the local
+ * tier, and a failed stream must never lose the answer.
+ */
+async function streamOpenAi(
+  url: string,
+  headers: Record<string, string>,
+  body: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  options: ChatOptions,
+): Promise<string | null> {
+  let response: Response;
+  try {
+    response = await postOpenAi(url, headers, { ...body, stream: true }, signal);
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    return null;
+  }
+  if (!response.ok) {
+    // A real error still has to surface; only a refusal to stream falls back.
+    if (response.status === 400 || response.status === 404) return null;
+    throw new Error(`LLM request failed (HTTP ${response.status}): ${await errorDetail(response)}`);
+  }
+  if (!/text\/event-stream/i.test(response.headers.get("content-type") ?? "")) return null;
+
+  let text = "";
+  let usage: ChatUsage | null = null;
+  let finish = "";
+  for await (const payload of sseData(response)) {
+    if (payload === "[DONE]") break;
+    let event: {
+      choices?: Array<{ delta?: { content?: string }; finish_reason?: string }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
+    try {
+      event = JSON.parse(payload);
+    } catch {
+      continue;
+    }
+    const chunk = event.choices?.[0]?.delta?.content;
+    if (chunk) {
+      text += chunk;
+      options.onDelta?.(chunk);
+    }
+    if (event.choices?.[0]?.finish_reason) finish = event.choices[0].finish_reason as string;
+    if (event.usage) {
+      usage = { input: asNumber(event.usage.prompt_tokens), output: asNumber(event.usage.completion_tokens) };
+    }
+  }
+  if (usage) options.onUsage?.(usage);
+  if (text) return text;
+  if (finish === "length") {
+    throw new Error(
+      `The model used all ${MAX_TOKENS} tokens without answering. Reasoning models can do this on long prompts; try a shorter question or turn thinking off on the server.`,
+    );
+  }
+  // An empty stream is more likely a server that ignored `stream` than a model
+  // with nothing to say, so let the one-shot path decide.
+  return null;
+}
+
+async function streamAnthropic(
+  url: string,
+  headers: Record<string, string>,
+  body: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  options: ChatOptions,
+): Promise<string | null> {
+  let response: Response;
+  try {
+    response = await fetch(url, { method: "POST", signal, headers, body: JSON.stringify({ ...body, stream: true }) });
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    return null;
+  }
+  if (!response.ok) {
+    if (response.status === 400 || response.status === 404) return null;
+    throw new Error(`LLM request failed (HTTP ${response.status}): ${await errorDetail(response)}`);
+  }
+  if (!/text\/event-stream/i.test(response.headers.get("content-type") ?? "")) return null;
+
+  let text = "";
+  let input = 0;
+  let output = 0;
+  for await (const payload of sseData(response)) {
+    let event: {
+      type?: string;
+      delta?: { type?: string; text?: string };
+      message?: { usage?: { input_tokens?: number; output_tokens?: number } };
+      usage?: { input_tokens?: number; output_tokens?: number };
+      error?: { message?: string };
+    };
+    try {
+      event = JSON.parse(payload);
+    } catch {
+      continue;
+    }
+    if (event.type === "error") throw new Error(event.error?.message ?? "The assistant stream failed");
+    if (event.type === "content_block_delta" && event.delta?.type === "text_delta" && event.delta.text) {
+      text += event.delta.text;
+      options.onDelta?.(event.delta.text);
+    }
+    if (event.type === "message_start") input = asNumber(event.message?.usage?.input_tokens);
+    if (event.usage?.output_tokens) output = asNumber(event.usage.output_tokens);
+  }
+  if (input || output) options.onUsage?.({ input, output });
+  return text || null;
+}
+
+async function chatAnthropic(
+  settings: LlmSettings,
+  messages: ChatMessage[],
+  signal?: AbortSignal,
+  options: ChatOptions = {},
+): Promise<string> {
   const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
   const turns = messages
     .filter((m) => m.role !== "system")
     .map((m) => ({ role: m.role, content: m.content }));
-  const response = await fetch(`${endpointOf(settings)}/v1/messages`, {
+  const url = `${endpointOf(settings)}/v1/messages`;
+  const headers = {
+    "Content-Type": "application/json",
+    ...authHeaders(findProvider(settings.provider), settings),
+  };
+  const body = {
+    model: settings.model,
+    max_tokens: MAX_TOKENS,
+    ...(system ? { system } : {}),
+    messages: turns,
+  };
+  if (options.onDelta) {
+    const streamed = await streamAnthropic(url, headers, body, signal, options);
+    if (streamed !== null) return streamed;
+  }
+  const response = await fetch(url, {
     method: "POST",
     signal,
-    headers: {
-      "Content-Type": "application/json",
-      ...authHeaders(findProvider(settings.provider), settings),
-    },
-    body: JSON.stringify({
-      model: settings.model,
-      max_tokens: MAX_TOKENS,
-      ...(system ? { system } : {}),
-      messages: turns,
-    }),
+    headers,
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
     throw new Error(`LLM request failed (HTTP ${response.status}): ${await errorDetail(response)}`);

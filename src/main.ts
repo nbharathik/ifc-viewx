@@ -23,7 +23,10 @@ import { Connection } from "./ui/connection.js";
 import { CommandRegistry } from "./ui/commands.js";
 import { Ribbon, type RibbonControl, type RibbonTab } from "./ui/ribbon.js";
 import type { SchedulePanel } from "./ui/schedules.js";
-import { busyRow, CommandPalette, confirmAction, h, icon, lightDismiss, promptForm, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
+import { buildMenu, busyRow, CommandPalette, confirmAction, h, icon, lightDismiss, menuKeys, openLayer, promptForm, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
+import { ageLabel, clearChats, readChats, saveChat, type Conversation } from "./llm/chatStore.js";
+import { sampleModel, SAMPLE_NAME } from "./ui/sample.js";
+import type { StreamView } from "./ui/sidePanel.js";
 import { download } from "./sdk/data.js";
 import type { PluginPython } from "./sdk/types.js";
 import { PluginHost } from "./plugins/runtime/host.js";
@@ -193,10 +196,16 @@ function assistant(): AssistantPanel {
       onNewChat: () => newChat(),
       onStop: () => stopChat(),
       onSettingsChange: () => refreshAssistantEngine(),
+      onRetry: () => retryChat(),
+      onHistory: (anchor) => showChatHistory(anchor),
+      onAttachmentChange: () => syncAttachment(),
       openConsole: (code) => void plugins.open("python", true, code),
       openLocal: () => connection.open(),
     });
     refreshAssistantEngine();
+    assistantUi.setSuggestions(modelSuggestions());
+    assistantUi.setUsage(null, tokenTotals);
+    syncAttachment();
   }
   return assistantUi;
 }
@@ -601,6 +610,16 @@ function updateModelChrome(): void {
   shell.setStatus(activeBytes ? "Ready" : "No model", activeBytes ? "live" : "idle");
   shell.setCounts(stats?.totalEntities ?? null, stats?.triangleCount ?? null);
   syncTools();
+}
+
+/**
+ * The generated sample. It is not stored in recents: it is not the user's file
+ * and it costs nothing to make again.
+ */
+async function openSample(): Promise<void> {
+  if (pendingEdit) discardPending();
+  await loadBytes(sampleModel(), SAMPLE_NAME);
+  shell.log("Opened the sample building. Open your own file any time.", "success");
 }
 
 async function openFile(file: File): Promise<void> {
@@ -1204,13 +1223,70 @@ async function runTool(extracted: {
   throw new Error("Generated Python is never executed. Show it to the user instead.");
 }
 
+/** Tokens this session, as the providers reported them. */
+const tokenTotals = { input: 0, output: 0 };
+
 /** Local Studio can hold the provider key, so the browser never sees one. */
-function askModel(messages: ChatMessage[]): Promise<string> {
+function askModel(messages: ChatMessage[], stream?: StreamView): Promise<string> {
   return chat(
     loadSettings(),
     withSystem(messages),
     service.proxiesLlm() ? (turns) => service.chat(turns) : undefined,
     chatAbort?.signal,
+    {
+      onDelta: stream ? (chunk) => stream.push(chunk) : undefined,
+      onUsage: (usage) => {
+        tokenTotals.input += usage.input;
+        tokenTotals.output += usage.output;
+        assistant().setUsage(usage, tokenTotals);
+      },
+    },
+  );
+}
+
+/**
+ * The selection, as a line the model can act on. Ids are what every viewer
+ * action takes, so they go in alongside the names.
+ */
+function selectionContext(): string | null {
+  if (!assistant().attachmentEnabled()) return null;
+  const ids = viewer.getSelectedIds();
+  if (ids.length === 0) return null;
+  const types = viewer.getElementTypes();
+  const shown = ids.slice(0, 40);
+  const rows = shown.map((id) => `${types.get(id) ?? "element"} #${id}`);
+  const more = ids.length > shown.length ? `, and ${ids.length - shown.length} more` : "";
+  return `The user has ${ids.length} element(s) selected in the viewer: ${rows.join(", ")}${more}. "This", "these" and "the selection" mean exactly those ids.`;
+}
+
+/**
+ * Openers written from the model in front of the user. A generic list invites
+ * generic questions; naming the classes this file actually has does not.
+ */
+function modelSuggestions(): string[] {
+  const counts = elementCounts(viewer);
+  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  if (entries.length === 0) return [];
+  const out: string[] = [];
+  const plain = (type: string): string => type.replace(/^Ifc/, "").replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+  const biggest = entries[0];
+  out.push(`How many ${plain(biggest[0])}s are there, and on which storeys?`);
+  const named = entries.find(([type]) => /Door|Window|Wall|Space|Slab/i.test(type));
+  if (named) out.push(`List the ${plain(named[0])}s with their properties`);
+  out.push("Run the checks and summarise what is wrong");
+  if (idsLoaded) out.push("Validate this model against the loaded IDS");
+  else if (entries.length > 3) out.push(`What is in this model? Break it down by class`);
+  return out.slice(0, 4);
+}
+
+/** The chip under the composer, kept honest as the selection moves. */
+function syncAttachment(): void {
+  if (!assistantUi) return;
+  const ids = viewer.getSelectedIds();
+  const types = viewer.getElementTypes();
+  assistantUi.setAttachment(
+    ids.length,
+    ids.slice(0, 12).map((id) => `${types.get(id) ?? "element"} #${id}`).join("\n"),
   );
 }
 
@@ -1243,18 +1319,27 @@ async function handleChat(text: string): Promise<void> {
   ui.setBusy(true);
   ui.setStatus("Thinking");
   try {
+    // The selection rides in front of the question, as a separate turn, so it
+    // is obvious in the transcript what the model was told and never mistaken
+    // for something the user typed.
+    const context = selectionContext();
+    if (context) remember({ role: "user", content: context });
     remember({ role: "user", content: text });
+    ui.resetAttachment();
     let repairs = 0;
     let rounds = 0;
-    let reply = await askModel(history);
+    let stream = ui.startStream();
+    let reply = await askModel(history, stream);
     for (;;) {
-      if (mine !== chatSeq) return;
+      if (mine !== chatSeq) return void stream.settle("");
       remember({ role: "assistant", content: reply });
       const extracted = extractCode(reply);
       // The call itself becomes a card below, so the prose keeps the sentence
       // that introduced it and loses the JSON: printing both says it twice.
       const prose = extracted ? stripBlock(reply, extracted.code) : reply;
-      if (prose) ui.addMessage("assistant", prose);
+      // The stream showed the raw reply including the block; settling with the
+      // prose is what removes the JSON once it is known to be a tool call.
+      stream.settle(prose);
       if (!extracted) break;
       if (rounds >= MAX_TOOL_ROUNDS) {
         // Ending on a silently dropped tool call looks like the turn stalled.
@@ -1303,8 +1388,10 @@ async function handleChat(text: string): Promise<void> {
         });
       }
       ui.setStatus("Reading the report");
-      reply = await askModel(history);
+      stream = ui.startStream();
+      reply = await askModel(history, stream);
     }
+    persistChat();
   } catch (err) {
     // An abort is the user pressing Stop, and stopChat already said so.
     if (mine === chatSeq) {
@@ -1315,8 +1402,85 @@ async function handleChat(text: string): Promise<void> {
       chatAbort = null;
       ui.setBusy(false);
       ui.setStatus("");
+      syncAttachment();
     }
   }
+}
+
+/** The id the current transcript is stored under; a new chat mints a new one. */
+let chatId: string = crypto.randomUUID();
+
+function chatModelKey(): string {
+  const stats = viewer.getStats();
+  return stats ? `${stats.totalEntities}-${stats.triangleCount}` : "none";
+}
+
+function persistChat(): void {
+  saveChat(chatModelKey(), chatId, history, Date.now());
+}
+
+/** Replay a stored conversation into both the transcript and the history. */
+function openChat(chat: Conversation): void {
+  chatSeq += 1;
+  chatAbort?.abort();
+  chatAbort = null;
+  chatId = chat.id;
+  history.length = 0;
+  const ui = assistant();
+  ui.reset();
+  ui.setBusy(false);
+  for (const message of chat.messages) {
+    history.push(message);
+    if (message.role === "user" || message.role === "assistant") {
+      ui.addMessage(message.role, message.content);
+    }
+  }
+  shell.selectTab("assistant");
+}
+
+function showChatHistory(anchor: HTMLElement): void {
+  const model = chatModelKey();
+  const chats = readChats(model);
+  if (chats.length === 0) return void toast("No saved chats for this model yet", "info");
+  const now = Date.now();
+  const items: MenuItem[] = chats.map((chat) => ({
+    label: `${chat.title}  (${ageLabel(chat.at, now)})`,
+    run: () => openChat(chat),
+  }));
+  items.push({ separator: true });
+  items.push({
+    label: "Delete all saved chats",
+    run: () =>
+      confirmAction(
+        "Delete saved chats",
+        `${chats.length} conversation(s) for this model will be removed from this browser.`,
+        "Delete",
+        () => {
+          clearChats(model);
+          shell.log("Saved chats deleted");
+        },
+      ),
+  });
+  const menu = buildMenu(items);
+  const rect = anchor.getBoundingClientRect();
+  menu.style.position = "fixed";
+  menu.style.top = `${rect.bottom + 4}px`;
+  menu.style.right = `${Math.max(8, window.innerWidth - rect.right)}px`;
+  openLayer([menu], () => undefined);
+  menuKeys(menu);
+}
+
+function retryChat(): void {
+  const ui = assistant();
+  if (chatAbort) return void toast("The assistant is still answering", "info");
+  const last = ui.lastPrompt();
+  if (!last) return void toast("Nothing to ask again", "info");
+  // Drop the previous exchange so the model answers the question rather than
+  // continuing from the answer it already gave.
+  let at = history.length - 1;
+  while (at >= 0 && !(history[at].role === "user" && history[at].content === last)) at -= 1;
+  if (at >= 0) history.length = at;
+  void handleChat(last).catch(reportError);
 }
 
 function withSystem(messages: ChatMessage[]): ChatMessage[] {
@@ -1330,6 +1494,9 @@ function newChat(): void {
   chatSeq += 1;
   chatAbort?.abort();
   chatAbort = null;
+  // Keep what was said before clearing it, so New chat is not a delete button.
+  persistChat();
+  chatId = crypto.randomUUID();
   history.length = 0;
   assistant().reset();
   assistant().setBusy(false);
@@ -1658,6 +1825,7 @@ const registry = new CommandRegistry();
 
 registry.add([
   { id: "file.open", label: "Open", icon: "folder", section: "File", shortcut: "Ctrl+O", hint: "Open an IFC or .ifcx file", run: () => fileInput.click() },
+  { id: "file.sample", label: "Sample model", icon: "cube", section: "File", hint: "A small two-storey building, generated here, to try the viewer on", run: () => void openSample().catch(reportError) },
   { id: "file.export", label: "Export", icon: "download", section: "File", hint: "Download the active IFC", enabled: hasModel, run: exportModel },
   { id: "file.close", label: "Close", icon: "x", section: "File", enabled: hasModel, run: closeOrConfirm },
   { id: "file.screenshot", label: "Screenshot", icon: "camera", section: "File", shortcut: "S", enabled: hasModel, run: () => { viewer.screenshot(); shell.log("Screenshot saved", "success", true); } },
@@ -1677,6 +1845,9 @@ registry.add([
   { id: "vis.isolate", label: "Isolate", icon: "focus", section: "Visibility", shortcut: "I", binding: "", enabled: () => viewer.getSelection() !== null, run: () => viewer.isolateSelected() },
   { id: "vis.hide", label: "Hide", icon: "eye-off", section: "Visibility", shortcut: "H", binding: "", enabled: () => viewer.getSelection() !== null, run: () => viewer.hideSelected() },
   { id: "vis.all", label: "Show all", icon: "eye", section: "Visibility", shortcut: "A", binding: "", run: () => viewer.showAll() },
+  { id: "vis.undo", label: "Undo visibility", icon: "undo", section: "Visibility", shortcut: "Ctrl+Shift+Z", hint: "Step back through hide and isolate", enabled: () => viewer.canUndoVisibility(), run: () => { if (!viewer.undoVisibility()) toast("Nothing to undo", "info"); } },
+  { id: "vis.redo", label: "Redo visibility", icon: "redo", section: "Visibility", shortcut: "Ctrl+Shift+Y", enabled: () => viewer.canRedoVisibility(), run: () => { if (!viewer.redoVisibility()) toast("Nothing to redo", "info"); } },
+  { id: "vis.ghost", label: "Ghost hidden", icon: "eye-off", section: "Visibility", hint: "Hidden elements stay as a faint hatch instead of vanishing", pressed: () => viewer.isGhostHidden(), run: () => { viewer.setGhostHidden(!viewer.isGhostHidden()); shell.log(viewer.isGhostHidden() ? "Hidden elements are ghosted" : "Hidden elements are fully hidden"); ribbon.sync(); } },
   { id: "sel.clear", label: "Deselect", icon: "x", section: "Visibility", shortcut: "Esc", binding: "", enabled: () => viewer.getSelection() !== null, run: () => viewer.clearSelection() },
   { id: "vis.spaces", label: "Spaces", icon: "layers", section: "Visibility", hint: "IfcSpace geometry loads on demand", pressed: () => viewer.isCategoryVisible("IfcSpace"), run: () => void setCategory("IfcSpace").catch(reportError) },
   { id: "vis.openings", label: "Openings", icon: "layers", section: "Visibility", pressed: () => viewer.isCategoryVisible("IfcOpeningElement"), run: () => void setCategory("IfcOpeningElement").catch(reportError) },
@@ -1806,9 +1977,12 @@ const RIBBON: RibbonTab[] = [
       ] },
       { label: "Show", items: [
         { kind: "cmd", id: "vis.all" },
+        { kind: "cmd", id: "vis.ghost", size: "sm" },
         { kind: "cmd", id: "vis.spaces", size: "sm" },
         { kind: "cmd", id: "vis.openings", size: "sm" },
         { kind: "cmd", id: "vis.clear", size: "sm" },
+        { kind: "cmd", id: "vis.undo", size: "sm" },
+        { kind: "cmd", id: "vis.redo", size: "sm" },
       ] },
       { label: "Section", items: [
         { kind: "cmd", id: "tool.section" },
@@ -1981,6 +2155,10 @@ function syncPluginToggle(): void {
 syncPluginToggle();
 plugins.restore();
 viewer.onModelLoaded(() => plugins.modelChanged());
+dock.setPropertyIndex(() => plugins.index());
+viewer.onModelLoaded(() => dock.resetColors());
+viewer.onModelLoaded(() => assistantUi?.setSuggestions(modelSuggestions()));
+viewer.onSelectionChange(() => syncAttachment());
 
 // ---------------------------------------------------------------------------
 // Selection, status, context menu
@@ -2142,6 +2320,7 @@ fileInput.addEventListener("change", () => {
   fileInput.value = "";
 });
 $("btn-open-first").addEventListener("click", () => fileInput.click());
+$("btn-sample").addEventListener("click", () => void openSample().catch(reportError));
 
 let dragDepth = 0;
 window.addEventListener("dragenter", (e) => {

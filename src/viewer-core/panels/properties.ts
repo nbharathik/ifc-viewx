@@ -28,6 +28,52 @@ function formatValue(value: IfcProperty['value']): { text: string; isNull: boole
   return { text: String(value), isNull: false };
 }
 
+const STAR_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true"><path d="m12 4 2.4 5 5.6.8-4 3.9 1 5.5-5-2.7-5 2.7 1-5.5-4-3.9 5.6-.8Z"/></svg>';
+
+/**
+ * A unit worth printing. web-ifc reports the IFC value type, and most of them
+ * ("IfcLabel", "IfcIdentifier", "IfcBoolean") say nothing a reader wants next
+ * to the number; the measure types do.
+ */
+const UNIT_TEXT: Record<string, string> = {
+  IfcLengthMeasure: 'm',
+  IfcPositiveLengthMeasure: 'm',
+  IfcAreaMeasure: 'm2',
+  IfcVolumeMeasure: 'm3',
+  IfcMassMeasure: 'kg',
+  IfcPlaneAngleMeasure: 'rad',
+  IfcThermalTransmittanceMeasure: 'W/m2K',
+  IfcPowerMeasure: 'W',
+  IfcTimeMeasure: 's',
+  IfcCountMeasure: '',
+  Length: 'm',
+  Area: 'm2',
+  Volume: 'm3',
+  Weight: 'kg',
+  Count: '',
+  Time: 's',
+};
+
+const PIN_KEY = 'ifcviewx.pinnedProps';
+
+function readPins(): string[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PIN_KEY) ?? '[]') as string[];
+    return Array.isArray(parsed) ? parsed.filter((name) => typeof name === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function writePins(names: string[]): void {
+  try {
+    localStorage.setItem(PIN_KEY, JSON.stringify(names.slice(0, 40)));
+  } catch {
+    // A browser refusing storage should not stop the panel from rendering.
+  }
+}
+
 export interface PropertiesSource {
   getProperties(expressID: number): Promise<ItemProperties | null>;
   getSelection(): number | null;
@@ -122,11 +168,46 @@ export class PropertiesPanel {
 
     const name = props.attributes.find((a) => a.name === 'Name')?.value;
     this.body.replaceChildren(this.renderHead(props.type, name ? String(name) : '(unnamed)'));
+    const pinned = this.pinnedRows(props);
+    if (pinned.length) {
+      const section = this.renderSection('Pinned', null, pinned, 'pin');
+      section.setAttribute('data-pinned', 'true');
+      this.body.appendChild(section);
+    }
     this.body.appendChild(this.renderSection('Attributes', null, props.attributes, 'attr'));
     for (const pset of props.psets) {
       this.body.appendChild(this.renderPset(pset));
     }
     this.applyFilter();
+  }
+
+  /**
+   * Pins are by property name, not by element, so the same three values stay at
+   * the top as the selection moves. That is the whole point of pinning: you are
+   * comparing one field across many elements.
+   */
+  private pinnedRows(props: ItemProperties): IfcProperty[] {
+    const pins = readPins();
+    if (pins.length === 0) return [];
+    const found = new Map<string, IfcProperty>();
+    for (const attribute of props.attributes) {
+      if (pins.includes(attribute.name)) found.set(attribute.name, attribute);
+    }
+    for (const pset of props.psets) {
+      for (const property of pset.properties) {
+        if (pins.includes(property.name) && !found.has(property.name)) found.set(property.name, property);
+      }
+    }
+    return pins.map((name) => found.get(name)).filter((row): row is IfcProperty => row !== undefined);
+  }
+
+  private togglePin(name: string): void {
+    const pins = readPins();
+    const at = pins.indexOf(name);
+    if (at >= 0) pins.splice(at, 1);
+    else pins.push(name);
+    writePins(pins);
+    void this.render(this.source.getSelection());
   }
 
   /** Hide rows that do not match, and any section left with none. */
@@ -204,6 +285,7 @@ export class PropertiesPanel {
       return section;
     }
 
+    const pins = readPins();
     for (const row of rows) {
       const line = doc.createElement('div');
       line.className = 'ifc-row';
@@ -211,11 +293,23 @@ export class PropertiesPanel {
       key.className = 'ifc-key';
       key.textContent = row.name;
       key.title = row.name;
+      const pin = doc.createElement('button');
+      pin.type = 'button';
+      pin.className = 'ifc-pin';
+      const isPinned = pins.includes(row.name);
+      if (isPinned) pin.classList.add('ifc-pin--on');
+      pin.title = isPinned ? `Unpin ${row.name}` : `Pin ${row.name} to the top`;
+      pin.setAttribute('aria-label', pin.title);
+      pin.setAttribute('aria-pressed', String(isPinned));
+      pin.innerHTML = STAR_ICON;
+      pin.addEventListener('click', () => this.togglePin(row.name));
+      key.appendChild(pin);
       const val = doc.createElement('div');
       val.className = 'ifc-val';
       val.setAttribute('data-prop', `${scope}.${row.name}`);
       const { text, isNull } = formatValue(row.value);
-      val.textContent = text;
+      const unit = typeof row.value === 'number' ? UNIT_TEXT[row.unit ?? ''] : undefined;
+      val.textContent = unit ? `${text} ${unit}` : text;
       if (isNull) {
         val.classList.add('ifc-null');
         line.append(key, val);

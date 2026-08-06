@@ -59,6 +59,83 @@ export interface Measurement {
   ends: [SnapKind, SnapKind | null];
 }
 
+/** What the measure tool is collecting: two points, three, or a ring of them. */
+export type MeasureMode = 'distance' | 'angle' | 'area';
+
+/** A finished angle or area. Distances are metres, angles degrees. */
+export interface ShapeMeasure {
+  id: number;
+  kind: 'angle' | 'area';
+  points: Array<[number, number, number]>;
+  /** Angle at the middle point, degrees. Only for `angle`. */
+  angle?: number;
+  /** Newell area of the ring, m2. Only for `area`. */
+  area?: number;
+  /** Total edge length, closing edge included for an area. */
+  perimeter: number;
+}
+
+const sub = (a: [number, number, number], b: [number, number, number]): [number, number, number] => [
+  a[0] - b[0],
+  a[1] - b[1],
+  a[2] - b[2],
+];
+
+const length3 = (v: [number, number, number]): number => Math.hypot(v[0], v[1], v[2]);
+
+/**
+ * Newell's method: the area of the best-fit plane the ring sits in. Exact for a
+ * planar ring, and the sensible answer for one that is slightly out of plane,
+ * which is what picking points off a real model always gives you.
+ */
+export function ringArea(points: Array<[number, number, number]>): number {
+  if (points.length < 3) return 0;
+  let x = 0;
+  let y = 0;
+  let z = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    x += a[1] * b[2] - a[2] * b[1];
+    y += a[2] * b[0] - a[0] * b[2];
+    z += a[0] * b[1] - a[1] * b[0];
+  }
+  return Math.hypot(x, y, z) / 2;
+}
+
+/** Angle at `b`, in degrees. Zero-length arms have no angle to report. */
+export function angleAt(
+  a: [number, number, number],
+  b: [number, number, number],
+  c: [number, number, number],
+): number {
+  const u = sub(a, b);
+  const v = sub(c, b);
+  const lu = length3(u);
+  const lv = length3(v);
+  if (lu === 0 || lv === 0) return 0;
+  const cos = (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]) / (lu * lv);
+  return (Math.acos(Math.min(1, Math.max(-1, cos))) * 180) / Math.PI;
+}
+
+export function ringPerimeter(points: Array<[number, number, number]>, closed: boolean): number {
+  let total = 0;
+  const last = closed ? points.length : points.length - 1;
+  for (let i = 0; i < last; i++) total += length3(sub(points[(i + 1) % points.length], points[i]));
+  return total;
+}
+
+/** Degrees, to a tenth: finer than that is noise on a picked point. */
+export function formatAngle(degrees: number): string {
+  return `${degrees.toFixed(1)} deg`;
+}
+
+export function formatArea(squareMetres: number): string {
+  if (!Number.isFinite(squareMetres)) return '-';
+  if (squareMetres >= 1) return `${squareMetres.toFixed(squareMetres >= 100 ? 1 : 2)} m2`;
+  return `${Math.round(squareMetres * 10000)} cm2`;
+}
+
 /** Metres, dropping to millimetres below one, so short spans stay readable. */
 export function formatLength(metres: number): string {
   if (!Number.isFinite(metres)) return '-';
@@ -75,6 +152,22 @@ export interface VisibilityRule {
   label: string;
   mode: 'keep' | 'hide';
   ids: number[];
+}
+
+/** One point in the visibility history: everything `applyVisibility` reads. */
+interface VisibilityStep {
+  rules: VisibilityRule[];
+  hidden: number[];
+}
+
+const VISIBILITY_HISTORY_LIMIT = 50;
+
+const sameIds = (a: number[], b: number[]): boolean =>
+  a.length === b.length && a.every((id, i) => id === b[i]);
+
+function sameStep(a: VisibilityStep, b: VisibilityStep): boolean {
+  if (a.rules.length !== b.rules.length || !sameIds(a.hidden, b.hidden)) return false;
+  return a.rules.every((rule, i) => rule.mode === b.rules[i].mode && sameIds(rule.ids, b.rules[i].ids));
 }
 
 export interface ViewerWorkerOptions {
@@ -162,6 +255,24 @@ export interface Viewer {
   /** Elements hidden one at a time, rather than by a rule. */
   getHiddenCount(): number;
   getHiddenIds(): number[];
+
+  /** Hidden elements stay on screen as a faint hatch instead of vanishing. */
+  setGhostHidden(on: boolean): void;
+  isGhostHidden(): boolean;
+
+  /**
+   * Colour elements by rule. `assignment` maps an expressID to a 1-based index
+   * into `colors` (0-255 RGB triples); anything absent keeps its own colour.
+   */
+  setColorOverride(assignment: Map<number, number>, colors: Array<[number, number, number]>): void;
+  clearColorOverride(): void;
+  hasColorOverride(): boolean;
+
+  /** Step back and forward through hide, isolate and show-all. */
+  undoVisibility(): boolean;
+  redoVisibility(): boolean;
+  canUndoVisibility(): boolean;
+  canRedoVisibility(): boolean;
   setSubtreeVisible(expressID: number, visible: boolean): void;
   isSubtreeVisible(expressID: number): boolean;
   toggleSubtreeVisible(expressID: number): void;
@@ -201,6 +312,17 @@ export interface Viewer {
   /** Floorplan inset in the corner of the viewport; follows the section. */
   setPlanView(on: boolean): void;
   isPlanView(): boolean;
+  /** What the tool collects: a span, an angle, or a closed ring. */
+  setMeasureMode(mode: MeasureMode): void;
+  getMeasureMode(): MeasureMode;
+  /** Finished angles and areas, oldest first. */
+  getShapeMeasures(): ShapeMeasure[];
+  /** Points placed toward the shape in hand. */
+  getPendingPoints(): Array<[number, number, number]>;
+  /** Close the ring being drawn. False when there are not yet three points. */
+  closeArea(): boolean;
+  removeShapeMeasure(id: number): void;
+
   /** Two-click distance measurement; returns the new mode state. */
   toggleMeasure(): boolean;
   setMeasuring(on: boolean): void;
@@ -279,6 +401,8 @@ class ViewerImpl implements Viewer {
   private rules: VisibilityRule[] = [];
   private readonly hiddenIds = new Set<number>();
   private ruleSeq = 0;
+  private visPast: VisibilityStep[] = [];
+  private visFuture: VisibilityStep[] = [];
   private cachedTree: SpatialNode | null = null;
   private measuring = false;
   /** Placed spans, oldest first; they stack until removed or reset. */
@@ -292,6 +416,11 @@ class ViewerImpl implements Viewer {
   /** First point of the span in hand, if one is being placed. */
   private measureA: [number, number, number] | null = null;
   private measureAKind: SnapKind | null = null;
+  private measureMode: MeasureMode = 'distance';
+  /** Points placed toward the angle or ring in hand. */
+  private chain: Array<[number, number, number]> = [];
+  private shapes: ShapeMeasure[] = [];
+  private shapeSeq = 0;
   private measureHover: SnapHit | null = null;
   /** True while the gesture that placed the first point is still running. */
   private measureOpening = false;
@@ -354,6 +483,12 @@ class ViewerImpl implements Viewer {
       // Escape drops the span in hand first, and only then the tool itself.
       onEscape: () => {
         if (!this.measuring) return this.clearSelection();
+        // Escape drops the shape in hand first, then leaves the tool, so a
+        // misplaced point never costs the whole session.
+        if (this.chain.length) {
+          this.chain = [];
+          return this.pushMeasure();
+        }
         if (this.measureA) return this.cancelPending();
         this.setMeasuring(false);
       },
@@ -512,6 +647,9 @@ class ViewerImpl implements Viewer {
     // A new model starts unfiltered; rules point at ids that no longer exist.
     this.rules = [];
     this.hiddenIds.clear();
+    this.visPast = [];
+    this.visFuture = [];
+    this.scene.clearColorOverride();
 
     this.loadedCategories.clear();
     this.cachedTree = null;
@@ -641,6 +779,8 @@ class ViewerImpl implements Viewer {
     }
     this.rules = [];
     this.hiddenIds.clear();
+    this.visPast = [];
+    this.visFuture = [];
     this.loadedCategories.clear();
     this.cachedTree = null;
     this.nodeIndex = null;
@@ -864,6 +1004,7 @@ class ViewerImpl implements Viewer {
   }
 
   addRule(rule: Omit<VisibilityRule, 'id'>): VisibilityRule {
+    this.pushVisibilityHistory();
     const added: VisibilityRule = { ...rule, id: `v${++this.ruleSeq}`, ids: [...rule.ids] };
     this.rules.push(added);
     this.applyVisibility();
@@ -872,8 +1013,11 @@ class ViewerImpl implements Viewer {
 
   removeRule(id: string): void {
     const before = this.rules.length;
-    this.rules = this.rules.filter((rule) => rule.id !== id);
-    if (this.rules.length !== before) this.applyVisibility();
+    const next = this.rules.filter((rule) => rule.id !== id);
+    if (next.length === before) return;
+    this.pushVisibilityHistory();
+    this.rules = next;
+    this.applyVisibility();
   }
 
   getRules(): VisibilityRule[] {
@@ -882,6 +1026,7 @@ class ViewerImpl implements Viewer {
 
   clearRules(): void {
     if (this.rules.length === 0) return;
+    this.pushVisibilityHistory();
     this.rules = [];
     this.applyVisibility();
   }
@@ -901,6 +1046,7 @@ class ViewerImpl implements Viewer {
    * slate of manual hides, because "only this" should mean exactly that.
    */
   isolate(expressIDs: number[], label = 'Isolated'): void {
+    this.pushVisibilityHistory();
     this.rules = this.rules.filter((rule) => rule.mode === 'hide');
     this.hiddenIds.clear();
     this.rules.push({ id: `v${++this.ruleSeq}`, label, mode: 'keep', ids: [...expressIDs] });
@@ -908,6 +1054,8 @@ class ViewerImpl implements Viewer {
   }
 
   setHidden(expressIDs: number[], hidden: boolean): void {
+    if (expressIDs.length === 0) return;
+    this.pushVisibilityHistory();
     for (const id of expressIDs) {
       if (hidden) this.hiddenIds.add(id);
       else this.hiddenIds.delete(id);
@@ -916,6 +1064,7 @@ class ViewerImpl implements Viewer {
   }
 
   showAll(): void {
+    if (this.rules.length || this.hiddenIds.size) this.pushVisibilityHistory();
     this.rules = [];
     this.hiddenIds.clear();
     this.scene.showAll();
@@ -929,6 +1078,79 @@ class ViewerImpl implements Viewer {
 
   getHiddenIds(): number[] {
     return [...this.hiddenIds];
+  }
+
+  setGhostHidden(on: boolean): void {
+    this.scene.setGhostHidden(on);
+    this.scene.render();
+  }
+
+  isGhostHidden(): boolean {
+    return this.scene.isGhostHidden();
+  }
+
+  setColorOverride(assignment: Map<number, number>, colors: Array<[number, number, number]>): void {
+    this.scene.setColorOverride(assignment, colors);
+    this.scene.render();
+  }
+
+  clearColorOverride(): void {
+    this.scene.clearColorOverride();
+    this.scene.render();
+  }
+
+  hasColorOverride(): boolean {
+    return this.scene.hasColorOverride();
+  }
+
+  // -- visibility history --------------------------------------------------
+  /**
+   * Visibility is entirely `rules` plus `hiddenIds`, so a step is a snapshot of
+   * those two. Snapshots are taken before a change, which is what makes the
+   * first undo land on what was on screen rather than one step past it.
+   */
+  private snapshotVisibility(): VisibilityStep {
+    return { rules: this.rules.map((rule) => ({ ...rule, ids: [...rule.ids] })), hidden: [...this.hiddenIds] };
+  }
+
+  private pushVisibilityHistory(): void {
+    const step = this.snapshotVisibility();
+    const top = this.visPast[this.visPast.length - 1];
+    if (top && sameStep(top, step)) return;
+    this.visPast.push(step);
+    if (this.visPast.length > VISIBILITY_HISTORY_LIMIT) this.visPast.shift();
+    this.visFuture = [];
+  }
+
+  private restoreVisibility(step: VisibilityStep): void {
+    this.rules = step.rules.map((rule) => ({ ...rule, ids: [...rule.ids] }));
+    this.hiddenIds.clear();
+    for (const id of step.hidden) this.hiddenIds.add(id);
+    this.applyVisibility();
+  }
+
+  undoVisibility(): boolean {
+    const step = this.visPast.pop();
+    if (!step) return false;
+    this.visFuture.push(this.snapshotVisibility());
+    this.restoreVisibility(step);
+    return true;
+  }
+
+  redoVisibility(): boolean {
+    const step = this.visFuture.pop();
+    if (!step) return false;
+    this.visPast.push(this.snapshotVisibility());
+    this.restoreVisibility(step);
+    return true;
+  }
+
+  canUndoVisibility(): boolean {
+    return this.visPast.length > 0;
+  }
+
+  canRedoVisibility(): boolean {
+    return this.visFuture.length > 0;
   }
 
   setSubtreeVisible(expressID: number, visible: boolean): void {
@@ -1155,6 +1377,8 @@ class ViewerImpl implements Viewer {
 
   resetMeasure(): void {
     this.spans = [];
+    this.shapes = [];
+    this.chain = [];
     this.cancelPending();
   }
 
@@ -1237,6 +1461,12 @@ class ViewerImpl implements Viewer {
    * press starts the next measurement without a trip back to the toolbar.
    */
   private measureDown(clientX: number, clientY: number): void {
+    // Angle and area place their point on release, so the press only has to
+    // arm the gesture and keep the hover honest.
+    if (this.measureMode !== 'distance') {
+      this.measureOpening = this.chain.length === 0;
+      return this.queueMeasureHover(clientX, clientY);
+    }
     if (this.measureA) {
       this.measureOpening = false; // this gesture closes the span
       return this.queueMeasureHover(clientX, clientY);
@@ -1254,8 +1484,114 @@ class ViewerImpl implements Viewer {
    * Release: a drag has already shown where the span ends, so it closes
    * there. A press that never moved is the first of two clicks, and waits.
    */
+  /**
+   * Angle and area collect a chain of points rather than pairs. Each placed
+   * point becomes a span so the shape draws itself with the renderer the
+   * distance tool already uses, and no new drawing code exists for either.
+   */
+  private chainUp(clientX: number, clientY: number): void {
+    const hit = this.probe(clientX, clientY) ?? this.measureHover;
+    if (!hit) return;
+    const point = hit.point;
+    const last = this.chain[this.chain.length - 1];
+    if (last && last[0] === point[0] && last[1] === point[1] && last[2] === point[2]) return;
+
+    // Clicking the first point again closes a ring, which is what every
+    // polygon tool does and what a user tries before finding the button.
+    if (this.measureMode === 'area' && this.chain.length >= 3) {
+      const first = this.chain[0];
+      if (length3(sub(point, first)) < this.closeTolerance()) {
+        this.closeArea();
+        return;
+      }
+    }
+
+    this.chain.push(point);
+    if (last) {
+      this.spans.push({ id: ++this.spanSeq, a: last, b: point, ends: ['surface', hit.kind] });
+    }
+    this.measureHover = hit;
+    if (this.measureMode === 'angle' && this.chain.length === 3) {
+      const [a, b, c] = this.chain;
+      this.shapes.push({
+        id: ++this.shapeSeq,
+        kind: 'angle',
+        points: [a, b, c],
+        angle: angleAt(a, b, c),
+        perimeter: ringPerimeter([a, b, c], false),
+      });
+      this.chain = [];
+    }
+    this.pushMeasure();
+  }
+
+  /** A click within this of the first point counts as closing the ring. */
+  private closeTolerance(): number {
+    const bounds = this.scene.getBounds();
+    const size = Math.max(
+      bounds.max.x - bounds.min.x,
+      bounds.max.y - bounds.min.y,
+      bounds.max.z - bounds.min.z,
+    );
+    return Math.max(0.05, size * 0.005);
+  }
+
+  closeArea(): boolean {
+    if (this.measureMode !== 'area' || this.chain.length < 3) return false;
+    const points = this.chain;
+    this.spans.push({
+      id: ++this.spanSeq,
+      a: points[points.length - 1],
+      b: points[0],
+      ends: ['surface', 'surface'],
+    });
+    this.shapes.push({
+      id: ++this.shapeSeq,
+      kind: 'area',
+      points: [...points],
+      area: ringArea(points),
+      perimeter: ringPerimeter(points, true),
+    });
+    this.chain = [];
+    this.pushMeasure();
+    return true;
+  }
+
+  setMeasureMode(mode: MeasureMode): void {
+    if (this.measureMode === mode) return;
+    this.measureMode = mode;
+    // A half-drawn shape means nothing in the mode that replaces it.
+    this.chain = [];
+    this.measureA = null;
+    this.measureAKind = null;
+    this.pushMeasure();
+  }
+
+  getMeasureMode(): MeasureMode {
+    return this.measureMode;
+  }
+
+  getShapeMeasures(): ShapeMeasure[] {
+    return this.shapes.map((shape) => ({ ...shape, points: shape.points.map((p) => [...p] as [number, number, number]) }));
+  }
+
+  getPendingPoints(): Array<[number, number, number]> {
+    return this.chain.map((p) => [...p] as [number, number, number]);
+  }
+
+  removeShapeMeasure(id: number): void {
+    const before = this.shapes.length;
+    this.shapes = this.shapes.filter((shape) => shape.id !== id);
+    if (this.shapes.length !== before) this.pushMeasure();
+  }
+
   private measureUp(clientX: number, clientY: number, moved: boolean): void {
-    if (!this.measuring || !this.measureA) return;
+    if (!this.measuring) return;
+    if (this.measureMode !== 'distance') {
+      if (this.measureOpening && !moved) return;
+      return this.chainUp(clientX, clientY);
+    }
+    if (!this.measureA) return;
     if (this.measureOpening && !moved) return;
     const hit = this.probe(clientX, clientY) ?? this.measureHover;
     if (!hit) return;

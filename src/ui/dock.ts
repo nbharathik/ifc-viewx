@@ -3,9 +3,11 @@
 // of the viewport floor. Each icon opens its options sideways, next to itself.
 // It reads and writes the viewer directly, so no tool state is mirrored
 // anywhere else.
-import { attachPopover, h, icon, iconButton, toast } from "./kit.js";
-import { formatLength } from "../viewer-core/viewer.js";
-import type { CameraPose, LazyCategory, SectionState, SnapMode, Viewer, ViewPreset } from "../viewer-core/viewer.js";
+import { attachPopover, busyRow, h, icon, iconButton, toast } from "./kit.js";
+import { applyColors, colorableKeys, computeColors, cssColor, type ColorResult, type ColorRule } from "./colorBy.js";
+import { formatAngle, formatArea, formatLength } from "../viewer-core/viewer.js";
+import type { PropertyIndex } from "../sdk/data.js";
+import type { CameraPose, LazyCategory, MeasureMode, SectionState, SnapMode, Viewer, ViewPreset } from "../viewer-core/viewer.js";
 
 interface Viewpoint {
   name: string;
@@ -32,6 +34,11 @@ const SNAPS: Array<[SnapMode, string, string]> = [
   ["vertex", "Vertex", "Corners only"],
   ["off", "Off", "Any point on the surface"],
 ];
+const MODES: Array<[MeasureMode, string, string]> = [
+  ["distance", "Length", "Two points"],
+  ["angle", "Angle", "Three points: arm, corner, arm"],
+  ["area", "Area", "Click a ring of points, then close it"],
+];
 /** What each end of the span caught, for the line under the number. */
 const ENDS: Record<string, string> = {
   vertex: "corner",
@@ -44,6 +51,38 @@ const ENDS: Record<string, string> = {
 export function viewpointKey(viewer: Viewer): string | null {
   const stats = viewer.getStats();
   return stats ? `ifcviewx.vp.${stats.totalEntities}-${stats.triangleCount}` : null;
+}
+
+/** Named element sets, keyed by model shape the same way viewpoints are. */
+interface SelectionSet {
+  name: string;
+  ids: number[];
+}
+
+/** Enough to hold a storey of a large model without filling the quota. */
+const SET_LIMIT = 20000;
+
+export function selectionSetKey(viewer: Viewer): string | null {
+  const stats = viewer.getStats();
+  return stats ? `ifcviewx.sets.${stats.totalEntities}-${stats.triangleCount}` : null;
+}
+
+export function readSelectionSets(key: string): SelectionSet[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) ?? "[]") as SelectionSet[];
+    return Array.isArray(parsed) ? parsed.filter((set) => set && Array.isArray(set.ids)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSelectionSets(key: string, sets: SelectionSet[]): boolean {
+  try {
+    localStorage.setItem(key, JSON.stringify(sets));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function readViewpoints(key: string): Viewpoint[] {
@@ -81,6 +120,12 @@ export class Dock {
   private readonly measureHint = h("div", { class: "mc-hint" });
   /** What the list currently shows; rows rebuild only when this changes. */
   private measureSig = "";
+  private readonly closeRing = h("button", { class: "btn sm grow hidden", type: "button", text: "Close ring" });
+  private readonly colorBtn: HTMLButtonElement;
+  private colorRule: ColorRule = { kind: "none" };
+  private colorResult: ColorResult | null = null;
+  /** Set once the plugin host exists; property rules read its shared index. */
+  private indexProvider: (() => PropertyIndex) | null = null;
 
   constructor(host: HTMLElement, private readonly viewer: Viewer) {
     this.root = h("div", { id: "dock", role: "toolbar", "aria-label": "Viewport tools" });
@@ -97,8 +142,10 @@ export class Dock {
     });
     this.sectionBtn = this.popTool("section", "Section planes  X", (pop) => this.buildSection(pop));
     this.popTool("eye", "Visibility", (pop, close) => this.buildVisibility(pop, close));
+    this.colorBtn = this.popTool("palette", "Colour by", (pop) => this.buildColors(pop));
 
     this.sep();
+    this.popTool("focus", "Selection sets", (pop) => this.buildSelectionSets(pop));
     this.popTool("bookmark", "Saved viewpoints", (pop) => this.buildViewpoints(pop));
     this.tool("camera", "Screenshot  S", () => viewer.screenshot());
 
@@ -169,8 +216,21 @@ export class Dock {
       });
       snaps.appendChild(button);
     }
+    const modes = h("div", { class: "seg mc-mode" });
+    for (const [mode, label, hint] of MODES) {
+      const button = h("button", { type: "button", text: label, title: hint });
+      button.addEventListener("click", () => {
+        this.viewer.setMeasureMode(mode);
+        this.syncMeasure();
+      });
+      modes.appendChild(button);
+    }
+
     const reset = h("button", { class: "btn sm grow", type: "button", text: "Clear all" });
     reset.addEventListener("click", () => this.viewer.resetMeasure());
+    this.closeRing.addEventListener("click", () => {
+      if (!this.viewer.closeArea()) toast("Place at least three points first", "info");
+    });
     const done = iconButton("x", "Close measure  Esc", () => {
       this.viewer.setMeasuring(false);
       this.sync();
@@ -182,11 +242,12 @@ export class Dock {
         h("span", { class: "grow", text: "Measure" }),
         done,
       ]),
+      h("div", { class: "mc-row" }, [h("span", { class: "mc-key", text: "Mode" }), modes]),
       this.measureValue,
       this.measureSplit,
       this.measureList,
       h("div", { class: "mc-row" }, [h("span", { class: "mc-key", text: "Snap" }), snaps]),
-      h("div", { class: "mc-row" }, [reset]),
+      h("div", { class: "mc-row" }, [this.closeRing, reset]),
       this.measureHint,
     ]);
   }
@@ -195,12 +256,23 @@ export class Dock {
     const on = this.viewer.isMeasuring();
     this.measureCard.classList.toggle("hidden", !on);
     if (!on) return;
-    const mode = this.viewer.getSnapMode();
+    const snap = this.viewer.getSnapMode();
     const buttons = this.measureCard.querySelectorAll<HTMLButtonElement>(".mc-snap button");
     SNAPS.forEach(([value], index) =>
-      buttons[index]?.setAttribute("aria-pressed", String(value === mode)),
+      buttons[index]?.setAttribute("aria-pressed", String(value === snap)),
     );
+    const shape = this.viewer.getMeasureMode();
+    const modeButtons = this.measureCard.querySelectorAll<HTMLButtonElement>(".mc-mode button");
+    MODES.forEach(([value], index) =>
+      modeButtons[index]?.setAttribute("aria-pressed", String(value === shape)),
+    );
+    this.closeRing.classList.toggle("hidden", shape !== "area");
 
+    if (shape === "distance") return this.syncDistance();
+    this.syncShape(shape);
+  }
+
+  private syncDistance(): void {
     const found = this.viewer.getMeasurement();
     this.measureValue.textContent = found && found.distance > 0 ? formatLength(found.distance) : "-";
     this.measureValue.classList.toggle("live", !found?.complete);
@@ -217,6 +289,61 @@ export class Dock {
       : spans.length
         ? `${ENDS[found!.ends[0]]} to ${ENDS[found!.ends[1] ?? "surface"]} · click starts the next one`
         : "Click or drag from the first point · right-drag orbits";
+  }
+
+  /** Angle and area read the finished shapes, and say what the ring still needs. */
+  private syncShape(mode: "angle" | "area"): void {
+    const shapes = this.viewer.getShapeMeasures().filter((entry) => entry.kind === mode);
+    const pending = this.viewer.getPendingPoints();
+    const last = shapes[shapes.length - 1];
+
+    if (last && pending.length === 0) {
+      this.measureValue.textContent =
+        last.kind === "angle" ? formatAngle(last.angle ?? 0) : formatArea(last.area ?? 0);
+      this.measureValue.classList.remove("live");
+      this.measureSplit.textContent = `perimeter ${formatLength(last.perimeter)}`;
+    } else {
+      this.measureValue.textContent = pending.length ? `${pending.length} point(s)` : "-";
+      this.measureValue.classList.toggle("live", pending.length > 0);
+      this.measureSplit.textContent = "";
+    }
+
+    this.syncShapeList(shapes);
+    if (mode === "angle") {
+      this.measureHint.textContent =
+        pending.length === 0
+          ? "Click the first arm, then the corner, then the second arm"
+          : pending.length === 1
+            ? "Click the corner the angle is measured at"
+            : "Click the far end of the second arm";
+      return;
+    }
+    this.measureHint.textContent =
+      pending.length === 0
+        ? "Click around the outline, then close it"
+        : pending.length < 3
+          ? `${3 - pending.length} more point(s) before it can close`
+          : "Click the first point again, or Close ring";
+  }
+
+  private syncShapeList(shapes: ReturnType<Viewer["getShapeMeasures"]>): void {
+    const sig = shapes.map((shape) => `${shape.id}:${(shape.area ?? shape.angle ?? 0).toFixed(4)}`).join("|");
+    if (sig === this.measureSig) return;
+    this.measureSig = sig;
+    this.measureList.classList.toggle("hidden", shapes.length === 0);
+    this.measureList.replaceChildren(
+      ...shapes.map((shape, index) =>
+        h("div", { class: "mc-mrow" }, [
+          h("span", { class: "idx", text: String(index + 1) }),
+          h("span", {
+            class: "d",
+            text: shape.kind === "angle" ? formatAngle(shape.angle ?? 0) : formatArea(shape.area ?? 0),
+          }),
+          h("span", { class: "grow ends", text: `${shape.points.length} points` }),
+          iconButton("x", "Remove this measurement", () => this.viewer.removeShapeMeasure(shape.id), "icon-btn sm"),
+        ]),
+      ),
+    );
   }
 
   /** One row per placed span; rebuilt only when the spans actually change. */
@@ -398,6 +525,8 @@ export class Dock {
       ["Isolate selection", "I", () => this.viewer.isolateSelected(), hasSelection],
       ["Hide selection", "H", () => this.viewer.hideSelected(), hasSelection],
       ["Show all", "A", () => this.viewer.showAll(), true],
+      ["Undo visibility", "Ctrl+Shift+Z", () => void this.viewer.undoVisibility(), this.viewer.canUndoVisibility()],
+      ["Redo visibility", "Ctrl+Shift+Y", () => void this.viewer.redoVisibility(), this.viewer.canRedoVisibility()],
     ];
     for (const [label, key, run, enabled] of actions) {
       const button = h("button", { class: "btn", type: "button", disabled: !enabled }, [
@@ -411,6 +540,17 @@ export class Dock {
       });
       pop.appendChild(button);
     }
+
+    const ghost = h("button", { class: "pop-check", type: "button", title: "Hidden elements stay as a faint hatch instead of vanishing" }, [
+      icon("check", 14),
+      h("span", { text: "Ghost hidden" }),
+    ]);
+    ghost.setAttribute("aria-pressed", String(this.viewer.isGhostHidden()));
+    ghost.addEventListener("click", () => {
+      this.viewer.setGhostHidden(!this.viewer.isGhostHidden());
+      ghost.setAttribute("aria-pressed", String(this.viewer.isGhostHidden()));
+    });
+    pop.append(h("div", { class: "pop-title", text: "Hidden elements" }), ghost);
 
     pop.appendChild(h("div", { class: "pop-title", text: "Categories" }));
     for (const [category, label] of CATEGORIES) {
@@ -429,6 +569,193 @@ export class Dock {
       });
       pop.appendChild(button);
     }
+  }
+
+  /** The app owns the property index; the dock only borrows it for colouring. */
+  setPropertyIndex(provider: () => PropertyIndex): void {
+    this.indexProvider = provider;
+  }
+
+  /** A colour rule points at express ids, so a new model has to drop it. */
+  resetColors(): void {
+    this.colorRule = { kind: "none" };
+    this.colorResult = null;
+    this.syncColorButton();
+  }
+
+  private syncColorButton(): void {
+    this.colorBtn.setAttribute("aria-pressed", String(this.colorRule.kind !== "none"));
+  }
+
+  private buildColors(pop: HTMLElement): void {
+    pop.append(h("div", { class: "pop-title", text: "Colour by" }));
+    const legend = h("div", { class: "pop-list legend" });
+    const status = h("div", {});
+
+    const paint = (): void => {
+      legend.replaceChildren();
+      const result = this.colorResult;
+      if (!result || result.groups.length === 0) {
+        legend.appendChild(h("div", { class: "empty", text: "Pick a rule to colour the model." }));
+        return;
+      }
+      for (const group of result.groups) {
+        const row = h("button", { class: "legend-row", type: "button", title: `Isolate ${group.label}` }, [
+          h("span", { class: "legend-dot", style: `background:${cssColor(group.color)}` }),
+          h("span", { class: "grow", text: group.label }),
+          h("span", { class: "legend-count", text: group.count.toLocaleString() }),
+        ]);
+        row.addEventListener("click", () => this.viewer.isolate(group.ids, `Colour: ${group.label}`));
+        legend.appendChild(row);
+      }
+      if (result.unset > 0) {
+        legend.appendChild(h("div", { class: "hint-line", text: `${result.unset.toLocaleString()} more not coloured; the palette holds 254 groups.` }));
+      }
+    };
+
+    const run = (rule: ColorRule): void => {
+      this.colorRule = rule;
+      this.syncColorButton();
+      if (rule.kind === "none") {
+        this.colorResult = null;
+        this.viewer.clearColorOverride();
+        status.replaceChildren();
+        paint();
+        return;
+      }
+      if (rule.kind !== "property") {
+        this.colorResult = computeColors(this.viewer, rule, []);
+        applyColors(this.viewer, this.colorResult);
+        status.replaceChildren();
+        paint();
+        return;
+      }
+      const index = this.indexProvider?.();
+      if (!index) return void toast("Properties are not ready yet", "error");
+      status.replaceChildren(busyRow("Reading properties"));
+      void index
+        .build()
+        .then((rows) => {
+          // The popover may have moved on to another rule while this ran.
+          if (this.colorRule.kind !== "property" || this.colorRule.key !== rule.key) return;
+          this.colorResult = computeColors(this.viewer, rule, rows);
+          applyColors(this.viewer, this.colorResult);
+          status.replaceChildren();
+          paint();
+        })
+        .catch((err: Error) => {
+          status.replaceChildren();
+          toast(err.message, "error");
+        });
+    };
+
+    const modes: Array<[string, ColorRule]> = [
+      ["None", { kind: "none" }],
+      ["IFC class", { kind: "class" }],
+      ["Storey", { kind: "storey" }],
+    ];
+    const seg = h("div", { class: "seg" });
+    for (const [label, rule] of modes) {
+      const button = h("button", { type: "button", text: label });
+      button.setAttribute("aria-pressed", String(this.colorRule.kind === rule.kind));
+      button.addEventListener("click", () => {
+        for (const other of seg.children) other.setAttribute("aria-pressed", "false");
+        button.setAttribute("aria-pressed", "true");
+        keys.value = "";
+        run(rule);
+      });
+      seg.appendChild(button);
+    }
+    pop.appendChild(seg);
+
+    const index = this.indexProvider?.();
+    const options = index ? colorableKeys(index) : [];
+    const keys = h("select", { class: "pop-select" }) as HTMLSelectElement;
+    keys.appendChild(h("option", { value: "", text: options.length ? "Property..." : "Property (open a model)" }));
+    for (const [key, count] of options) {
+      keys.appendChild(h("option", { value: key, text: `${key}  (${count})` }));
+    }
+    if (this.colorRule.kind === "property") keys.value = this.colorRule.key;
+    keys.addEventListener("change", () => {
+      if (!keys.value) return;
+      for (const other of seg.children) other.setAttribute("aria-pressed", "false");
+      run({ kind: "property", key: keys.value });
+    });
+    pop.append(keys, status, legend);
+    paint();
+  }
+
+  private buildSelectionSets(pop: HTMLElement): void {
+    const key = selectionSetKey(this.viewer);
+    pop.append(h("div", { class: "pop-title", text: "Selection sets" }));
+    if (!key) {
+      pop.appendChild(h("div", { class: "empty", text: "Load a model first." }));
+      return;
+    }
+
+    const list = h("div", { class: "pop-list" });
+    const name = h("input", { type: "text", placeholder: "Name this selection" }) as HTMLInputElement;
+    const save = h("button", { class: "btn accent", type: "button", text: "Save" });
+
+    const render = (): void => {
+      const sets = readSelectionSets(key);
+      list.replaceChildren();
+      if (sets.length === 0) {
+        list.appendChild(h("div", { class: "empty", text: "Select elements, then save them here." }));
+        return;
+      }
+      sets.forEach((set, index) => {
+        const apply = h("button", { class: "btn grow", type: "button", title: `Select ${set.ids.length} element(s)` }, [
+          h("span", { class: "grow", text: set.name }),
+          h("span", { class: "legend-count", text: String(set.ids.length) }),
+        ]);
+        apply.style.justifyContent = "space-between";
+        apply.addEventListener("click", () => {
+          // A set can outlive the elements it named, so select what still exists.
+          const alive = set.ids.filter((id) => this.viewer.hasGeometry(id));
+          if (alive.length === 0) return void toast("None of those elements are in this model", "error");
+          this.viewer.selectMany(alive);
+          if (alive.length < set.ids.length) {
+            toast(`${alive.length} of ${set.ids.length} still in the model`, "info");
+          }
+        });
+        const only = iconButton("focus", "Isolate this set", () => {
+          const alive = set.ids.filter((id) => this.viewer.hasGeometry(id));
+          if (alive.length === 0) return void toast("None of those elements are in this model", "error");
+          this.viewer.isolate(alive, set.name);
+        }, "icon-btn sm");
+        const remove = iconButton("x", "Delete", () => {
+          const next = readSelectionSets(key);
+          next.splice(index, 1);
+          writeSelectionSets(key, next);
+          render();
+        }, "icon-btn sm");
+        list.appendChild(h("div", { class: "pop-row" }, [apply, only, remove]));
+      });
+    };
+
+    const commit = (): void => {
+      const ids = this.viewer.getSelectedIds();
+      if (ids.length === 0) return void toast("Select something first", "error");
+      if (ids.length > SET_LIMIT) return void toast(`Too many to store (${ids.length.toLocaleString()})`, "error");
+      const sets = readSelectionSets(key);
+      const label = name.value.trim() || `Set ${sets.length + 1}`;
+      const at = sets.findIndex((set) => set.name === label);
+      const entry = { name: label, ids };
+      if (at >= 0) sets[at] = entry;
+      else sets.push(entry);
+      if (!writeSelectionSets(key, sets)) return void toast("This browser refused to store the set", "error");
+      name.value = "";
+      toast(`Saved ${label} (${ids.length})`, "success");
+      render();
+    };
+
+    save.addEventListener("click", commit);
+    name.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") commit();
+    });
+    pop.append(h("div", { class: "pop-row" }, [name, save]), list);
+    render();
   }
 
   private buildViewpoints(pop: HTMLElement): void {

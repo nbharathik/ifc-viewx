@@ -21,6 +21,18 @@ function isDefaultWhite(c: { r: number; g: number; b: number; a: number }): bool
 const HIGHLIGHT_GLSL = 'vec3(1.0, 0.26225, 0.01033) * 0.55';
 
 const STATE_TEX_WIDTH = 1024;
+/** State R channel: hidden, ghosted, visible. Read as thresholds in the shader. */
+const STATE_HIDDEN = 0;
+const STATE_GHOST = 140;
+const STATE_VISIBLE = 255;
+/** Colour override palette entries. Index 0 means "no override". */
+const PALETTE_SIZE = 256;
+/**
+ * Ghosts keep this many of every 16 screen pixels. A screen-space pattern
+ * rather than blending, so an opaque chunk never needs sorting or a second
+ * material to fade.
+ */
+const GHOST_KEPT = 3;
 /** Vertex budget per merged chunk; bounds single-buffer size and draw grouping. */
 const CHUNK_VERTEX_LIMIT = 500_000;
 /**
@@ -187,6 +199,14 @@ export class ModelBatcher {
   private stateCapacity: number;
   private readonly stateTexUniform: { value: THREE.Texture };
   private readonly stateSizeUniform: { value: THREE.Vector2 };
+  /** Palette for colour-by rules; index 0 is transparent and means untouched. */
+  private paletteData = new Uint8Array(PALETTE_SIZE * 4);
+  private paletteTexture: THREE.DataTexture;
+  private readonly paletteTexUniform: { value: THREE.Texture };
+  private readonly overrideOnUniform = { value: 0 };
+  /** expressID to palette index, empty when no colour rule is active. */
+  private overrideIndex = new Map<number, number>();
+  private ghostHidden = false;
   /** Pick-pass reading, and the view-depth range mode 1 packs into 24 bits. */
   private readonly depthModeUniform = { value: 0 };
   private readonly depthRangeUniform = { value: new THREE.Vector2(0, 1) };
@@ -214,6 +234,11 @@ export class ModelBatcher {
     this.stateTexture = this.makeStateTexture(this.stateData, 64);
     this.stateTexUniform = { value: this.stateTexture };
     this.stateSizeUniform = { value: new THREE.Vector2(STATE_TEX_WIDTH, 64) };
+    this.paletteTexture = new THREE.DataTexture(this.paletteData, PALETTE_SIZE, 1, THREE.RGBAFormat);
+    this.paletteTexture.minFilter = THREE.NearestFilter;
+    this.paletteTexture.magFilter = THREE.NearestFilter;
+    this.paletteTexture.needsUpdate = true;
+    this.paletteTexUniform = { value: this.paletteTexture };
 
     this.mergedOpaque = this.makeLambert(false, true);
     this.mergedTransparent = this.makeLambert(true, true);
@@ -257,9 +282,13 @@ export class ModelBatcher {
     });
     const stateTexUniform = this.stateTexUniform;
     const stateSizeUniform = this.stateSizeUniform;
+    const paletteTexUniform = this.paletteTexUniform;
+    const overrideOnUniform = this.overrideOnUniform;
     material.onBeforeCompile = (shader) => {
       shader.uniforms.uStateTex = stateTexUniform;
       shader.uniforms.uStateSize = stateSizeUniform;
+      shader.uniforms.uPaletteTex = paletteTexUniform;
+      shader.uniforms.uOverrideOn = overrideOnUniform;
       shader.vertexShader = shader.vertexShader
         .replace(
           'void main() {',
@@ -268,14 +297,25 @@ export class ModelBatcher {
       shader.fragmentShader = shader.fragmentShader
         .replace(
           'void main() {',
-          'uniform sampler2D uStateTex;\nuniform vec2 uStateSize;\nvarying float vElementIndex;\nvoid main() {\n' +
+          'uniform sampler2D uStateTex;\nuniform vec2 uStateSize;\nuniform sampler2D uPaletteTex;\nuniform float uOverrideOn;\nvarying float vElementIndex;\nvoid main() {\n' +
             '\tvec2 stUv = (vec2(mod(vElementIndex, uStateSize.x), floor(vElementIndex / uStateSize.x)) + 0.5) / uStateSize;\n' +
             '\tvec4 ifcState = texture2D(uStateTex, stUv);\n' +
-            '\tif (ifcState.r < 0.5) discard;',
+            '\tif (ifcState.r < 0.25) discard;\n' +
+            '\tfloat ifcGhost = step(ifcState.r, 0.75);\n' +
+            '\tif (ifcGhost > 0.5 && mod(floor(gl_FragCoord.x) * 3.0 + floor(gl_FragCoord.y) * 5.0, 16.0) >= ' +
+            `${GHOST_KEPT.toFixed(1)}) discard;`,
+        )
+        .replace(
+          '#include <color_fragment>',
+          '#include <color_fragment>\n' +
+            '\tif (uOverrideOn > 0.5 && ifcState.b > 0.0) {\n' +
+            '\t\tdiffuseColor.rgb = texture2D(uPaletteTex, vec2((ifcState.b * 255.0 + 0.5) / 256.0, 0.5)).rgb;\n' +
+            '\t}\n' +
+            '\tif (ifcGhost > 0.5) diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.62), 0.72);',
         )
         .replace(
           '#include <emissivemap_fragment>',
-          `#include <emissivemap_fragment>\n\ttotalEmissiveRadiance += ifcState.g * ${HIGHLIGHT_GLSL};`,
+          `#include <emissivemap_fragment>\n\ttotalEmissiveRadiance += ifcState.g * (1.0 - ifcGhost) * ${HIGHLIGHT_GLSL};`,
         );
     };
     material.customProgramCacheKey = () => `ifc-batch-${transparent}-${vertexColors}`;
@@ -324,7 +364,7 @@ export class ModelBatcher {
         void main() {
           #include <clipping_planes_fragment>
           vec2 stUv = (vec2(mod(vElementIndex, uStateSize.x), floor(vElementIndex / uStateSize.x)) + 0.5) / uStateSize;
-          if (texture2D(uStateTex, stUv).r < 0.5) discard;
+          if (texture2D(uStateTex, stUv).r < 0.75) discard;
           if (uDepthMode > 0.5) {
             float t = clamp((vViewDepth - uDepthRange.x) / uDepthRange.y, 0.0, 1.0);
             vec3 enc = fract(vec3(1.0, 255.0, 65025.0) * t);
@@ -809,14 +849,68 @@ export class ModelBatcher {
     return categoryOK && !this.hiddenSet.has(expressID);
   }
 
+  /**
+   * A category the user switched off stays fully hidden even in ghost mode:
+   * ghosting is about keeping context while isolating, and nobody isolates in
+   * order to see every space and opening faintly behind it.
+   */
+  private stateFor(record: ElementRecord, expressID: number): number {
+    if (this.isVisible(record, expressID)) return STATE_VISIBLE;
+    const categoryOff =
+      record.ifcType in this.categoryVisible && !this.categoryVisible[record.ifcType];
+    return this.ghostHidden && !categoryOff ? STATE_GHOST : STATE_HIDDEN;
+  }
+
   private writeState(record: ElementRecord): void {
     const expressID = this.elementsByIndex[record.index];
     const base = record.index * 4;
-    this.stateData[base] = this.isVisible(record, expressID) ? 255 : 0;
+    this.stateData[base] = this.stateFor(record, expressID);
     this.stateData[base + 1] = this.highlighted.has(expressID) ? 255 : 0;
-    this.stateData[base + 2] = 0;
+    this.stateData[base + 2] = this.overrideIndex.get(expressID) ?? 0;
     this.stateData[base + 3] = 255;
     this.stateTexture.needsUpdate = true;
+  }
+
+  /** Hidden elements stay on screen as a faint screen-space hatch. */
+  setGhostHidden(on: boolean): void {
+    if (this.ghostHidden === on) return;
+    this.ghostHidden = on;
+    this.rewriteAllStates();
+  }
+
+  isGhostHidden(): boolean {
+    return this.ghostHidden;
+  }
+
+  /**
+   * Colour elements by rule. `assignment` maps an expressID to a 1-based index
+   * into `colors`; anything absent keeps its own colour. One byte per element
+   * and one palette texture, so a rule costs no per-element GPU state.
+   */
+  setColorOverride(assignment: Map<number, number>, colors: Array<[number, number, number]>): void {
+    this.paletteData.fill(0);
+    for (let i = 0; i < colors.length && i < PALETTE_SIZE - 1; i++) {
+      const base = (i + 1) * 4;
+      this.paletteData[base] = colors[i][0];
+      this.paletteData[base + 1] = colors[i][1];
+      this.paletteData[base + 2] = colors[i][2];
+      this.paletteData[base + 3] = 255;
+    }
+    this.paletteTexture.needsUpdate = true;
+    this.overrideIndex = assignment;
+    this.overrideOnUniform.value = assignment.size ? 1 : 0;
+    this.rewriteAllStates();
+  }
+
+  clearColorOverride(): void {
+    if (this.overrideOnUniform.value === 0) return;
+    this.overrideIndex = new Map();
+    this.overrideOnUniform.value = 0;
+    this.rewriteAllStates();
+  }
+
+  hasColorOverride(): boolean {
+    return this.overrideOnUniform.value > 0;
   }
 
   setHidden(expressIDs: Iterable<number>, hidden: boolean): void {
@@ -1007,6 +1101,7 @@ export class ModelBatcher {
     this.instTransparentByAlpha.clear();
     this.pickMaterial.dispose();
     this.stateTexture.dispose();
+    this.paletteTexture.dispose();
     this.elements.clear();
     this.segmentsByElement.clear();
     this.elementsByIndex.length = 0;

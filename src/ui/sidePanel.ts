@@ -34,6 +34,14 @@ export interface ToolCallView {
   settle(report: string, ok: boolean, retrying?: boolean): void;
 }
 
+/** An assistant message being written as it streams in. */
+export interface StreamView {
+  push(chunk: string): void;
+  /** Finish, optionally replacing everything streamed with the final text. */
+  settle(final?: string): void;
+  text(): string;
+}
+
 /** Copy-to-clipboard affordance shared by messages and the escalation card. */
 function copyButton(read: () => string): HTMLButtonElement {
   return iconButton("copy", "Copy", () => {
@@ -59,6 +67,12 @@ export interface AssistantCallbacks extends EscalationActions {
   onStop(): void;
   /** The provider, model or mode changed: whoever shows them should re-read. */
   onSettingsChange(): void;
+  /** Send the last question again. */
+  onRetry?(): void;
+  /** Open the saved-conversation list, anchored to the button that asked. */
+  onHistory?(anchor: HTMLElement): void;
+  /** The selection chip was switched on or off. */
+  onAttachmentChange?(): void;
 }
 
 export class AssistantPanel {
@@ -89,6 +103,13 @@ export class AssistantPanel {
   private setupDismissed = false;
   /** A turn is in flight, so the send button is a stop button instead. */
   private busy = false;
+  private readonly usage = h("span", { class: "tier usage" });
+  private readonly historyBtn = h("button", { class: "icon-btn sm", type: "button", title: "Chat history", "aria-label": "Chat history" }, [icon("clock")]);
+  private readonly attach = h("div", { class: "attach-row hidden" });
+  /** The user switched the selection off for this turn. */
+  private attachOff = false;
+  private lastSent = "";
+  private suggested: string[] = [];
 
   constructor(
     host: HTMLElement,
@@ -110,6 +131,8 @@ export class AssistantPanel {
         submit();
       }
     });
+
+    this.historyBtn.addEventListener("click", () => callbacks.onHistory?.(this.historyBtn));
 
     this.settings = new AssistantSettings({
       onChange: () => callbacks.onSettingsChange(),
@@ -142,7 +165,10 @@ export class AssistantPanel {
         h("div", { class: "ai-bar" }, [
           modes,
           h("span", { class: "grow" }),
+          this.usage,
           this.tools,
+          iconButton("undo", "Ask that again", () => callbacks.onRetry?.(), "icon-btn sm"),
+          this.historyBtn,
           iconButton("plus", "New chat", () => callbacks.onNewChat(), "icon-btn sm"),
           iconButton("sliders", "Assistant settings", () => this.settings.open(), "icon-btn sm"),
         ]),
@@ -151,6 +177,7 @@ export class AssistantPanel {
         this.messages,
         this.typing,
         h("div", { class: "row between" }, [this.status, this.engine]),
+        this.attach,
         h("div", { class: "chat-row" }, [this.input, this.send]),
       ]),
     );
@@ -163,15 +190,7 @@ export class AssistantPanel {
     this.mode = mode;
     for (const [id, button] of this.modeButtons) button.setAttribute("aria-pressed", String(id === mode));
     this.input.placeholder = mode === "edit" ? "Ask, or describe a property change" : "Ask about the model";
-    this.chips.replaceChildren(
-      ...SUGGESTIONS[mode].map((text) => {
-        const chip = h("button", { class: "chip", type: "button", text });
-        chip.addEventListener("click", () => {
-          if (!this.busy) this.callbacks.onSend(text);
-        });
-        return chip;
-      }),
-    );
+    this.paintChips();
     saveSettings({ ...loadSettings(), mode });
     this.callbacks.onSettingsChange();
     // Mid-conversation the switch changes what the model is allowed to do, so
@@ -179,6 +198,28 @@ export class AssistantPanel {
     if (announce && changed && this.messages.childElementCount > 0) {
       this.addMessage("system", MODE_NOTE[mode]);
     }
+  }
+
+  /**
+   * Openers written from the model that is actually loaded. Falls back to the
+   * generic set, so an empty viewer still offers somewhere to start.
+   */
+  setSuggestions(list: string[]): void {
+    this.suggested = list.filter((text) => text.trim().length > 0).slice(0, 4);
+    this.paintChips();
+  }
+
+  private paintChips(): void {
+    const mode = this.mode;
+    this.chips.replaceChildren(
+      ...(this.suggested.length ? this.suggested : SUGGESTIONS[mode]).map((text) => {
+        const chip = h("button", { class: "chip", type: "button", text });
+        chip.addEventListener("click", () => {
+          if (!this.busy) this.callbacks.onSend(text);
+        });
+        return chip;
+      }),
+    );
   }
 
   /** Which mode the next turn runs under. */
@@ -261,7 +302,100 @@ export class AssistantPanel {
     if (follow) this.messages.scrollTop = this.messages.scrollHeight;
   }
 
+  /**
+   * An assistant message that grows as the reply arrives. Markdown is re-parsed
+   * on each flush rather than appended to, because a fenced block only becomes
+   * a code block once its closing fence lands. Flushes are rAF-batched so a
+   * fast stream cannot spend the frame budget re-rendering.
+   */
+  startStream(): StreamView {
+    const md = h("div", { class: "md" });
+    const node = h("div", { class: "msg assistant streaming" }, [md]);
+    // Sampled before each paint: a user who scrolled up to read is not dragged
+    // back down by the stream still arriving.
+    const follow = (): boolean => this.atBottom();
+    this.push(node);
+    let text = "";
+    let frame = 0;
+    const paint = (): void => {
+      frame = 0;
+      md.replaceChildren(markdown(text));
+      if (follow()) this.messages.scrollTop = this.messages.scrollHeight;
+    };
+    return {
+      push: (chunk: string) => {
+        text += chunk;
+        if (!frame) frame = requestAnimationFrame(paint);
+      },
+      settle: (final?: string) => {
+        if (frame) cancelAnimationFrame(frame);
+        frame = 0;
+        if (final !== undefined) text = final;
+        node.classList.remove("streaming");
+        if (!text.trim()) return void node.remove();
+        md.replaceChildren(markdown(text));
+        node.appendChild(copyButton(() => text));
+        if (follow()) this.messages.scrollTop = this.messages.scrollHeight;
+      },
+      text: () => text,
+    };
+  }
+
+  /** Tokens the provider reported, this turn and for the session. */
+  setUsage(turn: { input: number; output: number } | null, session: { input: number; output: number }): void {
+    if (session.input === 0 && session.output === 0) {
+      this.usage.replaceChildren();
+      this.usage.title = "";
+      return;
+    }
+    const total = session.input + session.output;
+    this.usage.replaceChildren(
+      icon("chip", 12),
+      h("span", { text: total >= 10000 ? `${(total / 1000).toFixed(1)}k tok` : `${total} tok` }),
+    );
+    this.usage.title = turn
+      ? `This turn: ${turn.input.toLocaleString()} in, ${turn.output.toLocaleString()} out\nSession: ${session.input.toLocaleString()} in, ${session.output.toLocaleString()} out`
+      : `Session: ${session.input.toLocaleString()} in, ${session.output.toLocaleString()} out`;
+  }
+
+  /** What the next turn will carry as context, or nothing when nothing is selected. */
+  setAttachment(count: number, label: string): void {
+    this.attach.replaceChildren();
+    this.attach.classList.toggle("hidden", count === 0);
+    if (count === 0) return;
+    const clear = iconButton("x", "Do not send the selection", () => {
+      this.attachOff = true;
+      this.callbacks.onAttachmentChange?.();
+    }, "icon-btn sm ghost");
+    const chip = h("button", { class: "chip attach-chip", type: "button", title: label }, [
+      icon("focus", 12),
+      h("span", { text: `${count} selected as context` }),
+    ]);
+    chip.addEventListener("click", () => {
+      this.attachOff = !this.attachOff;
+      this.callbacks.onAttachmentChange?.();
+    });
+    chip.setAttribute("aria-pressed", String(!this.attachOff));
+    this.attach.append(chip, clear);
+  }
+
+  /** False once the user switches the selection chip off for this turn. */
+  attachmentEnabled(): boolean {
+    return !this.attachOff;
+  }
+
+  /** A new turn starts with the selection attached again. */
+  resetAttachment(): void {
+    this.attachOff = false;
+  }
+
+  /** The last thing the user asked, so it can be sent again. */
+  lastPrompt(): string {
+    return this.lastSent;
+  }
+
   addMessage(role: "user" | "assistant" | "system", text: string): void {
+    if (role === "user") this.lastSent = text;
     if (role === "system") {
       const error = /^(error|failed)/i.test(text);
       this.push(

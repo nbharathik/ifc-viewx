@@ -272,6 +272,30 @@ const CSS = `
 .ifc-copy:hover { color: var(--ifc-fg, #f4f6f9); background: var(--ifc-hover, rgba(255, 255, 255, 0.05)); }
 .ifc-copy--ok { opacity: 1; color: #4ade80; }
 
+/* Pin: by property name, so the same field stays on top as the selection moves. */
+.ifc-key { display: flex; align-items: center; gap: 4px; }
+.ifc-pin {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: var(--ifc-radius, 4px);
+  background: none;
+  color: var(--ifc-fg-3, #a5adbc);
+  cursor: pointer;
+  opacity: 0;
+  flex: 0 0 auto;
+}
+.ifc-pin svg { width: 11px; height: 11px; }
+.ifc-row:hover .ifc-pin, .ifc-pin:focus-visible { opacity: 0.75; }
+.ifc-pin:hover { color: var(--ifc-fg, #f4f6f9); background: var(--ifc-hover, rgba(255, 255, 255, 0.05)); opacity: 1; }
+.ifc-pin--on { opacity: 1; color: var(--ifc-accent, #6ea8fe); }
+.ifc-row:hover .ifc-pin--on, .ifc-pin--on:focus-visible { opacity: 1; }
+[data-pinned] .ifc-section__title { color: var(--ifc-accent, #6ea8fe); }
+
 /* Measure + section handles. Scoped to the render surface: the axis gizmo is
    a sibling canvas in the same container and must keep its own cursor. */
 .ifc-measuring > canvas:first-of-type { cursor: crosshair; }
