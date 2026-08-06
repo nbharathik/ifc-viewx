@@ -17,6 +17,14 @@ export default defineConfig({
   ],
   worker: {
     format: "es",
+    rollupOptions: {
+      output: {
+        // web-ifc's glue is 3.5 MB and three separate bundles pull it in: the
+        // viewer's parser worker, the semantic worker, and the inline
+        // fallback. As a shared chunk it is downloaded and parsed once.
+        manualChunks: (id) => (id.includes("node_modules/web-ifc") ? "web-ifc" : undefined),
+      },
+    },
   },
   build: {
     target: "es2022",
@@ -26,8 +34,12 @@ export default defineConfig({
     rollupOptions: {
       output: {
         // Three rarely changes; a separate chunk downloads in parallel and
-        // stays cached across app deploys.
-        manualChunks: (id) => (id.includes("node_modules/three") ? "three" : undefined),
+        // stays cached across app deploys. web-ifc is split for the same
+        // reason and so the inline fallback shares it with the workers.
+        manualChunks: (id) =>
+          id.includes("node_modules/three") ? "three"
+          : id.includes("node_modules/web-ifc") ? "web-ifc"
+          : undefined,
       },
     },
   },

@@ -23,6 +23,14 @@ const HIGHLIGHT_GLSL = 'vec3(1.0, 0.26225, 0.01033) * 0.55';
 const STATE_TEX_WIDTH = 1024;
 /** Vertex budget per merged chunk; bounds single-buffer size and draw grouping. */
 const CHUNK_VERTEX_LIMIT = 500_000;
+/**
+ * When a small geometry repeats, baking the copies into a chunk that is drawn
+ * anyway beats giving it an InstancedMesh of its own. Past these thresholds
+ * the vertex duplication stops being worth the draw call it saves; the vertex
+ * cap in particular is what keeps brep-heavy models from re-baking megabytes.
+ */
+const INSTANCE_MIN_VERTICES = 2_000;
+const INSTANCE_MIN_COPIES = 8;
 /** Far-from-origin threshold (m). Beyond this we recenter to avoid f32 jitter. */
 const ORIGIN_THRESHOLD = 1e4;
 const INITIAL_INSTANCE_CAPACITY = 16;
@@ -59,6 +67,12 @@ interface ElementRecord {
   min: [number, number, number];
   max: [number, number, number];
   hidden: boolean;
+}
+
+/** A geometry seen more than once but still cheap enough to keep baking. */
+interface BakedGeometry {
+  copies: number;
+  vertices: number;
 }
 
 interface InstancedEntry {
@@ -160,6 +174,9 @@ export class ModelBatcher {
   private ingestedMeshes = 0;
   private totalTriangles = 0;
 
+  /** Latches on once the model is big enough to be worth spatial buckets. */
+  private useGrid = false;
+
   private origin: Vec3 | null = null;
   private boundsMin: Vec3 | null = null;
   private boundsMax: Vec3 | null = null;
@@ -181,7 +198,8 @@ export class ModelBatcher {
   readonly pickMaterial: THREE.ShaderMaterial;
 
   // Duplicate detection: geometry occurrences and where the first one went.
-  private readonly geometrySeen = new Map<string, InstancedEntry | 'merged-once'>();
+  /** Per repeated geometry: how often it has been baked, until it instances. */
+  private readonly geometrySeen = new Map<string, InstancedEntry | BakedGeometry>();
 
   private highlighted = new Set<number>();
   private hiddenSet = new Set<number>();
@@ -352,11 +370,13 @@ export class ModelBatcher {
     }
 
     // Pass 2: route each mesh to merged chunks (bucketed spatially when the
-    // batch is large, so frustum culling can reject far chunks) or instances.
-    const useGrid = mergeVertexEstimate >= SPATIAL_SPLIT_VERTEX_THRESHOLD;
+    // model is large, so frustum culling can reject far chunks) or instances.
+    // The grid latches on: a load arrives in many batches, and switching the
+    // bucketing halfway would scatter one cell across two sets of chunks.
+    if (mergeVertexEstimate >= SPATIAL_SPLIT_VERTEX_THRESHOLD) this.useGrid = true;
     const accumulators = new Map<string, ChunkAccumulator>();
     const chunkFor = (transparent: boolean, mesh: IfcMesh): ChunkAccumulator => {
-      const bucket = useGrid ? this.bucketOf(mesh) : 0;
+      const bucket = this.useGrid ? this.bucketOf(mesh) : 0;
       const key = `${transparent ? 't' : 'o'}:${bucket}`;
       let acc = accumulators.get(key);
       if (!acc) {
@@ -374,19 +394,31 @@ export class ModelBatcher {
       const key = `${mesh.geometryID}:${isTransparent ? alpha.toFixed(3) : 'o'}`;
       const seen = this.geometrySeen.get(key);
 
-      if (seen === undefined) {
-        // First occurrence: bake into the merged chunk.
-        this.geometrySeen.set(key, 'merged-once');
+      const bake = (): void => {
         const acc = chunkFor(isTransparent, mesh);
         this.bake(mesh, record.index, acc);
         if (acc.vertexCount >= CHUNK_VERTEX_LIMIT) {
           chunks.push(...this.finalizeChunk(acc));
         }
-      } else if (seen === 'merged-once') {
-        // Second occurrence: this geometry repeats, switch to instancing.
-        const entry = this.createInstancedEntry(mesh, isTransparent ? alpha : null, key);
-        this.geometrySeen.set(key, entry);
-        this.addInstance(entry, mesh, record.index);
+      };
+
+      if (seen === undefined) {
+        // First occurrence: bake into the merged chunk.
+        this.geometrySeen.set(key, { copies: 1, vertices: mesh.geometry.positions.length / 3 });
+        bake();
+      } else if (!('geometryID' in seen)) {
+        // An InstancedMesh is its own object: three transforms and culls it,
+        // inserts and sorts it, then binds and draws it, every frame. For a
+        // bracket that appears three times, a few thousand baked vertices in a
+        // chunk that is already being drawn is much cheaper than that object.
+        if (seen.vertices <= INSTANCE_MIN_VERTICES && seen.copies < INSTANCE_MIN_COPIES) {
+          seen.copies += 1;
+          bake();
+        } else {
+          const entry = this.createInstancedEntry(mesh, isTransparent ? alpha : null, key);
+          this.geometrySeen.set(key, entry);
+          this.addInstance(entry, mesh, record.index);
+        }
       } else {
         this.addInstance(seen, mesh, record.index);
       }
@@ -614,9 +646,12 @@ export class ModelBatcher {
     const entry: InstancedEntry = {
       geometryID: mesh.geometryID,
       alphaKey: key,
-      position: new THREE.BufferAttribute(g.positions, 3),
-      normal: new THREE.BufferAttribute(g.normals, 3),
-      index: new THREE.BufferAttribute(g.indices, 1),
+      // Copied, not wrapped: the arrays handed in are views into the batch
+      // buffer the worker transferred, and one small entry holding a view
+      // pins that whole multi-megabyte buffer for the life of the model.
+      position: new THREE.BufferAttribute(new Float32Array(g.positions), 3),
+      normal: new THREE.BufferAttribute(new Float32Array(g.normals), 3),
+      index: new THREE.BufferAttribute(new Uint32Array(g.indices), 1),
       mesh: null,
       elementIndexAttr: null,
       capacity: 0,
@@ -655,11 +690,16 @@ export class ModelBatcher {
     geometry.setIndex(entry.index);
     const elementIndexAttr = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
     geometry.setAttribute('aElementIndex', elementIndexAttr);
-    geometry.computeBoundingSphere();
+    // No computeBoundingSphere here: culling uses the object sphere that
+    // addInstance maintains, and this one was two full passes over every
+    // vertex on each capacity doubling for a value nothing ever read.
 
     const next = new THREE.InstancedMesh(geometry, material, capacity);
     // Culled against the incremental bounding sphere kept by addInstance.
     next.frustumCulled = true;
+    // Every placement lives in instanceMatrix; the mesh itself never moves,
+    // so recomposing its identity matrix every frame is pure overhead.
+    next.matrixAutoUpdate = false;
     next.count = entry.used;
 
     const prev = entry.mesh;

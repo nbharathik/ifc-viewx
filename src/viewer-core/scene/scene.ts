@@ -75,6 +75,8 @@ const SNAP_CANDIDATE_LIMIT = 64;
  */
 const SNAP_KINDS = ['vertex', 'midpoint', 'edge'] as const;
 const SNAP_RADIUS = [14, 11, 9];
+/** Compared against squared screen distances, so the scan skips the sqrt. */
+const SNAP_RADIUS_SQ = SNAP_RADIUS.map((r) => r * r);
 
 export class SceneController {
   readonly scene: THREE.Scene;
@@ -110,6 +112,9 @@ export class SceneController {
     live: THREE.MeshBasicMaterial;
   } | null = null;
   private plan = false;
+  /** Drawing-buffer size last handed to the renderer; -1 forces the first set. */
+  private sizedWidth = -1;
+  private sizedHeight = -1;
   /** Kept because clearModel builds a fresh batcher, which defaults to on. */
   private doubleSided = true;
   private readonly planCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 1000);
@@ -655,11 +660,16 @@ export class SceneController {
     const nearest = [Infinity, Infinity, Infinity];
     const found = new Float64Array(9);
     const consider = (x: number, y: number, z: number, kind: number): void => {
-      const distance = Math.hypot(sx - canvasX, sy - canvasY);
+      // Squared: tens of thousands of these run per hover frame and only the
+      // ordering matters, so the square root is pure cost. `nearest` holds
+      // squared distances to match, which the Infinity test below is fine with.
+      const ex = sx - canvasX;
+      const ey = sy - canvasY;
+      const distance = ex * ex + ey * ey;
       // Stated the positive way on purpose: a candidate has to prove it is in
       // reach, so geometry that came in degenerate is dropped rather than
       // winning every comparison it takes part in.
-      if (!(distance < SNAP_RADIUS[kind]) || !(distance < nearest[kind])) return;
+      if (!(distance < SNAP_RADIUS_SQ[kind]) || !(distance < nearest[kind])) return;
       nearest[kind] = distance;
       found[kind * 3] = x;
       found[kind * 3 + 1] = y;
@@ -842,7 +852,16 @@ export class SceneController {
     const scale = this.resolutionScale * this.userScale;
     const w = Math.max(1, Math.floor(this.baseWidth * scale));
     const h = Math.max(1, Math.floor(this.baseHeight * scale));
-    this.renderer.setSize(w, h, false);
+    // setSize reassigns canvas.width/height, which reallocates the drawing
+    // buffer. Flooring means a resize can land on the same pixel count, and
+    // three does not check, so the guard is here.
+    if (w !== this.sizedWidth || h !== this.sizedHeight) {
+      this.sizedWidth = w;
+      this.sizedHeight = h;
+      this.renderer.setSize(w, h, false);
+    }
+    // Outside the guard: the aspect follows the CSS size, which can change
+    // without the floored buffer size changing.
     this.camera.aspect = this.baseWidth / this.baseHeight;
     this.camera.updateProjectionMatrix();
   }

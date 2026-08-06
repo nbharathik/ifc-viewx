@@ -315,6 +315,8 @@ class ViewerImpl implements Viewer {
   /** Per-model lookups: both are O(n) to build and hot in the tree panel. */
   private nodeIndex: Map<number, SpatialNode> | null = null;
   private readonly subtreeCache = new Map<number, number[]>();
+  /** Per-branch visibility, dropped whenever visibility moves. */
+  private readonly subtreeVisible = new Map<number, boolean>();
   private readonly propsCache = new Map<number, ItemProperties | null>();
 
   constructor(
@@ -515,6 +517,7 @@ class ViewerImpl implements Viewer {
     this.cachedTree = null;
     this.nodeIndex = null;
     this.subtreeCache.clear();
+    this.subtreeVisible.clear();
     this.propsCache.clear();
     this.stats = null;
     // The scene already dropped the clip planes; tell subscribers the section
@@ -642,6 +645,7 @@ class ViewerImpl implements Viewer {
     this.cachedTree = null;
     this.nodeIndex = null;
     this.subtreeCache.clear();
+    this.subtreeVisible.clear();
     this.propsCache.clear();
     this.stats = null;
     this.timeline = null;
@@ -786,6 +790,8 @@ class ViewerImpl implements Viewer {
 
   /** Render and tell subscribers (the tree repaints its eye toggles). */
   private commitVisibility(): void {
+    // Cleared before the listeners run, since they immediately re-read it.
+    this.subtreeVisible.clear();
     this.scene.render();
     for (const listener of this.visibilityListeners) listener();
   }
@@ -929,10 +935,24 @@ class ViewerImpl implements Viewer {
     this.setHidden(this.subtreeElementIds(expressID), !visible);
   }
 
+  /**
+   * The tree asks this once per painted row, and the rows nest, so a storey is
+   * walked again for every element under it. The answer only changes when
+   * visibility does, so it is memoized per generation; leaves are not stored,
+   * which keeps the map at a few hundred interior nodes rather than every id.
+   */
   isSubtreeVisible(expressID: number): boolean {
-    const ids = this.subtreeElementIds(expressID);
-    if (ids.length === 0) return true;
-    return ids.every((id) => this.scene.isElementVisible(id));
+    const hit = this.subtreeVisible.get(expressID);
+    if (hit !== undefined) return hit;
+    const node = this.findNode(expressID);
+    if (!node) {
+      const ids = this.subtreeElementIds(expressID);
+      return ids.length === 0 || ids.every((id) => this.scene.isElementVisible(id));
+    }
+    const own = !this.scene.hasElement(expressID) || this.scene.isElementVisible(expressID);
+    const visible = own && node.children.every((child) => this.isSubtreeVisible(child.expressID));
+    if (node.children.length > 0) this.subtreeVisible.set(expressID, visible);
+    return visible;
   }
 
   toggleSubtreeVisible(expressID: number): void {
@@ -988,6 +1008,7 @@ class ViewerImpl implements Viewer {
       if (token !== this.loadToken) return;
       // Subtree lists computed before these arrived are short by exactly them.
       this.subtreeCache.clear();
+    this.subtreeVisible.clear();
     }
     this.applyVisibility();
   }

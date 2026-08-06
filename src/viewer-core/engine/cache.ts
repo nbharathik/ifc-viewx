@@ -492,13 +492,27 @@ export function isFormatBytes(bytes: Uint8Array): boolean {
   );
 }
 
-async function digest(bytes: Uint8Array): Promise<string | null> {
-  try {
-    const hash = await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>);
-    return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join('');
-  } catch {
-    return null;
-  }
+/**
+ * One hash per set of bytes. Opening a file hashes it twice today, once for
+ * the container key and once to store the source, and on a 66 MB model that
+ * is a second full pass for an answer we already have. Keyed on the buffer
+ * plus the exact window, so two views over one buffer cannot collide.
+ */
+const digests = new WeakMap<ArrayBufferLike, { off: number; len: number; sha: Promise<string | null> }>();
+
+function hash(bytes: Uint8Array): Promise<string | null> {
+  return crypto.subtle
+    .digest('SHA-256', bytes as Uint8Array<ArrayBuffer>)
+    .then((out) => [...new Uint8Array(out)].map((b) => b.toString(16).padStart(2, '0')).join(''))
+    .catch(() => null);
+}
+
+function digest(bytes: Uint8Array): Promise<string | null> {
+  const hit = digests.get(bytes.buffer);
+  if (hit && hit.off === bytes.byteOffset && hit.len === bytes.byteLength) return hit.sha;
+  const sha = hash(bytes);
+  digests.set(bytes.buffer, { off: bytes.byteOffset, len: bytes.byteLength, sha });
+  return sha;
 }
 
 /**

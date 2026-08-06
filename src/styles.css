@@ -557,6 +557,7 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
 .icon-btn:disabled { opacity: 0.42; cursor: default; }
 .icon-btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-hi); }
 .icon-btn svg { width: 15px; height: 15px; display: block; }
+a.icon-btn { text-decoration: none; }
 .icon-btn.sm { width: calc(22px * var(--ui, 1)); height: calc(22px * var(--ui, 1)); }
 .icon-btn.sm svg { width: 13px; height: 13px; }
 
@@ -1245,7 +1246,9 @@ dialog::backdrop { background: var(--scrim); }
 }
 /* Any parent may carry one, which is what keeps every explanation in the app
    the same object: a mark, a chip or a whole cell reveals it the same way. */
-:hover > .tip, :focus-within > .tip { opacity: 1; }
+   An anchored bubble hangs off <body> or the dialog, which is hovered the whole
+   time the pointer is in the window, so it is excluded and shown by class. */
+:hover > .tip:not(.anchored), :focus-within > .tip:not(.anchored) { opacity: 1; }
 /* Placed by kit.ts against its anchor, so it never lands on the row it explains. */
 .tip.anchored { margin: 0; }
 .tip.anchored.on { opacity: 1; }

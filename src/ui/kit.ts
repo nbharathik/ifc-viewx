@@ -83,6 +83,9 @@ const PATHS: Record<string, string> = {
   blocks: '<rect x="3" y="3" width="7.5" height="7.5" rx="1.6"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.6"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.6"/><path d="M17.25 14v6.5M14 17.25h6.5"/>',
   calculator: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7.5h8M8 12h.01M12 12h.01M16 12h.01M8 16.5h.01M12 16.5h.01M16 16.5h.01"/>',
   compare: '<path d="M9.5 4H5.5A1.5 1.5 0 0 0 4 5.5v13A1.5 1.5 0 0 0 5.5 20h4M14.5 4h4A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-4"/><path d="M12 2.5v19" stroke-dasharray="3 2.5"/>',
+  // The one mark that cannot be redrawn as strokes, so it fills instead and is
+  // scaled from its own 16-grid onto the 24 one the rest of the set uses.
+  github: '<path fill="currentColor" stroke="none" transform="translate(1 1) scale(1.375)" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>',
 };
 
 export function icon(name: string, size = 15): SVGSVGElement {
@@ -125,6 +128,7 @@ export function infoIcon(text: string, name = "info", note = ""): HTMLElement {
  * bubble joins it there whenever the anchor lives inside one.
  */
 let bubble: HTMLElement | null = null;
+let tipAnchor: HTMLElement | null = null;
 
 export function attachTip(anchor: HTMLElement, text: string, note = ""): void {
   const show = (): void => showTip(anchor, text, note);
@@ -134,7 +138,21 @@ export function attachTip(anchor: HTMLElement, text: string, note = ""): void {
   anchor.addEventListener("blur", hideTip);
 }
 
+// The pointer can leave a mark without the mark hearing about it: a rebuilt
+// panel takes the hovered node away before pointerleave arrives. The bubble
+// follows where the pointer actually is instead.
+document.addEventListener(
+  "pointermove",
+  (e) => {
+    if (!tipAnchor) return;
+    const target = e.target as Node | null;
+    if (!tipAnchor.isConnected || !target || !tipAnchor.contains(target)) hideTip();
+  },
+  true,
+);
+
 function showTip(anchor: HTMLElement, text: string, note: string): void {
+  tipAnchor = anchor;
   const node = (bubble ??= h("span", { class: "tip anchored", role: "tooltip" }));
   node.replaceChildren(h("span", { text }), ...(note ? [h("span", { class: "no", text: note })] : []));
   (anchor.closest("dialog") ?? document.body).appendChild(node);
@@ -152,6 +170,7 @@ function showTip(anchor: HTMLElement, text: string, note: string): void {
 }
 
 function hideTip(): void {
+  tipAnchor = null;
   bubble?.classList.remove("on");
 }
 
@@ -174,6 +193,11 @@ export function iconButton(
   const btn = h("button", { class: cls, title, "aria-label": title, type: "button" }, [icon(name)]);
   btn.addEventListener("click", onClick);
   return btn;
+}
+
+/** The same chrome as iconButton, for something that leaves the page. */
+export function iconLink(name: string, title: string, href: string, cls = "icon-btn"): HTMLAnchorElement {
+  return h("a", { class: cls, title, "aria-label": title, href, target: "_blank", rel: "noopener noreferrer" }, [icon(name)]);
 }
 
 // -- transient layers -------------------------------------------------------

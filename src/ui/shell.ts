@@ -1,7 +1,7 @@
 // App chrome around the ribbon: the top bar, the status bar, panel switching
 // and the activity log. Pure presentation. Everything it can do is passed in
 // as actions, so this module never reaches into the viewer or the service.
-import { h, icon, iconButton, makeResizer, toast } from "./kit.js";
+import { h, icon, iconButton, iconLink, makeResizer, toast } from "./kit.js";
 
 export interface ShellActions {
   toggleTheme(): void;
@@ -90,6 +90,7 @@ export class Shell {
       this.themeButton,
       iconButton("settings", "Settings  Ctrl+,", actions.openSettings),
       iconButton("help", "Keyboard shortcuts  ?", actions.openHelp),
+      iconLink("github", "Source on GitHub", "https://github.com/nbharathik/ifc-viewx"),
     );
     $("outliner-actions").appendChild(
       iconButton("panel-left-close", "Collapse  Ctrl+B", () => this.togglePanel("outliner"), "icon-btn sm"),

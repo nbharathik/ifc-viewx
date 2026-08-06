@@ -209,13 +209,14 @@ export class AssistantSettings {
         h("span", { text: TIER_TITLE.python }),
         infoIcon(TIER_NOTE.python),
       ]),
+      h("div", { class: "note", text: "Runs in a sandbox: a WebAssembly runtime with no network and no disk access, on a copy of the model." }),
       this.grid(
         TOOLS.filter((tool) => tool.tier === "python").map((tool) => ({
           icon: tool.icon,
           name: tool.name,
           off: true,
           plain: tool.plain,
-          note: "Written for you, never run",
+          note: "Written for you, run in the sandbox only if you say so",
         })),
       ),
       h("div", { class: "tool-title" }, [

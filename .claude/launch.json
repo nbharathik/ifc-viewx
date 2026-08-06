@@ -9,6 +9,15 @@
         "dev"
       ],
       "port": 5173
+    },
+    {
+      "name": "preview",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "preview"
+      ],
+      "port": 4173
     }
   ]
 }

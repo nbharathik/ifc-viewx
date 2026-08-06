@@ -60,6 +60,17 @@ export interface WebIfcAdapterOptions {
 /** Cap web-ifc's internal allocation well below the wasm32 4 GB ceiling. */
 const MEMORY_LIMIT_BYTES = 3 * 1024 * 1024 * 1024;
 
+/** IFC type code to name. The table is schema-global, so one map serves all. */
+const TYPE_NAMES = new Map<number, string>();
+
+/** Stand-in for a source buffer that has been handed over and released. */
+const EMPTY_BYTES = new Uint8Array(0);
+
+/** Handed back by web-ifc's embind bindings; freed rather than left to leak. */
+interface Deletable {
+  delete(): void;
+}
+
 /**
  * Circle tessellation by file size. web-ifc's default is 12 segments per
  * circle; large files trade curve smoothness for fewer generated triangles
@@ -129,15 +140,6 @@ function valueUnit(v: WebIfcValue): string | null {
   return null;
 }
 
-function multiplyPoint(m: number[], x: number, y: number, z: number): Vec3 {
-  // m is column-major 4x4 (web-ifc flatTransformation / Three.js order).
-  return {
-    x: m[0] * x + m[4] * y + m[8] * z + m[12],
-    y: m[1] * x + m[5] * y + m[9] * z + m[13],
-    z: m[2] * x + m[6] * y + m[10] * z + m[14],
-  };
-}
-
 export class WebIfcAdapter implements IfcEngine {
   private readonly api: IfcAPI;
   private initialized = false;
@@ -189,19 +191,29 @@ export class WebIfcAdapter implements IfcEngine {
       throw new Error('Not an IFC file: missing the "ISO-10303-21" STEP header.');
     }
 
+    // Captured before the reference is dropped below: the stats and both
+    // error paths still have to report the size of the file that was opened.
+    const fileBytes = buffer.byteLength;
     const parseStart = now();
     let modelID: number;
     try {
       modelID = this.api.OpenModel(buffer, {
         MEMORY_LIMIT: MEMORY_LIMIT_BYTES,
-        CIRCLE_SEGMENTS: circleSegmentsFor(buffer.byteLength),
+        CIRCLE_SEGMENTS: circleSegmentsFor(fileBytes),
       });
     } catch (err) {
-      throw mapWasmError(err, buffer.byteLength);
+      throw mapWasmError(err, fileBytes);
     }
+    // web-ifc copied the file into its own heap, so holding the JS copy for
+    // the whole geometry phase is a second full-size buffer for nothing.
+    buffer = EMPTY_BYTES;
     const parseMs = now() - parseStart;
 
-    const totalEntities = this.api.GetAllLines(modelID).size();
+    // The vector is a wasm allocation; only its size is wanted, so it goes
+    // straight back rather than sitting in a heap capped at 32 bits.
+    const allLines = this.api.GetAllLines(modelID);
+    const totalEntities = allLines.size();
+    (allLines as unknown as Deletable).delete?.();
     if (totalEntities === 0) {
       this.dispose(modelID);
       throw new Error('No IFC entities found: the file is empty or not a valid IFC model.');
@@ -258,7 +270,7 @@ export class WebIfcAdapter implements IfcEngine {
       });
     } catch (err) {
       this.dispose(modelID);
-      throw mapWasmError(err, buffer.byteLength);
+      throw mapWasmError(err, fileBytes);
     }
     const geometryMs = now() - geomStart;
 
@@ -273,7 +285,7 @@ export class WebIfcAdapter implements IfcEngine {
       triangleCount,
       parseMs,
       geometryMs,
-      fileBytes: buffer.byteLength,
+      fileBytes,
     };
 
     emit(onProgress, {
@@ -336,6 +348,20 @@ export class WebIfcAdapter implements IfcEngine {
   }
 
   /**
+   * A window onto web-ifc's own memory, or the copying public call when the
+   * heap is not reachable (a different build, a future version). The returned
+   * array is only valid until the next call into wasm.
+   */
+  private heapView(heap: 'HEAPF32' | 'HEAPU32', pointer: number, size: number): Float32Array | Uint32Array {
+    const module = (this.api as unknown as { wasmModule?: Record<string, Float32Array | Uint32Array> }).wasmModule;
+    const buffer = module?.[heap];
+    if (buffer) return buffer.subarray(pointer / 4, pointer / 4 + size);
+    return heap === 'HEAPF32'
+      ? (this.api.GetVertexArray(pointer, size) as Float32Array)
+      : (this.api.GetIndexArray(pointer, size) as Uint32Array);
+  }
+
+  /**
    * Triangle data for a geometry expressID, converted once per model. Repeated
    * placements (typed products, fasteners) share the same arrays, which cuts
    * both memory and per-instance conversion cost on large models.
@@ -346,11 +372,17 @@ export class WebIfcAdapter implements IfcEngine {
     if (hit) return hit;
 
     const geometry = this.api.GetGeometry(modelID, geometryID);
-    const verts = this.api.GetVertexArray(
+    // Views into the wasm heap, not copies: web-ifc's GetVertexArray slices,
+    // and the interleaved buffer is then split anyway, so the public call is
+    // one full copy of every vertex for nothing. Both views are read below
+    // before anything calls back into wasm, which is what could move the heap.
+    const verts = this.heapView(
+      'HEAPF32',
       geometry.GetVertexData(),
       geometry.GetVertexDataSize(),
     ) as Float32Array;
-    const indices = this.api.GetIndexArray(
+    const rawIndices = this.heapView(
+      'HEAPU32',
       geometry.GetIndexData(),
       geometry.GetIndexDataSize(),
     ) as Uint32Array;
@@ -377,10 +409,12 @@ export class WebIfcAdapter implements IfcEngine {
       if (py > maxY) maxY = py;
       if (pz > maxZ) maxZ = pz;
     }
+    // One copy out of the heap view, taken before delete() frees it.
+    const indices = new Uint32Array(rawIndices);
     geometry.delete();
 
     const entry: CachedGeometry = {
-      geometry: { positions, normals, indices: new Uint32Array(indices) },
+      geometry: { positions, normals, indices },
       localBounds: {
         min: { x: minX, y: minY, z: minZ },
         max: { x: maxX, y: maxY, z: maxZ },
@@ -471,7 +505,15 @@ export class WebIfcAdapter implements IfcEngine {
   // -- internals ----------------------------------------------------------
   private typeName(modelID: number, expressID: number): string {
     const code = this.api.GetLineType(modelID, expressID);
-    return this.api.GetNameFromTypeCode(code);
+    // Called once per element with geometry, and each miss marshals a fresh
+    // std::string out of wasm. The table is schema-global, so it is safe to
+    // share across models and it interns the strings while it is at it.
+    let name = TYPE_NAMES.get(code);
+    if (name === undefined) {
+      name = this.api.GetNameFromTypeCode(code);
+      TYPE_NAMES.set(code, name);
+    }
+    return name;
   }
 
   private relationMap(
@@ -632,25 +674,30 @@ function expandBoundsByAabb(
   minX: number, minY: number, minZ: number,
   maxX: number, maxY: number, maxZ: number,
 ): [Vec3, Vec3] {
-  const corners: Array<[number, number, number]> = [
-    [minX, minY, minZ], [maxX, minY, minZ], [minX, maxY, minZ], [maxX, maxY, minZ],
-    [minX, minY, maxZ], [maxX, minY, maxZ], [minX, maxY, maxZ], [maxX, maxY, maxZ],
-  ];
-  let lo = min ? { ...min } : null;
-  let hi = max ? { ...max } : null;
-  for (const [x, y, z] of corners) {
-    const w = multiplyPoint(m, x, y, z);
+  // Runs once per placement, so it allocates nothing: the corner list, the
+  // clones and the point returned per corner were about nineteen short-lived
+  // objects each time, tens of millions over a large model. The accumulators
+  // are grown in place, which is what the clones were undoing anyway.
+  let lo = min;
+  let hi = max;
+  for (let c = 0; c < 8; c++) {
+    const x = c & 1 ? maxX : minX;
+    const y = c & 2 ? maxY : minY;
+    const z = c & 4 ? maxZ : minZ;
+    const wx = m[0] * x + m[4] * y + m[8] * z + m[12];
+    const wy = m[1] * x + m[5] * y + m[9] * z + m[13];
+    const wz = m[2] * x + m[6] * y + m[10] * z + m[14];
     if (!lo || !hi) {
-      lo = { x: w.x, y: w.y, z: w.z };
-      hi = { x: w.x, y: w.y, z: w.z };
+      lo = { x: wx, y: wy, z: wz };
+      hi = { x: wx, y: wy, z: wz };
       continue;
     }
-    if (w.x < lo.x) lo.x = w.x;
-    if (w.y < lo.y) lo.y = w.y;
-    if (w.z < lo.z) lo.z = w.z;
-    if (w.x > hi.x) hi.x = w.x;
-    if (w.y > hi.y) hi.y = w.y;
-    if (w.z > hi.z) hi.z = w.z;
+    if (wx < lo.x) lo.x = wx;
+    if (wy < lo.y) lo.y = wy;
+    if (wz < lo.z) lo.z = wz;
+    if (wx > hi.x) hi.x = wx;
+    if (wy > hi.y) hi.y = wy;
+    if (wz > hi.z) hi.z = wz;
   }
   return [lo!, hi!];
 }

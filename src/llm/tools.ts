@@ -90,7 +90,7 @@ export const TIER_TITLE: Record<ToolTier, string> = {
 export const TIER_NOTE: Record<ToolTier, string> = {
   viewer: "Instant, and the model is never changed.",
   edit: "Staged for your approval before anything changes.",
-  python: "Never run for the assistant. It writes the code, you read it, and the Python Console runs it if you say so.",
+  python: "Never run for the assistant. It writes the code, you read it, and the Python Console runs it if you say so. It runs in a sandbox: a WebAssembly runtime with no network and no access to your disk, on a copy of the model, so nothing changes until you apply it.",
 };
 
 /** Column width for the prompt table. Long rows keep their own two spaces. */
