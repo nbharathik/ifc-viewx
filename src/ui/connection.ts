@@ -14,9 +14,7 @@
 import { closeLayer, h, icon, iconButton, lightDismiss, openLayer, toast } from "./kit.js";
 import type { ServiceClient, ServiceMode } from "../bridge/serviceClient.js";
 
-/** Until the package is on PyPI, the install is the release wheel by URL. */
-export const INSTALL_CMD =
-  "pip install https://github.com/nbharathik/ifc-viewx/releases/latest/download/ifcviewx-0.1.0-py3-none-any.whl\nifcviewx";
+export const INSTALL_CMD = "pip install ifcviewx\nifcviewx";
 
 interface Feature {
   id: string;

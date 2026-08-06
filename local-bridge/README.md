@@ -14,11 +14,10 @@ Everything stays on your machine.
 
 ## Install and run
 
-Until the package is on PyPI, install the wheel from the latest release by URL.
 IfcOpenShell comes with it, so there is nothing else to add (~100 MB):
 
 ```
-pip install https://github.com/nbharathik/ifc-viewx/releases/latest/download/ifcviewx-0.1.0-py3-none-any.whl
+pip install ifcviewx
 ifcviewx                            # serves the viewer and opens the browser
 ```
 
