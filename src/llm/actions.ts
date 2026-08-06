@@ -1,30 +1,18 @@
 // Tier-1 assistant tools: small JSON actions executed against the viewer,
 // plus the model brief injected into the system prompt. Everything answers
 // from data the viewer already holds; no Python runtime is involved.
+import { elementsOf } from "../sdk/data.js";
 import type { SpatialNode, Viewer } from "../viewer-core/viewer.js";
+import type { ModelElement } from "../sdk/types.js";
 
-export interface IndexedElement {
-  id: number;
-  type: string;
-  name: string;
-  storey: string;
-}
-
-const SPATIAL_TYPES = new Set(["IfcProject", "IfcSite", "IfcBuilding", "IfcBuildingStorey"]);
+export type IndexedElement = ModelElement;
 
 let cached: { tree: SpatialNode; elements: IndexedElement[]; groups?: Map<string, number[]> } | null = null;
 
+/** The walk itself is in the SDK; this is the copy the app reuses per tree. */
 function indexElements(tree: SpatialNode): IndexedElement[] {
   if (cached?.tree === tree) return cached.elements;
-  const elements: IndexedElement[] = [];
-  const visit = (node: SpatialNode, storey: string): void => {
-    if (node.type === "IfcBuildingStorey") storey = node.name ?? "(unnamed storey)";
-    else if (!SPATIAL_TYPES.has(node.type)) {
-      elements.push({ id: node.expressID, type: node.type, name: node.name ?? "", storey });
-    }
-    for (const child of node.children) visit(child, storey);
-  };
-  visit(tree, "");
+  const elements = elementsOf(tree);
   cached = { tree, elements };
   return elements;
 }

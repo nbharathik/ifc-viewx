@@ -1,5 +1,8 @@
 name: Publish ifcviewx to PyPI
+
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
@@ -16,6 +19,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # A tag that disagrees with pyproject would publish the wrong number
+      # under the right name, and PyPI never lets a version be reused.
+      - name: Tag must match package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          v=$(grep -m1 '^version' local-bridge/pyproject.toml | cut -d'"' -f2)
+          [ "$v" = "${GITHUB_REF_NAME#v}" ] || { echo "tag $GITHUB_REF_NAME does not match version $v"; exit 1; }
       - run: pip install build && python -m build local-bridge
       - uses: actions/upload-artifact@v4
         with:
@@ -34,3 +44,24 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --title "IFCViewX $GITHUB_REF_NAME"
+          fi

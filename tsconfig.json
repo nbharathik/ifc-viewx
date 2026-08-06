@@ -13,7 +13,10 @@
     "resolveJsonModule": true,
     "useDefineForClassFields": true,
     "noEmit": true,
-    "types": ["vite/client"]
+    "types": ["vite/client"],
+    "paths": {
+      "@ifcviewx/sdk": ["./src/sdk/index.ts"]
+    }
   },
   "include": ["src"]
 }

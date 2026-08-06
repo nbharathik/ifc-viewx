@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import { viteStaticCopy } from "vite-plugin-static-copy";
 
@@ -7,6 +8,12 @@ const base = process.env.VITE_BASE ?? "/ifc-viewx/";
 
 export default defineConfig({
   base,
+  resolve: {
+    alias: {
+      // The one specifier a plugin imports. Kept in step with tsconfig paths.
+      "@ifcviewx/sdk": fileURLToPath(new URL("./src/sdk/index.ts", import.meta.url)),
+    },
+  },
   plugins: [
     viteStaticCopy({
       targets: [
@@ -40,6 +47,13 @@ export default defineConfig({
           id.includes("node_modules/three") ? "three"
           : id.includes("node_modules/web-ifc") ? "web-ifc"
           : undefined,
+        // Every plugin panel is its own lazy chunk, and they are all called
+        // panel.ts, so name them after the folder. What a plugin costs is then
+        // readable straight off the build output.
+        chunkFileNames: (chunk) => {
+          const plugin = /src[\\/]plugins[\\/]([^\\/]+)[\\/]panel\.ts$/.exec(chunk.facadeModuleId ?? "");
+          return plugin ? `assets/plugin-${plugin[1]}-[hash].js` : "assets/[name]-[hash].js";
+        },
       },
     },
   },
