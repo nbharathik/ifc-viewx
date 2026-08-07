@@ -6,6 +6,17 @@
 import * as THREE from 'three';
 
 import type { IfcMesh, MeshGeometry, ModelBounds, Vec3 } from '../engine/types.js';
+import { modelOf, packId } from '../ids.js';
+
+/** Free a subtree's GPU buffers. Shared materials are owned by the batcher. */
+function disposeTree(root: THREE.Object3D): void {
+  root.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    mesh.geometry?.dispose();
+    if ((mesh as THREE.InstancedMesh).isInstancedMesh) (mesh as THREE.InstancedMesh).dispose();
+  });
+  root.clear();
+}
 
 /** Deterministic, pleasant color from an integer key (golden-angle hue). */
 function colorForId(id: number): THREE.Color {
@@ -33,6 +44,9 @@ const PALETTE_SIZE = 256;
  * material to fade.
  */
 const GHOST_KEPT = 3;
+
+/** Flat fill for a cut face. Neutral, so it reads as material, not as colour. */
+const CAP_GLSL = 'vec3(0.42, 0.44, 0.47)';
 /** Vertex budget per merged chunk; bounds single-buffer size and draw grouping. */
 const CHUNK_VERTEX_LIMIT = 500_000;
 /**
@@ -89,6 +103,8 @@ interface BakedGeometry {
 
 interface InstancedEntry {
   geometryID: number;
+  /** Which federated model owns it, so it lands in that model's group. */
+  model: number;
   alphaKey: string;
   position: THREE.BufferAttribute;
   normal: THREE.BufferAttribute;
@@ -179,6 +195,16 @@ const _v = new THREE.Vector3();
 export class ModelBatcher {
   readonly group = new THREE.Group();
 
+  /**
+   * One child group per federated model, so hiding or moving a discipline is
+   * a flag and a matrix on a group rather than a rewrite of the state texture
+   * or a re-bake of its geometry. Chunks are never shared between models: the
+   * accumulators are flushed at the end of every ingest, which is per model.
+   */
+  private readonly modelGroups = new Map<number, THREE.Group>();
+  /** The model the current ingest belongs to; packed into every id it mints. */
+  private activeModel = 0;
+
   private readonly elements = new Map<number, ElementRecord>();
   private readonly elementsByIndex: number[] = [];
   /** Snappable edges per element, scene space, 6 floats per segment. */
@@ -223,6 +249,12 @@ export class ModelBatcher {
 
   private highlighted = new Set<number>();
   private hiddenSet = new Set<number>();
+  /** Whether any element is currently hidden or ghosted, so the shader needs
+   *  its discards compiled in at all. */
+  private hideActive = false;
+  /** The user's front/double setting, and whether a cut is overriding it. */
+  private userDoubleSided = true;
+  private capped = false;
   private categoryVisible: Record<string, boolean> = {
     IfcSpace: false,
     IfcOpeningElement: false,
@@ -251,18 +283,48 @@ export class ModelBatcher {
    * models with inverted normals may show holes, so it is a user setting.
    */
   setDoubleSided(double: boolean): void {
-    const side = double ? THREE.DoubleSide : THREE.FrontSide;
-    const materials: THREE.Material[] = [
-      this.mergedOpaque,
-      this.mergedTransparent,
-      this.instOpaque,
-      this.pickMaterial,
-      ...this.instTransparentByAlpha.values(),
-    ];
-    for (const material of materials) {
+    this.userDoubleSided = double;
+    this.applySide();
+  }
+
+  /**
+   * Cap the cut: fill the back faces a clipping plane exposes with one flat
+   * colour, so a sectioned solid reads as cut rather than as hollow. Both
+   * faces have to be drawn for there to be anything to fill, so this overrides
+   * the front-side setting for as long as a section is on, and hands it back
+   * afterwards.
+   */
+  setCapMode(on: boolean): void {
+    if (on === this.capped) return;
+    this.capped = on;
+    for (const material of this.batchMaterials()) {
+      if (on) material.defines = { ...material.defines, IFC_CAP: '' };
+      else if (material.defines) delete material.defines.IFC_CAP;
+      material.needsUpdate = true;
+    }
+    this.applySide();
+  }
+
+  private applySide(): void {
+    const side = this.userDoubleSided || this.capped ? THREE.DoubleSide : THREE.FrontSide;
+    for (const material of this.batchMaterials()) {
+      if (material.side === side) continue;
       material.side = side;
       material.needsUpdate = true;
     }
+    if (this.pickMaterial.side !== side) {
+      this.pickMaterial.side = side;
+      this.pickMaterial.needsUpdate = true;
+    }
+  }
+
+  private batchMaterials(): THREE.Material[] {
+    return [
+      this.mergedOpaque,
+      this.mergedTransparent,
+      this.instOpaque,
+      ...this.instTransparentByAlpha.values(),
+    ];
   }
 
   private makeStateTexture(data: Uint8Array, height: number): THREE.DataTexture {
@@ -294,23 +356,37 @@ export class ModelBatcher {
           'void main() {',
           'attribute float aElementIndex;\nvarying float vElementIndex;\nvoid main() {\n\tvElementIndex = aElementIndex;',
         );
+      // The discards are behind IFC_HIDE on purpose. A fragment shader that
+      // can discard loses early-Z on every draw, and a freshly loaded model
+      // hides nothing, so the define is absent until something actually is
+      // hidden or ghosted and the depth test does its job for free until then.
       shader.fragmentShader = shader.fragmentShader
         .replace(
           'void main() {',
           'uniform sampler2D uStateTex;\nuniform vec2 uStateSize;\nuniform sampler2D uPaletteTex;\nuniform float uOverrideOn;\nvarying float vElementIndex;\nvoid main() {\n' +
             '\tvec2 stUv = (vec2(mod(vElementIndex, uStateSize.x), floor(vElementIndex / uStateSize.x)) + 0.5) / uStateSize;\n' +
             '\tvec4 ifcState = texture2D(uStateTex, stUv);\n' +
+            '\t#ifdef IFC_HIDE\n' +
             '\tif (ifcState.r < 0.25) discard;\n' +
             '\tfloat ifcGhost = step(ifcState.r, 0.75);\n' +
             '\tif (ifcGhost > 0.5 && mod(floor(gl_FragCoord.x) * 3.0 + floor(gl_FragCoord.y) * 5.0, 16.0) >= ' +
-            `${GHOST_KEPT.toFixed(1)}) discard;`,
+            `${GHOST_KEPT.toFixed(1)}) discard;\n` +
+            '\t#else\n' +
+            '\tfloat ifcGhost = 0.0;\n' +
+            '\t#endif',
         )
+        // The cap: a clipped solid shows its inside, so the back faces left
+        // facing the camera are flooded with one flat colour and read as the
+        // cut surface. It costs a define and no extra pass.
         .replace(
           '#include <color_fragment>',
           '#include <color_fragment>\n' +
             '\tif (uOverrideOn > 0.5 && ifcState.b > 0.0) {\n' +
             '\t\tdiffuseColor.rgb = texture2D(uPaletteTex, vec2((ifcState.b * 255.0 + 0.5) / 256.0, 0.5)).rgb;\n' +
             '\t}\n' +
+            '\t#ifdef IFC_CAP\n' +
+            `\tif (!gl_FrontFacing) diffuseColor.rgb = ${CAP_GLSL};\n` +
+            '\t#endif\n' +
             '\tif (ifcGhost > 0.5) diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.62), 0.72);',
         )
         .replace(
@@ -392,8 +468,17 @@ export class ModelBatcher {
 
   // -- ingest --------------------------------------------------------------
 
-  ingest(meshes: IfcMesh[]): void {
+  /**
+   * Add a batch of meshes to a model. Every id this mints is packed with
+   * `modelIndex`, and model 0 packs to itself, so a single open model behaves
+   * exactly as it did before federation existed.
+   */
+  ingest(meshes: IfcMesh[], modelIndex = 0): void {
     if (meshes.length === 0) return;
+    this.activeModel = modelIndex;
+    // One origin for every model, decided by whichever arrives first. Per-model
+    // origins would centre each discipline on its own extent and land them
+    // kilometres apart.
     this.ensureOrigin(meshes);
 
     // Pass 1: element records and bounds. Bounds must be complete before
@@ -428,10 +513,12 @@ export class ModelBatcher {
     const chunks: THREE.Mesh[] = [];
 
     for (const mesh of meshes) {
-      const record = this.elements.get(mesh.expressID)!;
+      const record = this.elements.get(this.idOf(mesh))!;
       const alpha = mesh.color.a;
       const isTransparent = alpha < 0.999;
-      const key = `${mesh.geometryID}:${isTransparent ? alpha.toFixed(3) : 'o'}`;
+      // The model has to be in the geometry key too: two files each have a
+      // geometryID 5, and without it a wall would be instanced as a duct.
+      const key = `${modelIndex}:${mesh.geometryID}:${isTransparent ? alpha.toFixed(3) : 'o'}`;
       const seen = this.geometrySeen.get(key);
 
       const bake = (): void => {
@@ -467,12 +554,86 @@ export class ModelBatcher {
     for (const acc of accumulators.values()) {
       chunks.push(...this.finalizeChunk(acc));
     }
-    for (const chunk of chunks) this.group.add(chunk);
+    const host = this.groupFor(modelIndex);
+    for (const chunk of chunks) host.add(chunk);
+  }
+
+  /** This model's group, created on first sight. */
+  private groupFor(modelIndex: number): THREE.Group {
+    let group = this.modelGroups.get(modelIndex);
+    if (!group) {
+      group = new THREE.Group();
+      // Nothing moves a model group except setModelTransform, so three does
+      // not need to recompose its matrix on every frame.
+      group.matrixAutoUpdate = false;
+      this.modelGroups.set(modelIndex, group);
+      this.group.add(group);
+    }
+    return group;
+  }
+
+  /** The packed id of a mesh in the ingest currently running. */
+  private idOf(mesh: IfcMesh): number {
+    return packId(this.activeModel, mesh.expressID);
+  }
+
+  /** Draw a model or leave it out entirely; the cheapest possible hide. */
+  setModelVisible(modelIndex: number, visible: boolean): void {
+    const group = this.modelGroups.get(modelIndex);
+    if (group) group.visible = visible;
+  }
+
+  isModelVisible(modelIndex: number): boolean {
+    return this.modelGroups.get(modelIndex)?.visible ?? true;
+  }
+
+  /** Nudge one discipline, for files that disagree about the shared origin. */
+  setModelTransform(modelIndex: number, offset: [number, number, number]): void {
+    const group = this.groupFor(modelIndex);
+    group.position.set(offset[0], offset[1], offset[2]);
+    group.updateMatrix();
+  }
+
+  getModelTransform(modelIndex: number): [number, number, number] {
+    const group = this.modelGroups.get(modelIndex);
+    return group ? [group.position.x, group.position.y, group.position.z] : [0, 0, 0];
+  }
+
+  /**
+   * Drop one model's geometry and every id it minted. The state texture keeps
+   * its slots: they are dense ordinals baked into vertex attributes of the
+   * models that remain, so compacting them would mean re-baking everything.
+   * The freed slots are simply never read again.
+   */
+  removeModel(modelIndex: number): void {
+    const group = this.modelGroups.get(modelIndex);
+    if (group) {
+      disposeTree(group);
+      this.group.remove(group);
+      this.modelGroups.delete(modelIndex);
+    }
+    for (const id of [...this.elements.keys()]) {
+      if (modelOf(id) !== modelIndex) continue;
+      this.elements.delete(id);
+      this.segmentsByElement.delete(id);
+      this.hiddenSet.delete(id);
+      this.highlighted.delete(id);
+      this.overrideIndex.delete(id);
+    }
+    // The instanced meshes themselves went with the group; this drops the
+    // dedup records that would otherwise keep matching a model that is gone.
+    for (const key of [...this.geometrySeen.keys()]) {
+      if (key.startsWith(`${modelIndex}:`)) this.geometrySeen.delete(key);
+    }
+    for (let i = 0; i < this.elementsByIndex.length; i++) {
+      if (modelOf(this.elementsByIndex[i]) === modelIndex) this.elementsByIndex[i] = -1;
+    }
+    this.rewriteAllStates();
   }
 
   /** Coarse spatial cell (0..7) of a mesh's AABB center, in shifted space. */
   private bucketOf(mesh: IfcMesh): number {
-    const record = this.elements.get(mesh.expressID);
+    const record = this.elements.get(this.idOf(mesh));
     const min = this.boundsMin;
     const max = this.boundsMax;
     if (!record || !min || !max || record.min[0] === Infinity) return 0;
@@ -521,7 +682,8 @@ export class ModelBatcher {
   }
 
   private recordFor(mesh: IfcMesh): ElementRecord {
-    let record = this.elements.get(mesh.expressID);
+    const id = this.idOf(mesh);
+    let record = this.elements.get(id);
     if (!record) {
       const index = this.elementsByIndex.length;
       this.ensureStateCapacity(index + 1);
@@ -533,8 +695,8 @@ export class ModelBatcher {
         max: [-Infinity, -Infinity, -Infinity],
         hidden: false,
       };
-      this.elements.set(mesh.expressID, record);
-      this.elementsByIndex.push(mesh.expressID);
+      this.elements.set(id, record);
+      this.elementsByIndex.push(id);
       this.writeState(record);
     }
     return record;
@@ -634,7 +796,7 @@ export class ModelBatcher {
 
   private displayColor(mesh: IfcMesh): THREE.Color {
     return isDefaultWhite(mesh.color)
-      ? colorForId(mesh.expressID)
+      ? colorForId(this.idOf(mesh))
       : new THREE.Color(mesh.color.r, mesh.color.g, mesh.color.b);
   }
 
@@ -685,6 +847,7 @@ export class ModelBatcher {
     }
     const entry: InstancedEntry = {
       geometryID: mesh.geometryID,
+      model: this.activeModel,
       alphaKey: key,
       // Copied, not wrapped: the arrays handed in are views into the batch
       // buffer the worker transferred, and one small entry holding a view
@@ -752,7 +915,7 @@ export class ModelBatcher {
         next.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
         next.instanceColor.array.set(prev.instanceColor.array.subarray(0, entry.used * 3));
       }
-      this.group.remove(prev);
+      prev.removeFromParent();
       prev.geometry.dispose();
       prev.dispose();
     }
@@ -760,7 +923,9 @@ export class ModelBatcher {
     entry.mesh = next;
     entry.elementIndexAttr = elementIndexAttr;
     entry.capacity = capacity;
-    this.group.add(next);
+    // An instanced entry belongs to one model: its key is model-namespaced,
+    // so it goes in that model's group and moves and hides with it.
+    this.groupFor(entry.model).add(next);
   }
 
   private addInstance(entry: InstancedEntry, mesh: IfcMesh, elementIndex: number): void {
@@ -861,6 +1026,37 @@ export class ModelBatcher {
     return this.ghostHidden && !categoryOff ? STATE_GHOST : STATE_HIDDEN;
   }
 
+  /**
+   * Recompile the batch materials with or without their discards. Materials are
+   * shared singletons, so this is a handful of program rebuilds, and three
+   * folds `defines` into its own program cache key.
+   */
+  private syncHideDefine(): void {
+    // Read the state bytes rather than the hidden set: the lazy categories are
+    // switched off by default but contribute no elements until they are loaded,
+    // so a set-based test would claim a fresh model hides something.
+    let needed = false;
+    for (let i = 0; i < this.elementsByIndex.length; i++) {
+      if (this.stateData[i * 4] !== STATE_VISIBLE) {
+        needed = true;
+        break;
+      }
+    }
+    if (needed === this.hideActive) return;
+    this.hideActive = needed;
+    const materials: THREE.Material[] = [
+      this.mergedOpaque,
+      this.mergedTransparent,
+      this.instOpaque,
+      ...this.instTransparentByAlpha.values(),
+    ];
+    for (const material of materials) {
+      if (needed) material.defines = { ...material.defines, IFC_HIDE: "" };
+      else if (material.defines) delete material.defines.IFC_HIDE;
+      material.needsUpdate = true;
+    }
+  }
+
   private writeState(record: ElementRecord): void {
     const expressID = this.elementsByIndex[record.index];
     const base = record.index * 4;
@@ -920,6 +1116,7 @@ export class ModelBatcher {
       const record = this.elements.get(id);
       if (record) this.writeState(record);
     }
+    this.syncHideDefine();
   }
 
   isolate(expressIDs: Iterable<number>): void {
@@ -935,10 +1132,10 @@ export class ModelBatcher {
 
   setCategoryVisible(type: string, visible: boolean): void {
     this.categoryVisible[type] = visible;
-    for (const [id, record] of this.elements) {
+    for (const record of this.elements.values()) {
       if (record.ifcType === type) this.writeState(record);
-      void id;
     }
+    this.syncHideDefine();
   }
 
   getCategoryVisible(type: string): boolean {
@@ -947,6 +1144,68 @@ export class ModelBatcher {
 
   private rewriteAllStates(): void {
     for (const record of this.elements.values()) this.writeState(record);
+    this.syncHideDefine();
+  }
+
+  /**
+   * Hide instanced entries too small to see. Only instanced entries: merged
+   * chunks are never small on screen (they are spatial buckets of the whole
+   * model), so testing them culls nothing, and per-element suppression would
+   * save no draw call at all while breaking picking.
+   *
+   * Called from the render path, so it does no allocation and no upload. An
+   * entry hidden here costs three nothing: no matrix, no frustum test, no sort,
+   * no bind, no draw.
+   */
+  applyLod(camera: THREE.Camera, viewportHeight: number, thresholdPx: number): number {
+    let culled = 0;
+    const perspective = (camera as THREE.PerspectiveCamera).isPerspectiveCamera
+      ? (camera as THREE.PerspectiveCamera)
+      : null;
+    // Pixels per metre at one metre, for a perspective camera.
+    const scale = perspective
+      ? viewportHeight / (2 * Math.tan((perspective.fov * Math.PI) / 360))
+      : 0;
+    const ortho = (camera as THREE.OrthographicCamera).isOrthographicCamera
+      ? (camera as THREE.OrthographicCamera)
+      : null;
+    const orthoScale = ortho ? viewportHeight / Math.max(1e-6, (ortho.top - ortho.bottom) / ortho.zoom) : 0;
+
+    for (const entry of this.geometrySeen.values()) {
+      if (!('mesh' in entry)) continue;
+      const mesh = entry.mesh;
+      if (!mesh || entry.used === 0) continue;
+      const sphere = mesh.boundingSphere;
+      if (!sphere) continue;
+      // The entry's sphere spans every copy across the whole building, so it is
+      // model-sized and says nothing about how big one copy looks. What matters
+      // is a single instance, at the distance of the nearest one. The sphere is
+      // built as half + geometryRadius * maxScale (expandInstancedSphere), so
+      // the spread of the copies is recoverable and gives that near distance.
+      const instanceRadius = entry.geometryRadius * entry.maxScale;
+      const spread = Math.max(0, sphere.radius - instanceRadius);
+      let pixels: number;
+      if (perspective) {
+        const nearest = camera.position.distanceTo(sphere.center) - spread;
+        // Inside the cluster: never cull, the frustum test owns that case.
+        pixels = nearest <= instanceRadius ? Infinity : (instanceRadius * 2 * scale) / nearest;
+      } else if (ortho) {
+        pixels = instanceRadius * 2 * orthoScale;
+      } else {
+        pixels = Infinity;
+      }
+      const show = pixels >= thresholdPx;
+      if (mesh.visible !== show) mesh.visible = show;
+      if (!show) culled += 1;
+    }
+    return culled;
+  }
+
+  /** Put every instanced entry back on screen, for the pick and plan passes. */
+  clearLod(): void {
+    for (const entry of this.geometrySeen.values()) {
+      if ('mesh' in entry && entry.mesh && !entry.mesh.visible) entry.mesh.visible = true;
+    }
   }
 
   isElementVisible(expressID: number): boolean {
@@ -995,7 +1254,10 @@ export class ModelBatcher {
   }
 
   expressIDForIndex(index: number): number | null {
-    return this.elementsByIndex[index] ?? null;
+    // Slots freed by removeModel hold -1: the ordinal is still baked into
+    // vertex attributes elsewhere, so it is tombstoned rather than reused.
+    const id = this.elementsByIndex[index] ?? -1;
+    return id < 0 ? null : id;
   }
 
   get meshCount(): number {
@@ -1040,7 +1302,7 @@ export class ModelBatcher {
    * are freed the moment the merged chunk reaches the GPU.
    */
   private recordSegments(mesh: IfcMesh): void {
-    const existing = this.segmentsByElement.get(mesh.expressID);
+    const existing = this.segmentsByElement.get(this.idOf(mesh));
     const room = SNAP_SEGMENT_LIMIT * 6 - (existing?.length ?? 0);
     if (room <= 0) return;
     let local = edgeCache.get(mesh.geometry);
@@ -1064,7 +1326,7 @@ export class ModelBatcher {
       out[base + i + 1] = m[1] * x + m[5] * y + m[9] * z + m[13] - o.y;
       out[base + i + 2] = m[2] * x + m[6] * y + m[10] * z + m[14] - o.z;
     }
-    this.segmentsByElement.set(mesh.expressID, out);
+    this.segmentsByElement.set(this.idOf(mesh), out);
   }
 
   rayElementPoint(
@@ -1086,14 +1348,8 @@ export class ModelBatcher {
   }
 
   dispose(): void {
-    for (const child of [...this.group.children]) {
-      this.group.remove(child);
-      const mesh = child as THREE.Mesh;
-      mesh.geometry?.dispose();
-      if ((mesh as THREE.InstancedMesh).isInstancedMesh) {
-        (mesh as THREE.InstancedMesh).dispose();
-      }
-    }
+    disposeTree(this.group);
+    this.modelGroups.clear();
     this.mergedOpaque.dispose();
     this.mergedTransparent.dispose();
     this.instOpaque.dispose();

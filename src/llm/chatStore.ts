@@ -59,8 +59,16 @@ export function titleOf(messages: ChatMessage[]): string {
 export function saveChat(model: string, id: string, messages: ChatMessage[], now: number): boolean {
   const real = messages.filter((message) => message.role !== "system");
   if (!real.some((message) => message.role === "user")) return false;
+  // Trim to a user boundary. A stored conversation that opens with a tool
+  // result whose call was dropped is rejected by every provider that takes
+  // tools, so an exact character cut is not enough.
   let trimmed = real;
-  while (trimmed.length > 2 && JSON.stringify(trimmed).length > MAX_CHARS) trimmed = trimmed.slice(2);
+  while (trimmed.length > 2 && JSON.stringify(trimmed).length > MAX_CHARS) {
+    let cut = 1;
+    while (cut < trimmed.length && trimmed[cut].role !== "user") cut += 1;
+    if (cut >= trimmed.length) break;
+    trimmed = trimmed.slice(cut);
+  }
   const chats = readChats(model).filter((chat) => chat.id !== id);
   chats.unshift({ id, title: titleOf(trimmed), at: now, messages: trimmed });
   return write(model, chats);

@@ -25,6 +25,14 @@ worker one element at a time, on demand, which keeps the heap flat on big
 files. Anything needing every property builds the
 [property index](plugins/api.md#the-property-index) once and shares it.
 
+Merged chunks free their arrays once the GPU has them, so a drawn model only
+exists in graphics memory. Analysis that needs real surfaces rather than boxes,
+clash detection today, reads a second and much leaner copy of the same
+triangles: positions and indices, one entry per unique geometry, no normals or
+colours. It is handed to the clash worker on the first sweep and never copied
+again, and it is never a second geometry pipeline: the triangles are the ones
+the renderer was given.
+
 ## The parts
 
 | Folder | Responsibility |

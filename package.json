@@ -1,7 +1,7 @@
 {
   "name": "ifc-viewer-browser",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "description": "Fast browser-based IFC viewer with Python (IfcOpenShell/Pyodide) editing, LLM assistance, and MCP bridge",
   "scripts": {
@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "eval": "node scripts/eval-assistant.mjs",
     "check": "tsc --noEmit && node scripts/check-plugins.mjs && vitest run",
     "new-plugin": "node scripts/new-plugin.mjs",
     "bump": "node scripts/bump-version.mjs",
@@ -20,6 +21,7 @@
   },
   "dependencies": {
     "three": "0.184.0",
+    "three-mesh-bvh": "^0.9.14",
     "web-ifc": "0.0.77"
   },
   "devDependencies": {

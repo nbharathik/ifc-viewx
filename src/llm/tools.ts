@@ -19,58 +19,179 @@ export interface ToolSpec {
   summary: string;
   /** The same thing in the words a user reads. */
   plain: string;
+  /**
+   * JSON Schema for the arguments, when the provider takes tools natively.
+   * Absent for the Python tiers, which are written as code and never called.
+   */
+  params?: { properties: Record<string, unknown>; required?: string[] };
 }
+
+const ID_LIST = { type: "array", items: { type: "integer" }, description: "expressIDs from a find call" };
+const SCALAR = { type: ["string", "number", "boolean"], description: "the new value" };
 
 export const TOOLS: ToolSpec[] = [
   { name: "find", tier: "viewer", icon: "search", syntax: '{"action":"find","type":"door","name":"","storey":""}',
     summary: "substring filters; lists elements (id, type, name, storey)",
-    plain: "Find elements by type, name or storey" },
+    plain: "Find elements by type, name or storey",
+    params: { properties: {
+      type: { type: "string", description: "IFC class substring, e.g. door or IfcWall" },
+      name: { type: "string", description: "name substring" },
+      storey: { type: "string", description: "storey name substring" },
+    } } },
   { name: "counts", tier: "viewer", icon: "calculator", syntax: '{"action":"counts"}',
     summary: "element counts per IFC class",
-    plain: "Count elements by IFC class" },
+    plain: "Count elements by IFC class",
+    params: { properties: {} } },
   { name: "storeys", tier: "viewer", icon: "layers", syntax: '{"action":"storeys"}',
     summary: "storeys with element summaries",
-    plain: "List storeys and what is on them" },
+    plain: "List storeys and what is on them",
+    params: { properties: {} } },
   { name: "properties", tier: "viewer", icon: "list", syntax: '{"action":"properties","id":123}',
     summary: "attributes, psets, quantities of one element",
-    plain: "Read one element in full" },
-  { name: "select", tier: "viewer", icon: "focus", syntax: '{"action":"select","id":123}',
-    summary: "highlight and frame an element in 3D",
-    plain: "Select and frame an element" },
+    plain: "Read one element in full",
+    params: { properties: { id: { type: "integer", description: "expressID" } }, required: ["id"] } },
+  { name: "select", tier: "viewer", icon: "focus", syntax: '{"action":"select","ids":[123,124]}',
+    summary: "highlight and frame elements in 3D; one id or a set",
+    plain: "Select and frame elements",
+    params: { properties: {
+      id: { type: "integer", description: "a single expressID" },
+      ids: { type: "array", items: { type: "integer" }, description: "several expressIDs at once" },
+    } } },
   { name: "fit", tier: "viewer", icon: "frame", syntax: '{"action":"fit","id":123}',
     summary: "frame an element; omit id for the whole model",
-    plain: "Frame an element, or the whole model" },
+    plain: "Frame an element, or the whole model",
+    params: { properties: { id: { type: "integer", description: "expressID; omit to frame everything" } } } },
   { name: "isolate", tier: "viewer", icon: "eye", syntax: '{"action":"isolate","ids":[1,2]}',
     summary: "show only these elements",
-    plain: "Show only the chosen elements" },
+    plain: "Show only the chosen elements",
+    params: { properties: { ids: ID_LIST }, required: ["ids"] } },
   { name: "hide", tier: "viewer", icon: "eye-off", syntax: '{"action":"hide","ids":[1,2]}',
     summary: "hide these elements",
-    plain: "Hide the chosen elements" },
+    plain: "Hide the chosen elements",
+    params: { properties: { ids: ID_LIST }, required: ["ids"] } },
   { name: "show", tier: "viewer", icon: "eye", syntax: '{"action":"show"}',
     summary: "make everything visible again",
-    plain: "Show everything again" },
+    plain: "Show everything again",
+    params: { properties: {} } },
   { name: "check", tier: "viewer", icon: "shield", syntax: '{"action":"check"}',
     summary: "structural QA: identity, containment, placement, units, naming",
-    plain: "Run the model quality checks" },
+    plain: "Run the model quality checks",
+    params: { properties: {} } },
   { name: "schedule", tier: "viewer", icon: "table", syntax: '{"action":"schedule","type":"IfcDoor","properties":["Pset_DoorCommon.FireRating"]}',
     summary: "table of a class; omit properties to list what is available",
-    plain: "Build a schedule table for a class" },
+    plain: "Build a schedule table for a class",
+    params: { properties: {
+      type: { type: "string", description: "IFC class, e.g. IfcDoor" },
+      properties: { type: "array", items: { type: "string" }, description: 'columns as "Set.Property"; omit to list what exists' },
+    }, required: ["type"] } },
   { name: "ids", tier: "viewer", icon: "clipboard", syntax: '{"action":"ids"}',
     summary: "validate against the IDS the user loaded; pass/fail per specification",
-    plain: "Validate against your loaded IDS" },
+    plain: "Validate against your loaded IDS",
+    params: { properties: {} } },
   { name: "clash", tier: "viewer", icon: "compare", syntax: '{"action":"clash","a":["IfcWall"],"b":["IfcDuctSegment"],"tolerance":10}',
-    summary: "bounding-box clash sweep between two class sets; omit a/b for structure vs services",
-    plain: "Clash sweep between two sets of classes" },
+    summary: "triangle-level clash sweep between two class sets; omit a/b for structure vs services",
+    plain: "Clash sweep between two sets of classes",
+    params: { properties: {
+      a: { type: "array", items: { type: "string" }, description: "IFC classes for set A" },
+      b: { type: "array", items: { type: "string" }, description: "IFC classes for set B" },
+      tolerance: { type: "number", description: "millimetres of penetration to ignore" },
+      clearance: { type: "number", description: "millimetres; above zero, also report pairs that pass closer than this" },
+    } } },
+  { name: "search", tier: "viewer", icon: "search", syntax: '{"action":"search","query":"external fire rated door level 2"}',
+    summary: "ranked full-text search over names, classes, storeys and property values; use this before find when the wording is loose",
+    plain: "Search the model in plain words",
+    params: { properties: {
+      query: { type: "string", description: "words to look for, in any order" },
+      limit: { type: "integer", description: "rows to return, default 20" },
+    }, required: ["query"] } },
+  { name: "selection", tier: "viewer", icon: "focus", syntax: '{"action":"selection"}',
+    summary: "what the user has selected right now, with class and name",
+    plain: "Read the current selection",
+    params: { properties: {} } },
+  { name: "visibility", tier: "viewer", icon: "eye", syntax: '{"action":"visibility"}',
+    summary: "what is hidden and why: counts, named rules, section state, lazy categories",
+    plain: "Report what is hidden",
+    params: { properties: {} } },
+  { name: "unhide", tier: "viewer", icon: "eye", syntax: '{"action":"unhide","ids":[1,2]}',
+    summary: "make these elements visible again without showing everything",
+    plain: "Unhide just these elements",
+    params: { properties: { ids: ID_LIST }, required: ["ids"] } },
+  { name: "categories", tier: "viewer", icon: "layers", syntax: '{"action":"categories","IfcSpace":true}',
+    summary: "spaces and openings are off by default and carry no geometry until switched on; do this before measuring or listing rooms",
+    plain: "Load spaces or openings",
+    params: { properties: {
+      IfcSpace: { type: "boolean", description: "show room volumes" },
+      IfcOpeningElement: { type: "boolean", description: "show door and window openings" },
+    } } },
+  { name: "color", tier: "viewer", icon: "palette", syntax: '{"action":"color","groups":[{"label":"fire rated","ids":[1,2],"color":"#e11d48"}]}',
+    summary: "paint groups of elements; omit groups to take the colouring off",
+    plain: "Colour elements by group",
+    params: { properties: {
+      groups: {
+        type: "array",
+        description: "up to 12 groups; omit to clear",
+        items: { type: "object", properties: {
+          label: { type: "string" },
+          ids: { type: "array", items: { type: "integer" } },
+          color: { type: "string", description: "#rrggbb; assigned for you when omitted" },
+        }, required: ["ids"] },
+      },
+    } } },
+  { name: "section", tier: "viewer", icon: "section", syntax: '{"action":"section","axis":"y","offset":3.2}',
+    summary: "one axis-aligned cut; offset is in metres in model space, omit it for the middle; pass clear to remove",
+    plain: "Cut the model on one axis",
+    params: { properties: {
+      axis: { type: "string", enum: ["x", "y", "z"], description: "y is the horizontal cut that makes a plan" },
+      offset: { type: "number", description: "where along the axis; omit for the middle" },
+      flip: { type: "boolean", description: "keep the other half" },
+      clear: { type: "boolean", description: "remove every cut" },
+    } } },
+  { name: "sectionBox", tier: "viewer", icon: "cube", syntax: '{"action":"sectionBox","ids":[1,2]}',
+    summary: "clip to a box around these elements; pass clear to remove it",
+    plain: "Box the view around elements",
+    params: { properties: {
+      ids: ID_LIST,
+      clear: { type: "boolean", description: "remove the box" },
+    } } },
+  { name: "models", tier: "viewer", icon: "layers", syntax: '{"action":"models","hide":[1]}',
+    summary: "the federated models with their element counts; pass show/hide to switch a discipline on or off. Element ids carry their model, so a result from one file never touches another",
+    plain: "List or toggle the loaded models",
+    params: { properties: {
+      show: { type: "array", items: { type: "integer" }, description: "model indexes to show" },
+      hide: { type: "array", items: { type: "integer" }, description: "model indexes to hide" },
+    } } },
+  { name: "camera", tier: "viewer", icon: "frame", syntax: '{"action":"camera","view":"top"}',
+    summary: "move to a preset viewpoint, or read where the camera is when no view is given",
+    plain: "Move or read the camera",
+    params: { properties: {
+      view: { type: "string", enum: ["front", "back", "left", "right", "top", "bottom", "iso"] },
+    } } },
 
   { name: "setAttribute", tier: "edit", icon: "edit", syntax: '{"op":"setAttribute","ids":[1,2],"attribute":"Name","value":"Level 1 Door"}',
     summary: "attribute is one of Name, Description, ObjectType, Tag, LongName",
-    plain: "Change a name, description, type or tag" },
+    plain: "Change a name, description, type or tag",
+    params: { properties: {
+      ids: ID_LIST,
+      attribute: { type: "string", enum: ["Name", "Description", "ObjectType", "Tag", "LongName"] },
+      value: SCALAR,
+    }, required: ["ids", "attribute", "value"] } },
   { name: "renameByPattern", tier: "edit", icon: "search", syntax: '{"op":"renameByPattern","ids":[1,2],"find":"Basic Wall","replace":"Wall"}',
     summary: "substring replace inside each element's existing name",
-    plain: "Find and replace inside names" },
+    plain: "Find and replace inside names",
+    params: { properties: {
+      ids: ID_LIST,
+      find: { type: "string", description: "substring to look for" },
+      replace: { type: "string", description: "what to put in its place" },
+    }, required: ["ids", "find", "replace"] } },
   { name: "setProperty", tier: "edit", icon: "sliders", syntax: '{"op":"setProperty","ids":[1],"set":"Pset_WallCommon","property":"IsExternal","value":true}',
     summary: "only writes a property that already exists on that element",
-    plain: "Change a property that already exists" },
+    plain: "Change a property that already exists",
+    params: { properties: {
+      ids: ID_LIST,
+      set: { type: "string", description: "property set name, e.g. Pset_WallCommon" },
+      property: { type: "string", description: "property name inside that set" },
+      value: SCALAR,
+    }, required: ["ids", "set", "property", "value"] } },
 
   { name: "python query", tier: "python", icon: "terminal", syntax: "```python query",
     summary: "read the model; assign a JSON-serializable value to `result`",
@@ -139,6 +260,49 @@ export function toolBlocker(tool: ToolSpec, state: ToolAvailability): string {
   if (tool.tier === "edit" && state.mode !== "edit") return "Edit mode only";
   if (tool.name === "ids") return state.ids ? "" : "Load an .ids file";
   return "";
+}
+
+/** A tool as a provider takes it, wire-agnostic. */
+export interface NativeTool {
+  name: string;
+  description: string;
+  schema: { type: "object"; properties: Record<string, unknown>; required: string[] };
+}
+
+/**
+ * The tools a provider is offered this turn. Python is never here: the
+ * assistant writes that code and the user runs it, so handing it over as a
+ * callable tool would be a promise the app does not keep.
+ */
+export function nativeTools(mode: AssistantMode): NativeTool[] {
+  return TOOLS.filter((tool) => tool.params && (tool.tier === "viewer" || (tool.tier === "edit" && mode === "edit"))).map(
+    (tool) => ({
+      name: tool.name,
+      description: tool.summary,
+      schema: {
+        type: "object" as const,
+        properties: tool.params!.properties,
+        required: tool.params!.required ?? [],
+      },
+    }),
+  );
+}
+
+/** Which tier a called tool belongs to, so the app knows how to run it. */
+export function tierOf(name: string): ToolTier | null {
+  return TOOLS.find((tool) => tool.name === name)?.tier ?? null;
+}
+
+/**
+ * A native call rewritten as the JSON block the existing runner already takes.
+ * Bridging here rather than duplicating the runner is what keeps the native and
+ * fenced paths from ever disagreeing about what a tool does.
+ */
+export function callToBlock(name: string, input: Record<string, unknown>): { code: string; kind: "viewer" | "modelEdit" } | null {
+  const tier = tierOf(name);
+  if (tier === "viewer") return { code: JSON.stringify({ action: name, ...input }), kind: "viewer" };
+  if (tier === "edit") return { code: JSON.stringify({ op: name, ...input }), kind: "modelEdit" };
+  return null;
 }
 
 /** One tool call, as the transcript has to label it. */

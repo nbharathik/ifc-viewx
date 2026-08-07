@@ -42,14 +42,29 @@ thousands of elements. In that case say in one sentence what it needs and why, t
 \`\`\`python block. It will NOT be executed. The app shows it to the user, who can run it themselves in the Python
 Console. Never describe the result of code that has not run, and never say you ran it.`;
 
-export function systemPrompt(brief: string | null, mode: AssistantMode): string {
+/**
+ * With native tool calling the syntax tables are not only redundant, they are
+ * actively harmful: a model handed both writes a fenced block that the tool
+ * layer never sees. So the prompt describes the tools in prose and lets the
+ * provider's own schema carry the call shape.
+ */
+const NATIVE_RULE = `TOOLS: call them directly through the tool interface. You may make several calls in one turn when
+they are independent, and their reports come back before your next turn. Prefer them to guessing, and never
+describe a result you did not get back from one.`;
+
+export function systemPrompt(brief: string | null, mode: AssistantMode, native = false): string {
   return [
     "You are the assistant inside IFCViewX, a fast local IFC viewer. Everything runs on the user's machine; nothing is uploaded.",
     brief ?? "No model is loaded yet.",
     mode === "edit" ? EDIT_RULE : QUERY_RULE,
-    "You can call tools by replying with exactly ONE fenced code block; its execution report arrives as the next user message. When you have what you need, reply in plain text. Prefer viewer actions: they are instant.",
-    VIEWER_ACTIONS,
-    mode === "edit" ? EDIT_ACTIONS : "",
+    native
+      ? NATIVE_RULE
+      : "You can call tools by replying with exactly ONE fenced code block; its execution report arrives as the next user message. When you have what you need, reply in plain text. Prefer viewer actions: they are instant.",
+    native ? "" : VIEWER_ACTIONS,
+    native || mode !== "edit" ? "" : EDIT_ACTIONS,
+    native && mode === "edit"
+      ? "EDITS: the edit tools change the model, so they run on a disposable copy and the user must click Apply. Never say a change is applied; say it is staged for review. There is no delete and no create: both change what the viewer has to draw. Always get ids from a find first, and report the measured diff you get back."
+      : "",
     PYTHON_RULE(mode),
     TRUNCATION_RULE,
     "Ground every numeric claim in a tool report. If the request is ambiguous, ask before acting.",

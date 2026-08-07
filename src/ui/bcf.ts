@@ -4,6 +4,7 @@
 // other tools when the model shares that origin.
 import { confirmAction, h, icon, iconButton, toast } from "./kit.js";
 import { emptyState } from "./shell.js";
+import type { ReportIssue } from "./report.js";
 import type { CameraPose, SectionState, Viewer } from "../viewer-core/viewer.js";
 
 interface Viewpoint {
@@ -342,6 +343,19 @@ export class BcfPanel {
   refresh(): void {
     this.topics = this.read();
     this.render();
+  }
+
+  /** Flattened for the offline report; the snapshot travels as it is stored. */
+  reportIssues(): ReportIssue[] {
+    return this.topics.map((topic) => ({
+      title: topic.title,
+      status: topic.status,
+      priority: topic.priority,
+      author: topic.author,
+      date: topic.date,
+      description: topic.description,
+      snapshot: topic.snapshot,
+    }));
   }
 
   /** Raise an issue on what is on screen now. Empty title opens the editor. */

@@ -7,6 +7,8 @@
 // only thing left to choose is the model. Known models are listed up front and
 // the real list can be pulled from the endpoint itself, which never goes stale.
 
+import type { NativeTool } from "./tools.js";
+
 export type ProviderId = "anthropic" | "openai" | "openrouter" | "local" | "custom";
 
 export interface Provider {
@@ -99,9 +101,30 @@ export interface LlmSettings {
   verified: string;
 }
 
+/** One tool the model asked for, as both wires report it. */
+export interface ToolCall {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+}
+
 export interface ChatMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  /** Tools this assistant turn called. Absent on a plain reply. */
+  calls?: ToolCall[];
+  /** On a `tool` message: which call it answers. */
+  callId?: string;
+  /** On a `tool` message: the tool that produced it. */
+  name?: string;
+}
+
+/** What one turn produced: prose, tool calls, or both. */
+export interface TurnResult {
+  text: string;
+  calls: ToolCall[];
+  /** False when the provider refused tools, so the caller drops to fenced blocks. */
+  toolsUsed: boolean;
 }
 
 /** Tokens the provider reported for one turn. Absent when it reported none. */
@@ -290,6 +313,173 @@ export async function chat(
   return provider.wire === "anthropic"
     ? chatAnthropic(settings, messages, signal, options)
     : chatOpenAi(settings, messages, signal, options);
+}
+
+/**
+ * One turn with tools offered natively. Falls back by returning
+ * `toolsUsed: false`, which tells the caller to re-ask on the fenced protocol:
+ * local servers vary wildly in tool support and an answer must never be lost to
+ * a provider that simply does not implement it.
+ *
+ * Streaming and tools are deliberately not combined. Streamed tool arguments
+ * arrive as JSON fragments that cannot be shown to anyone mid-flight, so a turn
+ * that may call a tool is a single request, and the streaming path stays for
+ * the prose turns where it is worth something.
+ */
+export async function converse(
+  settings: LlmSettings,
+  messages: ChatMessage[],
+  tools: NativeTool[],
+  signal?: AbortSignal,
+  options: ChatOptions = {},
+): Promise<TurnResult> {
+  if (!settings.model) throw new Error("Choose an assistant provider and model in Settings first.");
+  const provider = findProvider(settings.provider);
+  if (provider.needsKey && !settings.apiKey) {
+    throw new Error(`${provider.label} needs an API key. Paste one in Settings.`);
+  }
+  return provider.wire === "anthropic"
+    ? converseAnthropic(settings, messages, tools, signal, options)
+    : converseOpenAi(settings, messages, tools, signal, options);
+}
+
+/** Anthropic content blocks for one stored message. */
+function anthropicContent(message: ChatMessage): unknown {
+  if (message.role === "tool") {
+    return [{ type: "tool_result", tool_use_id: message.callId, content: message.content }];
+  }
+  if (message.calls?.length) {
+    const blocks: unknown[] = [];
+    if (message.content) blocks.push({ type: "text", text: message.content });
+    for (const call of message.calls) {
+      blocks.push({ type: "tool_use", id: call.id, name: call.name, input: call.input });
+    }
+    return blocks;
+  }
+  return message.content;
+}
+
+async function converseAnthropic(
+  settings: LlmSettings,
+  messages: ChatMessage[],
+  tools: NativeTool[],
+  signal: AbortSignal | undefined,
+  options: ChatOptions,
+): Promise<TurnResult> {
+  const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
+  const turns = messages
+    .filter((m) => m.role !== "system")
+    .map((m) => ({ role: m.role === "tool" ? "user" : m.role, content: anthropicContent(m) }));
+  const response = await fetch(`${endpointOf(settings)}/v1/messages`, {
+    method: "POST",
+    signal,
+    headers: { "Content-Type": "application/json", ...authHeaders(findProvider(settings.provider), settings) },
+    body: JSON.stringify({
+      model: settings.model,
+      max_tokens: MAX_TOKENS,
+      // The system prompt and the tool table are identical every turn, so
+      // marking the tail of the system block cacheable is the whole win.
+      ...(system ? { system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }] } : {}),
+      tools: tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.schema })),
+      messages: turns,
+    }),
+  });
+  if (!response.ok) {
+    const detail = await errorDetail(response);
+    if (/tool/i.test(detail) && response.status === 400) return { text: "", calls: [], toolsUsed: false };
+    throw new Error(`LLM request failed (HTTP ${response.status}): ${detail}`);
+  }
+  const data = (await response.json()) as {
+    content?: Array<{ type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }>;
+    usage?: { input_tokens?: number; output_tokens?: number };
+  };
+  if (data.usage) {
+    options.onUsage?.({ input: asNumber(data.usage.input_tokens), output: asNumber(data.usage.output_tokens) });
+  }
+  const text = (data.content ?? []).filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
+  const calls = (data.content ?? [])
+    .filter((b) => b.type === "tool_use" && b.name)
+    .map((b) => ({ id: b.id ?? "", name: b.name ?? "", input: b.input ?? {} }));
+  return { text, calls, toolsUsed: true };
+}
+
+/** OpenAI message objects for one stored message. */
+function openAiMessage(message: ChatMessage): Record<string, unknown> {
+  if (message.role === "tool") {
+    return { role: "tool", tool_call_id: message.callId, content: message.content };
+  }
+  if (message.calls?.length) {
+    return {
+      role: "assistant",
+      content: message.content || null,
+      tool_calls: message.calls.map((call) => ({
+        id: call.id,
+        type: "function",
+        function: { name: call.name, arguments: JSON.stringify(call.input) },
+      })),
+    };
+  }
+  return { role: message.role, content: message.content };
+}
+
+async function converseOpenAi(
+  settings: LlmSettings,
+  messages: ChatMessage[],
+  tools: NativeTool[],
+  signal: AbortSignal | undefined,
+  options: ChatOptions,
+): Promise<TurnResult> {
+  const response = await postOpenAi(
+    `${endpointOf(settings)}/chat/completions`,
+    { "Content-Type": "application/json", ...authHeaders(findProvider(settings.provider), settings) },
+    {
+      model: settings.model,
+      messages: messages.map(openAiMessage),
+      max_tokens: MAX_TOKENS,
+      tools: tools.map((tool) => ({
+        type: "function",
+        function: { name: tool.name, description: tool.description, parameters: tool.schema },
+      })),
+    },
+    signal,
+  );
+  if (!response.ok) {
+    const detail = await errorDetail(response);
+    // A server without tool support says so at 400 or 404; that is a fallback,
+    // not a failure, and the difference matters to whether the user sees an error.
+    if ((response.status === 400 || response.status === 404) && /tool|function/i.test(detail)) {
+      return { text: "", calls: [], toolsUsed: false };
+    }
+    throw new Error(`LLM request failed (HTTP ${response.status}): ${detail}`);
+  }
+  const data = (await response.json()) as {
+    choices?: Array<{
+      message?: {
+        content?: string | null;
+        tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>;
+      };
+      finish_reason?: string;
+    }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  };
+  if (data.usage) {
+    options.onUsage?.({ input: asNumber(data.usage.prompt_tokens), output: asNumber(data.usage.completion_tokens) });
+  }
+  const message = data.choices?.[0]?.message;
+  const calls: ToolCall[] = [];
+  for (const call of message?.tool_calls ?? []) {
+    if (!call.function?.name) continue;
+    let input: Record<string, unknown> = {};
+    try {
+      input = call.function.arguments ? (JSON.parse(call.function.arguments) as Record<string, unknown>) : {};
+    } catch {
+      // Malformed arguments are the model's mistake to correct, and it can only
+      // do that if the call still arrives with the name attached.
+      input = {};
+    }
+    calls.push({ id: call.id ?? "", name: call.function.name, input });
+  }
+  return { text: message?.content ?? "", calls, toolsUsed: true };
 }
 
 /**

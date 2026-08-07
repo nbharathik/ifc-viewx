@@ -1,6 +1,6 @@
 [project]
 name = "ifcviewx"
-version = "0.1.1"
+version = "0.2.0"
 description = "IFCViewX Local Studio: fast, private IFC viewer with IfcOpenShell conversion, native Python, model checks and an MCP bridge"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,6 +30,10 @@ dependencies = [
 [project.optional-dependencies]
 # Kept as a no-op so older instructions still resolve; conversion ships by default.
 convert = []
+# `ifcviewx check --ids` runs the buildingSMART reference IDS implementation.
+# Optional because structural checks need nothing extra, and CI images that
+# never pass --ids should not carry it.
+check = ["ifctester>=0.8.1"]
 
 [project.scripts]
 ifcviewx = "ifcviewx.cli:main"

@@ -20,6 +20,8 @@ const TAIL: Record<string, string> = {
   COLUMN: "$,$",
   DOOR: "$,$,$,$,$,$",
   WINDOW: "$,$,$,$,$,$",
+  // LongName, CompositionType, PredefinedType, ElevationWithFlooring.
+  SPACE: "$,.ELEMENT.,$,$",
 };
 
 interface Placed {
@@ -140,6 +142,55 @@ export function sampleModel(): Uint8Array {
     box("COLUMN", `Column B${s + 1}`, s, 3, 2, 0, 0.4, 0.4, WALL_H, false);
     box("DOOR", `Door ${s + 1}`, s, -2, -D / 2 + WALL_T / 2, 0, 1, WALL_T + 0.02, 2.1, false);
     box("WINDOW", `Window ${s + 1}`, s, 2.5, D / 2 - WALL_T / 2, 1, 1.6, WALL_T + 0.02, 1.2, false);
+
+    // Two rooms per storey, split down the middle, so the room book has real
+    // authored quantities to read rather than only bounding boxes.
+    const inner = W - WALL_T * 2;
+    const depth = D - WALL_T * 2;
+    addSpace(s, `${s + 1}01`, "Office", -inner / 4, 0, inner / 2, depth, WALL_H);
+    addSpace(s, `${s + 1}02`, "Meeting room", inner / 4, 0, inner / 2, depth, WALL_H);
+  }
+
+  /**
+   * A space is a spatial structure element, so it decomposes the storey through
+   * IfcRelAggregates rather than being contained in it like a wall is.
+   */
+  function addSpace(
+    storey: number,
+    name: string,
+    longName: string,
+    x: number,
+    y: number,
+    width: number,
+    depth: number,
+    height: number,
+  ): void {
+    const point = add(`IFCCARTESIANPOINT((${x.toFixed(3)},${y.toFixed(3)},0.))`);
+    const place3d = add(`IFCAXIS2PLACEMENT3D(#${point},#${dirZ},#${dirX})`);
+    const place = add(`IFCLOCALPLACEMENT(#${storeyPlaces[storey]},#${place3d})`);
+    const profile = add(`IFCRECTANGLEPROFILEDEF(.AREA.,$,$,${width.toFixed(3)},${depth.toFixed(3)})`);
+    const solid = add(`IFCEXTRUDEDAREASOLID(#${profile},#${axis},#${dirZ},${height.toFixed(3)})`);
+    const shape = add(`IFCSHAPEREPRESENTATION(#${context},'Body','SweptSolid',(#${solid}))`);
+    const definition = add(`IFCPRODUCTDEFINITIONSHAPE($,$,(#${shape}))`);
+    const ref = add(
+      `IFCSPACE('${g()}',#${owner},'${name}','${longName}',$,#${place},#${definition},'${longName}',.ELEMENT.,$,$)`,
+    );
+    add(`IFCRELAGGREGATES('${g()}',#${owner},$,$,#${storeys[storey]},(#${ref}))`);
+
+    const area = width * depth;
+    const netArea = add(`IFCQUANTITYAREA('NetFloorArea',$,$,${area.toFixed(4)},$)`);
+    const grossArea = add(`IFCQUANTITYAREA('GrossFloorArea',$,$,${(area * 1.06).toFixed(4)},$)`);
+    const volume = add(`IFCQUANTITYVOLUME('NetVolume',$,$,${(area * height).toFixed(4)},$)`);
+    const tall = add(`IFCQUANTITYLENGTH('Height',$,$,${height.toFixed(3)},$)`);
+    const qto = add(
+      `IFCELEMENTQUANTITY('${g()}',#${owner},'Qto_SpaceBaseQuantities',$,$,(#${netArea},#${grossArea},#${volume},#${tall}))`,
+    );
+    add(`IFCRELDEFINESBYPROPERTIES('${g()}',#${owner},$,$,(#${ref}),#${qto})`);
+
+    const people = add(`IFCPROPERTYSINGLEVALUE('OccupancyNumber',$,IFCCOUNTMEASURE(${Math.max(2, Math.round(area / 8))}),$)`);
+    const category = add(`IFCPROPERTYSINGLEVALUE('Category',$,IFCLABEL('${longName}'),$)`);
+    const pset = add(`IFCPROPERTYSET('${g()}',#${owner},'Pset_SpaceCommon',$,(#${people},#${category}))`);
+    add(`IFCRELDEFINESBYPROPERTIES('${g()}',#${owner},$,$,(#${ref}),#${pset})`);
   }
 
   function addProperties(ref: number, external: boolean): void {

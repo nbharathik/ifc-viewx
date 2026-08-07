@@ -16,10 +16,10 @@ a vault for your assistant key. See [Local Studio](local-studio.md).
 ## What it does
 
 Model tree, properties, quantities and schedules. Measurements, section planes,
-2D plans and saved viewpoints. Quality checks and IDS validation. Editing with
-diffs, undo and redo. Clash detection, quantity takeoff, model compare and BCF
-issues. A Python console running real IfcOpenShell, and an optional AI
-assistant.
+2D plans and saved viewpoints. Quality checks and IDS validation, gathered into
+one offline HTML report you can print to PDF. Editing with diffs, undo and
+redo. Clash detection, quantity takeoff, model compare and BCF issues. A Python
+console running real IfcOpenShell, and an optional AI assistant.
 
 ## Extending it
 

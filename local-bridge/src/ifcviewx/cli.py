@@ -1,6 +1,7 @@
 """The ifcviewx command.
 
 ifcviewx [model.ifc]        start Local Studio and open the viewer
+ifcviewx check model.ifc    structural and IDS checks with CI exit codes
 ifcviewx convert model.ifc  IFC -> .ifcx from the terminal (also: ifcx-convert)
 ifcviewx mcp                MCP over stdio for AI clients (Claude Desktop, ...)
 
@@ -94,11 +95,15 @@ def main() -> None:
 
         sys.argv = [sys.argv[0], *argv[1:]]
         return run_convert()
+    if argv[:1] == ["check"]:
+        from .check import run as run_check
+
+        sys.exit(run_check(argv[1:]))
 
     parser = argparse.ArgumentParser(
         prog="ifcviewx",
         description="IFCViewX Local Studio: fast, private IFC viewing with IfcOpenShell power.",
-        epilog="Subcommands: ifcviewx convert <model.ifc>    ifcviewx mcp",
+        epilog="Subcommands: ifcviewx check <model.ifc>    ifcviewx convert <model.ifc>    ifcviewx mcp",
     )
     parser.add_argument("model", nargs="?", type=Path, help="IFC or .ifcx file to open")
     parser.add_argument("--port", type=int, help="serve on this port (default 8765)")

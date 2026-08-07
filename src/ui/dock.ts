@@ -7,7 +7,7 @@ import { attachPopover, busyRow, h, icon, iconButton, toast } from "./kit.js";
 import { applyColors, colorableKeys, computeColors, cssColor, type ColorResult, type ColorRule } from "./colorBy.js";
 import { formatAngle, formatArea, formatLength } from "../viewer-core/viewer.js";
 import type { PropertyIndex } from "../sdk/data.js";
-import type { CameraPose, LazyCategory, MeasureMode, SectionState, SnapMode, Viewer, ViewPreset } from "../viewer-core/viewer.js";
+import type { CameraPose, LazyCategory, MeasureMode, SectionBox, SectionState, SnapMode, Viewer, ViewPreset } from "../viewer-core/viewer.js";
 
 interface Viewpoint {
   name: string;
@@ -15,6 +15,8 @@ interface Viewpoint {
   /** Kept for viewpoints saved before sections could combine. */
   section: SectionState | null;
   sections?: SectionState[];
+  /** Absent on viewpoints saved before the box existed, which is not a box. */
+  box?: SectionBox | null;
 }
 
 const AXES: Array<SectionState["axis"]> = ["x", "y", "z"];
@@ -104,6 +106,7 @@ export function saveViewpoint(viewer: Viewer, name?: string): string | null {
     pose: viewer.getCamera(),
     section: viewer.getSection(),
     sections: viewer.getSections(),
+    box: viewer.getSectionBox(),
   });
   localStorage.setItem(key, JSON.stringify(views));
   return label;
@@ -127,6 +130,9 @@ export class Dock {
   /** Set once the plugin host exists; property rules read its shared index. */
   private indexProvider: (() => PropertyIndex) | null = null;
 
+  /** Set by the app: opening a file picker is its business, not the dock's. */
+  onAddModel: (() => void) | null = null;
+
   constructor(host: HTMLElement, private readonly viewer: Viewer) {
     this.root = h("div", { id: "dock", role: "toolbar", "aria-label": "Viewport tools" });
 
@@ -145,6 +151,7 @@ export class Dock {
     this.colorBtn = this.popTool("palette", "Colour by", (pop) => this.buildColors(pop));
 
     this.sep();
+    this.popTool("layers", "Models", (pop, close) => this.buildModels(pop, close));
     this.popTool("focus", "Selection sets", (pop) => this.buildSelectionSets(pop));
     this.popTool("bookmark", "Saved viewpoints", (pop) => this.buildViewpoints(pop));
     this.tool("camera", "Screenshot  S", () => viewer.screenshot());
@@ -516,6 +523,143 @@ export class Dock {
       this.sync();
     });
     pop.appendChild(h("div", { class: "pop-row" }, [plan, off]));
+    this.buildSectionBox(pop, bounds);
+  }
+
+  /**
+   * The box is six planes on the same three axes as the sliders above, so the
+   * two are mutually exclusive by construction and the viewer enforces it.
+   * Two low sliders per axis rather than a dual-thumb control, which the
+   * platform does not have.
+   */
+  private buildSectionBox(pop: HTMLElement, bounds: { min: number[]; max: number[] }): void {
+    const model = this.viewer.getModelBox();
+    let box = this.viewer.getSectionBox() ?? model;
+    const rows: HTMLInputElement[] = [];
+
+    const apply = (): void => {
+      this.viewer.setSectionBox(box);
+      this.sync();
+    };
+    const paint = (): void => {
+      rows.forEach((slider, i) => {
+        slider.value = String(i % 2 === 0 ? box.min[i >> 1] : box.max[i >> 1]);
+      });
+    };
+
+    pop.append(h("div", { class: "pop-title", text: "Section box" }));
+    for (const axis of AXES) {
+      const index = AXES.indexOf(axis);
+      const [low, high] = [bounds.min[index], bounds.max[index]];
+      const pair: HTMLInputElement[] = [];
+      for (const end of ["min", "max"] as const) {
+        const slider = h("input", {
+          type: "range",
+          step: "0.001",
+          min: String(low),
+          max: String(high),
+          "aria-label": `${axis.toUpperCase()} ${end}`,
+          value: String(box[end][index]),
+        });
+        slider.addEventListener("input", () => {
+          box = { min: [...box.min], max: [...box.max] };
+          box[end][index] = Number(slider.value);
+          apply();
+        });
+        pair.push(slider);
+        rows.push(slider);
+      }
+      pop.appendChild(
+        h("div", { class: "pop-row" }, [h("span", { class: "axis-tag", text: axis.toUpperCase() }), ...pair]),
+      );
+    }
+
+    const around = h("button", { class: "btn grow", type: "button", text: "Box selection" });
+    around.addEventListener("click", () => {
+      const fitted = this.viewer.boxAround(this.viewer.getSelectedIds());
+      if (!fitted) return toast("Select something first", "info");
+      box = fitted;
+      paint();
+      apply();
+    });
+    const clear = h("button", { class: "btn", type: "button", text: "No box" });
+    clear.addEventListener("click", () => {
+      box = this.viewer.getModelBox();
+      paint();
+      this.viewer.setSectionBox(null);
+      this.sync();
+    });
+    pop.appendChild(h("div", { class: "pop-row" }, [around, clear]));
+  }
+
+  /**
+   * The federated set: one row per open model, with the eye, a nudge for
+   * files that disagree about placement, and a way to drop one. Ids carry
+   * their model, so hiding a discipline never touches another's elements.
+   */
+  private buildModels(pop: HTMLElement, close: () => void): void {
+    const render = (): void => {
+      const models = this.viewer.getModels();
+      const rows: HTMLElement[] = [];
+      for (const model of models) {
+        const eye = iconButton(
+          model.visible ? "eye" : "eye-off",
+          model.visible ? `Hide ${model.name}` : `Show ${model.name}`,
+          () => {
+            this.viewer.setModelVisible(model.index, !model.visible);
+            render();
+          },
+          "icon-btn sm",
+        );
+        const label = h("span", { class: "grow", text: model.name, title: model.name });
+        const count = h("span", { class: "n", text: `${model.elements.toLocaleString()} parts` });
+        const row = h("div", { class: "filter-row" }, [eye, label, count]);
+        // Only a federated model can be dropped on its own; the first one is
+        // the app's model, and closing that is File > Close.
+        if (model.index > 0) {
+          row.appendChild(
+            iconButton("x", `Unload ${model.name}`, () => {
+              this.viewer.unloadModel(model.index);
+              render();
+            }, "icon-btn sm"),
+          );
+        }
+        rows.push(row);
+
+        const [ox, oy, oz] = model.offset;
+        const nudge = h("div", { class: "pop-row" }, [
+          h("span", { class: "axis-tag", text: "Move" }),
+          ...(["x", "y", "z"] as const).map((axis, i) => {
+            const input = h("input", {
+              type: "number",
+              step: "0.1",
+              value: String([ox, oy, oz][i]),
+              "aria-label": `${model.name} offset ${axis.toUpperCase()}`,
+            });
+            input.addEventListener("change", () => {
+              const next: [number, number, number] = [...this.viewer.getModelTransform(model.index)];
+              next[i] = Number(input.value) || 0;
+              this.viewer.setModelTransform(model.index, next);
+            });
+            return input;
+          }),
+        ]);
+        if (models.length > 1) rows.push(nudge);
+      }
+
+      const add = h("button", { class: "btn grow", type: "button", text: "Add a model" });
+      add.addEventListener("click", () => {
+        this.onAddModel?.();
+        close();
+      });
+      pop.replaceChildren(
+        h("div", { class: "pop-title", text: `Models (${models.length})` }),
+        ...(models.length ? rows : [h("div", { class: "note", text: "No model open." })]),
+        h("div", { class: "pop-row" }, [add]),
+        h("div", { class: "note", text: "Architecture, structure and services load together; each keeps its own ids." }),
+      );
+    };
+    render();
   }
 
   private buildVisibility(pop: HTMLElement, close: () => void): void {
@@ -782,7 +926,10 @@ export class Dock {
         apply.addEventListener("click", () => {
           this.viewer.setCamera(view.pose);
           const planes = view.sections ?? (view.section ? [view.section] : []);
-          if (planes.length) this.viewer.setSections(planes);
+          // The box wins: the viewer keeps the two exclusive, so restoring
+          // planes after a box would silently drop the box.
+          if (view.box) this.viewer.setSectionBox(view.box);
+          else if (planes.length) this.viewer.setSections(planes);
           else this.viewer.clearSection();
           this.sync();
         });

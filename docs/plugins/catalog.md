@@ -11,12 +11,13 @@ These run in the tab. Nothing to install, nothing uploaded.
 
 *Find elements that fight for the same space*
 
-Sweeps two sets of IFC classes against each other and reports every pair whose volumes overlap by more than the tolerance. It works off the bounding boxes the viewer already holds, so a full sweep of a large model takes about a second and no geometry leaves the tab.
+Sweeps two sets of IFC classes against each other and reports every pair whose meshes actually intersect. Boxes and BVH nodes only narrow the search; the answer comes from triangle-level intersection of the geometry the viewer already loaded, so a hit is a real collision rather than two boxes overlapping. Set a clearance and it also reports pairs that pass closer than they should. The work runs in a worker, so the viewport keeps drawing while a full discipline is swept, and no geometry leaves the tab.
 
 - Any class against any class, with structure and MEP presets
-- Uniform grid broad phase; overlap volume and depth per hit
-- Click a hit to isolate the pair and frame it
-- Full report as CSV
+- Triangle-level mesh intersection, with penetration depth per hit
+- Clearance checking against the true minimum distance between surfaces
+- Click a hit to isolate the pair and zoom to the collision itself
+- Full report as CSV, with GlobalId and the clash position
 
 <small>Category: Coordination</small>
 
@@ -46,6 +47,19 @@ Parses a second IFC in a background worker without drawing it, then matches both
 
 <small>Category: Quality</small>
 
+### Model Finder
+
+*Search the whole model in plain words, then act on what comes back*
+
+Ranked search over every element's class, name and storey, and over its property values once the property index has been built. Words may come in any order, so "external fire door level 2" finds what a substring filter cannot. The results are a working set: select them, isolate them, colour them, or clip a section box around them. It runs the same BM25 index the assistant searches with, so the panel and the assistant always agree about what is in the model.
+
+- Ranked full-text search over class, name, storey and property values
+- Words in any order, and camel-case class names split so Wall finds IfcWallStandardCase
+- Select, isolate, colour or box the results in one click
+- Property values are included once the index has been built, on request
+
+<small>Category: Data</small>
+
 ### Python Console
 
 *Write IfcOpenShell against the open model*
@@ -69,6 +83,19 @@ Reads the base quantities authored in the file (Qto_*, plus quantity-shaped prop
 - Net and gross volume, area, length and count
 - Coverage column: how much of the group carries real quantities
 - Click a row to isolate the group; export the table as CSV
+
+<small>Category: Data</small>
+
+### Room Book
+
+*Every space with its area, volume and occupancy*
+
+Lists every IfcSpace with the areas and volumes the file authored, rolled up by storey. Where a space carries no quantities the footprint of its bounding box fills the gap, and each row says which it is, so a schedule is never quoted from an estimate by accident. Spaces are excluded from the default geometry stream, so the panel loads them on demand when you ask to see one.
+
+- Net and gross floor area, volume, height and perimeter per space
+- Rolled up by storey, with the storey totals a schedule needs
+- Occupancy and category read from Pset_SpaceCommon where present
+- Click a room to isolate it; CSV export of the whole book
 
 <small>Category: Data</small>
 

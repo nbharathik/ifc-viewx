@@ -14,9 +14,16 @@ export interface RibbonControl {
   sync?: () => void;
 }
 
+/**
+ * Two sizes, and every button is labelled. One large button opens a group and
+ * the rest stack small beside it; an unlabelled button next to a labelled one
+ * reads as unfinished, so there is no icon-only size.
+ */
+export type RibbonSize = "lg" | "sm";
+
 export type RibbonItem =
-  | { kind: "cmd"; id: string; size?: "lg" | "sm"; label?: string }
-  | { kind: "menu"; label: string; icon: string; size?: "lg" | "sm"; items: () => MenuItem[] }
+  | { kind: "cmd"; id: string; size?: RibbonSize; label?: string }
+  | { kind: "menu"; label: string; icon: string; size?: RibbonSize; items: () => MenuItem[] }
   | { kind: "control"; build: () => RibbonControl };
 
 export interface RibbonGroup {
@@ -175,8 +182,8 @@ export class Ribbon {
     const items = h("div", { class: "rib-items" });
     let stack: HTMLElement | null = null;
     for (const item of group.items) {
-      const large = item.kind === "control" || item.size !== "sm";
-      if (large) {
+      const size = item.kind === "control" ? "lg" : item.size ?? "lg";
+      if (size === "lg") {
         stack = null;
         items.appendChild(this.buildItem(item, "lg"));
         continue;
@@ -190,7 +197,7 @@ export class Ribbon {
     return h("div", { class: "rib-group" }, [items, h("div", { class: "rib-glabel", text: group.label })]);
   }
 
-  private buildItem(item: RibbonItem, size: "lg" | "sm"): HTMLElement {
+  private buildItem(item: RibbonItem, size: RibbonSize): HTMLElement {
     if (item.kind === "control") {
       const control = item.build();
       this.controls.push(control);
@@ -243,7 +250,7 @@ export class Ribbon {
     return button;
   }
 
-  private button(name: string, label: string, size: "lg" | "sm", caret = false): HTMLButtonElement {
+  private button(name: string, label: string, size: RibbonSize, caret = false): HTMLButtonElement {
     const text = h("span", { class: "rib-label", text: label });
     // The caret rides on the label line so a large button stays two rows tall.
     if (caret) text.appendChild(icon("chevron", 10));

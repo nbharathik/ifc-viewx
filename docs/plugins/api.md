@@ -53,7 +53,15 @@ interface PluginInstance {
 | `ctx.subtree(id)` | Element ids under a spatial node |
 | `ctx.properties(id)` | One element's attributes and property sets. Async |
 | `ctx.bounds(id)` | Axis aligned bounds, or `null` without geometry |
+| `ctx.clash(a, b, options?)` | Triangle-level clash detection between two id sets. Async |
 | `ctx.index()` | The shared [property index](#the-property-index) |
+
+`ctx.clash` runs in a worker over the geometry the viewer already loaded, and
+decides every hit from real mesh intersection rather than from bounding boxes.
+Options are `toleranceMm` (intersections thinner than this are grazes),
+`clearanceMm` (above zero, pairs that miss are also checked for a tight gap),
+`limit` and `onProgress`. Each result carries both element ids, the kind
+(`hard` or `clearance`), the distance in metres, and the point to zoom to.
 
 ## Driving the viewport
 
@@ -65,6 +73,7 @@ interface PluginInstance {
 | `ctx.hide(ids)` | Hide these |
 | `ctx.showAll()` | Release everything hidden or isolated |
 | `ctx.frame(id?)` | Frame one element, or the whole model |
+| `ctx.frameAt(point, radius?)` | Frame a point in space, such as a collision |
 | `ctx.viewFrom(view)` | `front`, `right`, `top` or `iso` |
 | `ctx.sections()`, `ctx.setSections(states)` | Read and write section planes |
 
@@ -186,4 +195,5 @@ format themselves. `tone` is `ok`, `warn` or `err`.
 | `classCounts(rows)` | Groups anything with a `type` field, largest first |
 | `formatNumber(value)` | The app's number formatting |
 | `nextFrame()` | Await between slices of a long job to keep the panel responsive |
-| `clashReport`, `sweepBoxes`, `boxesFor` | The clash sweep the app itself runs |
+| `detectClashes`, `clashReport`, `idsOfTypes` | The clash sweep the app itself runs |
+| `STRUCTURE`, `MEP`, `OPENINGS` | The class sets behind the clash presets |

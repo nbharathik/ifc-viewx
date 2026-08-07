@@ -11,6 +11,8 @@ import { PerfHud } from './panels/perfHud.js';
 import { AxisGizmo } from './panels/axisGizmo.js';
 import { LoadingOverlay, ErrorCard } from './panels/overlays.js';
 import { CancelledError } from './engine/types.js';
+import { TriangleStore } from './scene/triangleStore.js';
+import { expressOf, modelOf, packId } from './ids.js';
 import type { CameraPose, SceneInfo, SnapHit, SnapKind } from './scene/scene.js';
 import type { PickResult, ViewPreset } from './scene/controls.js';
 import type {
@@ -33,6 +35,85 @@ export interface SectionState {
   axis: 'x' | 'y' | 'z';
   offset: number;
   flip: boolean;
+}
+
+/**
+ * One model in a federated set. `index` is the slot packed into every id the
+ * model owns, so `modelOf(someElementId)` names the model it came from.
+ */
+export interface FederatedModel {
+  index: number;
+  name: string;
+  visible: boolean;
+  /** Nudge applied to the whole model, for files that disagree on placement. */
+  offset: [number, number, number];
+  elements: number;
+  triangles: number;
+}
+
+/** What the viewer keeps per open model. */
+interface ModelEntry {
+  index: number;
+  /** The engine's handle, which is a CachedEngine slot. */
+  modelID: number;
+  name: string;
+  tree: SpatialNode | null;
+  stats: ModelStats | null;
+  categories: Set<LazyCategory>;
+}
+
+/** A clipping volume, in scene coordinates. Corners, not centre and size. */
+export interface SectionBox {
+  min: [number, number, number];
+  max: [number, number, number];
+}
+
+const AXIS_ORDER: Array<SectionState['axis']> = ['x', 'y', 'z'];
+
+/**
+ * A box as six half-spaces. Materials keep three's default clipIntersection,
+ * so a fragment outside any one of them is dropped, which is the box.
+ */
+/**
+ * Rewrite a spatial tree's ids into one model's namespace. Model 0 packs to
+ * itself, so a single model skips the walk entirely and keeps the exact tree
+ * the engine handed over, node identity included.
+ */
+export function packTree(node: SpatialNode, modelIndex: number): SpatialNode {
+  if (modelIndex === 0) return node;
+  return {
+    ...node,
+    expressID: packId(modelIndex, node.expressID),
+    children: node.children.map((child) => packTree(child, modelIndex)),
+  };
+}
+
+export function boxPlanes(box: SectionBox): SectionState[] {
+  const planes: SectionState[] = [];
+  AXIS_ORDER.forEach((axis, i) => {
+    planes.push({ axis, offset: box.max[i], flip: false });
+    planes.push({ axis, offset: box.min[i], flip: true });
+  });
+  return planes;
+}
+
+/**
+ * Grow a box by a share of its longest side, so the elements it was fitted to
+ * do not sit exactly on a clipping plane and lose their own faces.
+ */
+export function padBox(box: SectionBox, pad: number): SectionBox {
+  const span = Math.max(box.max[0] - box.min[0], box.max[1] - box.min[1], box.max[2] - box.min[2]);
+  const grow = Math.max(span * pad, 0.01);
+  return {
+    min: [box.min[0] - grow, box.min[1] - grow, box.min[2] - grow],
+    max: [box.max[0] + grow, box.max[1] + grow, box.max[2] + grow],
+  };
+}
+
+/** Keep every axis open by at least a sliver; a collapsed one clips it all. */
+export function sanitizeBox(box: SectionBox): SectionBox {
+  const min = box.min.map((value, i) => Math.min(value, box.max[i] - 1e-3)) as [number, number, number];
+  return { min, max: [...box.max] as [number, number, number] };
 }
 
 /** How a new selection combines with the current one. */
@@ -162,6 +243,9 @@ interface VisibilityStep {
 
 const VISIBILITY_HISTORY_LIMIT = 50;
 
+/** Shape id carried by the legs of the angle or ring still being placed. */
+const PENDING_SHAPE = -1;
+
 const sameIds = (a: number[], b: number[]): boolean =>
   a.length === b.length && a.every((id, i) => id === b[i]);
 
@@ -195,6 +279,8 @@ export interface ViewerOptions {
 
 export interface ViewerLoadOptions {
   onProgress?: (progress: LoadProgress) => void;
+  /** Shown in the model list; the file name, normally. */
+  name?: string;
 }
 
 export interface LoadTimeline {
@@ -286,6 +372,11 @@ export interface Viewer {
   hasGeometry(expressID: number): boolean;
   /** World AABB of one element, in viewport coordinates. Null without geometry. */
   getElementBounds(expressID: number): ModelBounds | null;
+  /**
+   * The CPU-side triangles kept as the model streamed in, for analysis that
+   * needs real surfaces rather than boxes. The clash engine reads it.
+   */
+  getTriangles(): TriangleStore;
   /** Offset subtracted from IFC coordinates to keep large models precise. */
   getModelOrigin(): [number, number, number];
   isElementVisible(expressID: number): boolean;
@@ -294,10 +385,17 @@ export interface Viewer {
   isCategoryVisible(category: LazyCategory): boolean;
   /** Performance HUD visibility. */
   setPerfHud(visible: boolean): void;
+  /** Skip instanced entries smaller than this on screen; 0 draws everything. */
+  setLodThreshold(pixels: number): void;
+  getLodThreshold(): number;
+  /** Instanced entries the last frame skipped as too small to see. */
+  getLodCulled(): number;
   /** Re-read the host's theme variables and recolor the viewport. */
   updateTheme(): void;
   fitToModel(): CameraPose;
   fitToElement(expressID: number): CameraPose | null;
+  /** Frame an arbitrary point, such as where two elements collide. */
+  fitToPoint(point: [number, number, number], radius?: number): CameraPose;
   /** Frame the model from a preset direction. */
   viewFrom(view: ViewPreset): void;
   /** Axis-aligned section plane; replaces whatever is active. */
@@ -309,6 +407,25 @@ export interface Viewer {
   onSectionChange(listener: () => void): () => void;
   clearSection(): void;
   getSection(): SectionState | null;
+  // -- federation ------------------------------------------------------------
+  /** Open a model beside the ones already loaded, rather than replacing them. */
+  addModel(source: Uint8Array | LoadSource, options?: ViewerLoadOptions): Promise<FederatedModel>;
+  /** Drop one model and everything pointing at its elements. */
+  unloadModel(index: number): void;
+  getModels(): FederatedModel[];
+  setModelVisible(index: number, visible: boolean): void;
+  isModelVisible(index: number): boolean;
+  /** Nudge one model, for files that disagree about the shared origin. */
+  setModelTransform(index: number, offset: [number, number, number]): void;
+  getModelTransform(index: number): [number, number, number];
+
+  /** Six planes at once. Replaces any per-axis section, and vice versa. */
+  setSectionBox(box: SectionBox | null): void;
+  getSectionBox(): SectionBox | null;
+  /** The model's full extent, i.e. the box before the user narrows it. */
+  getModelBox(): SectionBox;
+  /** A padded box around these elements, or null when none has geometry. */
+  boxAround(expressIDs: number[], pad?: number): SectionBox | null;
   /** Floorplan inset in the corner of the viewport; follows the section. */
   setPlanView(on: boolean): void;
   isPlanView(): boolean;
@@ -322,6 +439,8 @@ export interface Viewer {
   /** Close the ring being drawn. False when there are not yet three points. */
   closeArea(): boolean;
   removeShapeMeasure(id: number): void;
+  /** Spans plus finished shapes, for anything that reports what is placed. */
+  getMeasureCount(): number;
 
   /** Two-click distance measurement; returns the new mode state. */
   toggleMeasure(): boolean;
@@ -362,6 +481,8 @@ export interface Viewer {
   resize(width: number, height: number): void;
   render(): void;
   isReady(): boolean;
+  /** True while a load or an add is still streaming. */
+  isLoading(): boolean;
   dispose(): void;
 }
 
@@ -389,7 +510,11 @@ class ViewerImpl implements Viewer {
   private readonly loadingOverlay: LoadingOverlay | null;
   private readonly errorCard: ErrorCard;
   private initialized: Promise<AsyncIfcEngine> | null = null;
-  private currentModelID: number | null = null;
+  /** Open models by slot index. Slot 0 is the one `load()` replaces. */
+  private readonly models = new Map<number, ModelEntry>();
+  /** Triangles kept for analysis; fed by every ingest, read by the clash engine. */
+  private readonly triangles = new TriangleStore();
+  private nextModelIndex = 0;
   private stats: ModelStats | null = null;
   private timeline: LoadTimeline | null = null;
   private ready = false;
@@ -405,12 +530,20 @@ class ViewerImpl implements Viewer {
   private visFuture: VisibilityStep[] = [];
   private cachedTree: SpatialNode | null = null;
   private measuring = false;
-  /** Placed spans, oldest first; they stack until removed or reset. */
+  /** Last hover answer, so the cursor class is written only when it changes. */
+  private overHandle = false;
+  /**
+   * Placed spans, oldest first; they stack until removed or reset. A span with
+   * a `shape` belongs to an angle or a ring and is drawn, not listed: it is the
+   * shape's leg, so it is removed with the shape rather than on its own.
+   * PENDING_SHAPE marks the legs of the shape still being placed.
+   */
   private spans: Array<{
     id: number;
     a: [number, number, number];
     b: [number, number, number];
     ends: [SnapKind, SnapKind];
+    shape?: number;
   }> = [];
   private spanSeq = 0;
   /** First point of the span in hand, if one is being placed. */
@@ -434,6 +567,7 @@ class ViewerImpl implements Viewer {
   private planFrame: HTMLElement | null = null;
   private planSize = 0;
   private sections: SectionState[] = [];
+  private box: SectionBox | null = null;
   private drag: { axis: SectionState['axis']; grabbed: number; base: number } | null = null;
   private readonly sectionListeners = new Set<() => void>();
   private readonly loadedCategories = new Set<LazyCategory>();
@@ -486,7 +620,7 @@ class ViewerImpl implements Viewer {
         // Escape drops the shape in hand first, then leaves the tool, so a
         // misplaced point never costs the whole session.
         if (this.chain.length) {
-          this.chain = [];
+          this.dropPending();
           return this.pushMeasure();
         }
         if (this.measureA) return this.cancelPending();
@@ -521,7 +655,13 @@ class ViewerImpl implements Viewer {
       },
       onHover: (x, y, clientX, clientY) => {
         const over = this.scene.pickSectionHandle(x, y) !== null;
-        this.container.classList.toggle('ifc-over-handle', over);
+        // Only touch the DOM when the answer changed. Writing the same class
+        // on every move invalidates style, and the next move's rect read then
+        // forces a full layout: one recalc per mouse move for nothing.
+        if (over !== this.overHandle) {
+          this.overHandle = over;
+          this.container.classList.toggle('ifc-over-handle', over);
+        }
         if (this.measuring) this.queueMeasureHover(clientX, clientY);
       },
     });
@@ -635,10 +775,12 @@ class ViewerImpl implements Viewer {
 
     this.scene.setHighlighted([]);
     this.scene.clearModel();
-    if (this.currentModelID !== null) {
-      engine.dispose(this.currentModelID);
-      this.currentModelID = null;
-    }
+    this.triangles.clear();
+    // load() replaces: every federated model goes, and the next one starts
+    // again at slot 0, where packed ids are the raw expressIDs.
+    for (const entry of this.models.values()) engine.dispose(entry.modelID);
+    this.models.clear();
+    this.nextModelIndex = 0;
     if (this.selection.size) {
       this.selection.clear();
       this.primary = null;
@@ -660,8 +802,9 @@ class ViewerImpl implements Viewer {
     this.stats = null;
     // The scene already dropped the clip planes; tell subscribers the section
     // is gone so anything following it (plan inset, chips) resets too.
-    if (this.sections.length) {
+    if (this.sections.length || this.box) {
       this.sections = [];
+      this.box = null;
       this.emitSection();
     }
     this.setMeasuring(false);
@@ -692,6 +835,7 @@ class ViewerImpl implements Viewer {
           if (token !== this.loadToken) return;
           const u0 = performance.now();
           this.scene.addMeshes(meshes);
+          this.triangles.add(meshes, 0);
           uploadMs += performance.now() - u0;
           if (firstBatch) {
             firstBatch = false;
@@ -708,8 +852,16 @@ class ViewerImpl implements Viewer {
       });
       if (token !== this.loadToken) throw new CancelledError();
 
-      this.currentModelID = meta.modelID;
       this.stats = { ...meta.stats, uploadMs };
+      this.models.set(0, {
+        index: 0,
+        modelID: meta.modelID,
+        name: options.name ?? 'Model',
+        tree: meta.tree,
+        stats: this.stats,
+        categories: this.loadedCategories,
+      });
+      this.nextModelIndex = 1;
       this.cachedTree = meta.tree;
       timeline.downloadMs = meta.stats.downloadMs;
       timeline.parseMs = meta.stats.parseMs;
@@ -753,6 +905,178 @@ class ViewerImpl implements Viewer {
     if (this.loading) this.engine?.cancel();
   }
 
+  // -- federation ------------------------------------------------------------
+  /**
+   * Add a model beside the ones already open, rather than replacing them.
+   *
+   * The new model takes the next slot, and every id it mints is packed with
+   * that slot, so an expressID that exists in two files no longer collides.
+   * Slot 0 packs to itself, which is why one open model is byte for byte what
+   * it was before federation existed.
+   *
+   * Loads are serialised: the batcher shares one origin across models, and two
+   * concurrent ingests would race to set it.
+   */
+  async addModel(source: Uint8Array | LoadSource, options: ViewerLoadOptions = {}): Promise<FederatedModel> {
+    if (this.models.size === 0) {
+      await this.load(source, options);
+      return this.getModels()[0];
+    }
+    if (this.loading) throw new Error('another model is still loading');
+    const engine = await this.ensureInit();
+    const index = this.nextModelIndex++;
+    const token = ++this.loadToken;
+    this.loading = true;
+    this.loadingOverlay?.show();
+    this.scene.setStreamingMode(true);
+
+    const normalized: LoadSource =
+      source instanceof Uint8Array ? { kind: 'bytes', bytes: source } : source;
+    let uploadMs = 0;
+    try {
+      const meta = await engine.loadModel(normalized, {
+        onProgress: (p) => {
+          if (token !== this.loadToken) return;
+          this.loadingOverlay?.update(p);
+          options.onProgress?.(p);
+        },
+        onMeshBatch: (meshes) => {
+          if (token !== this.loadToken) return;
+          const u0 = performance.now();
+          this.scene.addMeshes(meshes, index);
+          this.triangles.add(meshes, index);
+          uploadMs += performance.now() - u0;
+        },
+      });
+      if (token !== this.loadToken) throw new CancelledError();
+      this.models.set(index, {
+        index,
+        modelID: meta.modelID,
+        name: options.name ?? `Model ${index + 1}`,
+        tree: meta.tree ? packTree(meta.tree, index) : null,
+        stats: { ...meta.stats, uploadMs },
+        categories: new Set(),
+      });
+      this.afterModelSetChanged();
+      this.scene.setStreamingMode(false);
+      this.scene.render();
+      this.loadingOverlay?.hide();
+      this.loading = false;
+      for (const listener of this.modelLoadedListeners) listener();
+      return this.getModels().find((model) => model.index === index)!;
+    } catch (err) {
+      this.nextModelIndex = Math.max(this.nextModelIndex, index + 1);
+      this.scene.removeModel(index);
+      this.models.delete(index);
+      this.scene.setStreamingMode(false);
+      this.loading = false;
+      this.loadingOverlay?.hide();
+      if (token === this.loadToken && !(err instanceof CancelledError)) {
+        this.errorCard.show(err instanceof Error ? err.message : String(err));
+      }
+      throw err;
+    }
+  }
+
+  /** Drop one model. Unloading the last one leaves an empty viewer. */
+  unloadModel(index: number): void {
+    const entry = this.models.get(index);
+    if (!entry) return;
+    this.engine?.dispose(entry.modelID);
+    this.scene.removeModel(index);
+    this.triangles.dropModel(index);
+    this.models.delete(index);
+    // Anything pointing at its elements is stale the moment they are gone.
+    for (const id of [...this.selection]) {
+      if (modelOf(id) === index) this.selection.delete(id);
+    }
+    if (this.primary !== null && modelOf(this.primary) === index) this.primary = null;
+    for (const id of [...this.hiddenIds]) {
+      if (modelOf(id) === index) this.hiddenIds.delete(id);
+    }
+    this.rules = this.rules
+      .map((rule) => ({ ...rule, ids: rule.ids.filter((id) => modelOf(id) !== index) }))
+      .filter((rule) => rule.ids.length > 0);
+    for (const id of [...this.propsCache.keys()]) {
+      if (modelOf(id) === index) this.propsCache.delete(id);
+    }
+    this.afterModelSetChanged();
+    this.emitSelection();
+    this.commitVisibility();
+    for (const listener of this.modelLoadedListeners) listener();
+  }
+
+  getModels(): FederatedModel[] {
+    return [...this.models.values()]
+      .sort((a, b) => a.index - b.index)
+      .map((entry) => ({
+        index: entry.index,
+        name: entry.name,
+        visible: this.scene.isModelVisible(entry.index),
+        offset: this.scene.getModelTransform(entry.index),
+        elements: entry.stats?.meshCount ?? 0,
+        triangles: entry.stats?.triangleCount ?? 0,
+      }));
+  }
+
+  setModelVisible(index: number, visible: boolean): void {
+    if (!this.models.has(index)) return;
+    this.scene.setModelVisible(index, visible);
+    this.commitVisibility();
+  }
+
+  isModelVisible(index: number): boolean {
+    return this.scene.isModelVisible(index);
+  }
+
+  /** Nudge one model, for files that disagree about the shared origin. */
+  setModelTransform(index: number, offset: [number, number, number]): void {
+    if (!this.models.has(index)) return;
+    this.scene.setModelTransform(index, offset);
+    this.commitVisibility();
+  }
+
+  getModelTransform(index: number): [number, number, number] {
+    return this.scene.getModelTransform(index);
+  }
+
+  /**
+   * Recompose everything derived from the set of open models: the tree the
+   * panels walk, and every cache keyed on it.
+   */
+  private afterModelSetChanged(): void {
+    const entries = [...this.models.values()].sort((a, b) => a.index - b.index);
+    const trees = entries.filter((entry) => entry.tree).map((entry) => entry);
+    if (trees.length === 0) this.cachedTree = null;
+    else if (trees.length === 1) this.cachedTree = trees[0].tree;
+    else {
+      // A synthetic root over the per-model projects, so the tree panel walks
+      // one structure and every node id still names its own model.
+      this.cachedTree = {
+        expressID: 0,
+        type: 'IfcProjectLibrary',
+        name: 'Federated models',
+        children: trees.map((entry) => ({
+          ...(entry.tree as SpatialNode),
+          name: entry.name,
+        })),
+      };
+    }
+    this.nodeIndex = null;
+    this.subtreeCache.clear();
+    this.subtreeVisible.clear();
+    this.stats = entries.reduce<ModelStats | null>((sum, entry) => {
+      if (!entry.stats) return sum;
+      if (!sum) return { ...entry.stats };
+      return {
+        ...sum,
+        totalEntities: sum.totalEntities + entry.stats.totalEntities,
+        meshCount: sum.meshCount + entry.stats.meshCount,
+        triangleCount: sum.triangleCount + entry.stats.triangleCount,
+      };
+    }, null);
+  }
+
   /**
    * Everything the load prologue resets, without a model to put back. The
    * parser engine stays warm, so the next open is still a fast one, and the
@@ -768,10 +1092,10 @@ class ViewerImpl implements Viewer {
     this.loadingOverlay?.hide();
     this.scene.setHighlighted([]);
     this.scene.clearModel();
-    if (this.currentModelID !== null) {
-      this.engine?.dispose(this.currentModelID);
-      this.currentModelID = null;
-    }
+    this.triangles.clear();
+    for (const entry of this.models.values()) this.engine?.dispose(entry.modelID);
+    this.models.clear();
+    this.nextModelIndex = 0;
     if (this.selection.size) {
       this.selection.clear();
       this.primary = null;
@@ -789,8 +1113,9 @@ class ViewerImpl implements Viewer {
     this.propsCache.clear();
     this.stats = null;
     this.timeline = null;
-    if (this.sections.length) {
+    if (this.sections.length || this.box) {
       this.sections = [];
+      this.box = null;
       this.emitSection();
     }
     this.setPlanView(false);
@@ -807,12 +1132,19 @@ class ViewerImpl implements Viewer {
 
   async getCountsByType(): Promise<Record<string, number>> {
     if (this.stats?.countsByType) return this.stats.countsByType;
-    if (this.currentModelID === null || !this.engine) return {};
+    const engine = this.engine;
+    if (!engine || this.models.size === 0) return {};
     const token = this.loadToken;
-    const counts = await this.engine.getCountsByType(this.currentModelID);
+    const each = await Promise.all(
+      [...this.models.values()].map((entry) => engine.getCountsByType(entry.modelID)),
+    );
     // Counts for the model that was open when this started say nothing about
     // the one that replaced it while it ran.
     if (token !== this.loadToken) return {};
+    const counts: Record<string, number> = {};
+    for (const one of each) {
+      for (const [type, n] of Object.entries(one)) counts[type] = (counts[type] ?? 0) + n;
+    }
     if (this.stats) this.stats.countsByType = counts;
     return counts;
   }
@@ -832,13 +1164,17 @@ class ViewerImpl implements Viewer {
   /** Cached: the status bar, the panel and the assistant all ask for the same
    *  element, and every miss is a worker round trip. */
   async getProperties(expressID: number): Promise<ItemProperties | null> {
-    if (this.currentModelID === null || !this.engine) return null;
+    if (!this.engine) return null;
+    // The id names its own model, so a #1234 in the services file is never
+    // answered by the #1234 in the architecture file.
+    const entry = this.models.get(modelOf(expressID));
+    if (!entry) return null;
     const hit = this.propsCache.get(expressID);
     if (hit !== undefined) return hit;
     const token = this.loadToken;
     let props: ItemProperties | null;
     try {
-      props = await this.engine.getItemProperties(this.currentModelID, expressID);
+      props = await this.engine.getItemProperties(entry.modelID, expressOf(expressID));
     } catch {
       props = null;
     }
@@ -1085,6 +1421,19 @@ class ViewerImpl implements Viewer {
     this.scene.render();
   }
 
+  setLodThreshold(pixels: number): void {
+    this.scene.setLodThreshold(pixels);
+    this.scene.render();
+  }
+
+  getLodThreshold(): number {
+    return this.scene.getLodThreshold();
+  }
+
+  getLodCulled(): number {
+    return this.scene.getLodCulled();
+  }
+
   isGhostHidden(): boolean {
     return this.scene.isGhostHidden();
   }
@@ -1201,6 +1550,10 @@ class ViewerImpl implements Viewer {
     return this.scene.getElementBounds(expressID);
   }
 
+  getTriangles(): TriangleStore {
+    return this.triangles;
+  }
+
   getModelOrigin(): [number, number, number] {
     return this.scene.getModelOrigin();
   }
@@ -1210,27 +1563,39 @@ class ViewerImpl implements Viewer {
   }
 
   async setCategoryVisible(category: LazyCategory, visible: boolean): Promise<void> {
-    if (this.currentModelID === null || !this.engine) return;
+    const engine = this.engine;
+    if (!engine || this.models.size === 0) return;
     // Flag first so isCategoryVisible reflects the toggle immediately; meshes
     // stream in behind it.
     this.scene.setCategoryVisible(category, visible);
-    if (visible && !this.loadedCategories.has(category)) {
+    if (visible) {
       const token = this.loadToken;
+      // Each model streams its own spaces into its own slot, so their ids stay
+      // separate and each batch lands in the right group.
+      const pending = [...this.models.values()].filter((entry) => !entry.categories.has(category));
+      for (const entry of pending) entry.categories.add(category);
       this.loadedCategories.add(category);
       try {
-        await this.engine.loadCategory(this.currentModelID, category, (meshes) => {
-          // A model switch mid-stream would otherwise pour the old model's
-          // spaces into the new model's batcher.
-          if (token === this.loadToken) this.scene.addMeshes(meshes);
-        });
+        await Promise.all(
+          pending.map((entry) =>
+            engine.loadCategory(entry.modelID, category, (meshes) => {
+              // A model switch mid-stream would otherwise pour the old model's
+              // spaces into the new model's batcher.
+              if (token !== this.loadToken) return;
+              this.scene.addMeshes(meshes, entry.index);
+              this.triangles.add(meshes, entry.index);
+            }),
+          ),
+        );
       } catch (err) {
+        for (const entry of pending) entry.categories.delete(category);
         this.loadedCategories.delete(category);
         throw err;
       }
       if (token !== this.loadToken) return;
       // Subtree lists computed before these arrived are short by exactly them.
       this.subtreeCache.clear();
-    this.subtreeVisible.clear();
+      this.subtreeVisible.clear();
     }
     this.applyVisibility();
   }
@@ -1265,6 +1630,12 @@ class ViewerImpl implements Viewer {
     return pose;
   }
 
+  fitToPoint(point: [number, number, number], radius = 1): CameraPose {
+    const pose = this.controls.fitToPoint(point, radius);
+    this.scene.render();
+    return pose;
+  }
+
   viewFrom(view: ViewPreset): void {
     this.controls.viewFrom(view);
     this.scene.render();
@@ -1278,8 +1649,60 @@ class ViewerImpl implements Viewer {
     // One plane per axis: a second X plane would just fight the first.
     const byAxis = new Map(states.map((state) => [state.axis, state]));
     this.sections = [...byAxis.values()];
-    this.scene.setClipPlanes(this.sections);
-    this.scene.setSectionHandles(this.sections);
+    // A box is six planes on the same three axes, so the two cannot both be
+    // on; whichever the user reached for last wins.
+    if (this.sections.length) this.box = null;
+    this.applyClipping();
+  }
+
+  /**
+   * Six planes around a volume. Kept separate from the per-axis sections so
+   * `getSections()` still answers for those alone: storey cuts, viewpoints and
+   * BCF all round-trip section planes and would otherwise pick up half a box.
+   */
+  setSectionBox(box: SectionBox | null): void {
+    this.box = box ? sanitizeBox(box) : null;
+    if (this.box) this.sections = [];
+    this.applyClipping();
+  }
+
+  getSectionBox(): SectionBox | null {
+    return this.box ? { min: [...this.box.min], max: [...this.box.max] } : null;
+  }
+
+  /** The model's own extent, as the starting box before the user narrows it. */
+  getModelBox(): SectionBox {
+    const b = this.scene.getBounds();
+    return { min: [b.min.x, b.min.y, b.min.z], max: [b.max.x, b.max.y, b.max.z] };
+  }
+
+  /** A box around these elements, padded so their own faces are not clipped. */
+  boxAround(expressIDs: number[], pad = 0.05): SectionBox | null {
+    const min: [number, number, number] = [Infinity, Infinity, Infinity];
+    const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+    let found = 0;
+    for (const id of expressIDs) {
+      const bounds = this.scene.getElementBounds(id);
+      if (!bounds) continue;
+      found++;
+      const lo = [bounds.min.x, bounds.min.y, bounds.min.z];
+      const hi = [bounds.max.x, bounds.max.y, bounds.max.z];
+      for (let i = 0; i < 3; i++) {
+        if (lo[i] < min[i]) min[i] = lo[i];
+        if (hi[i] > max[i]) max[i] = hi[i];
+      }
+    }
+    if (!found) return null;
+    return padBox({ min, max }, pad);
+  }
+
+  /** The one place clip planes are computed, from whichever state is active. */
+  private applyClipping(): void {
+    const planes = this.box ? boxPlanes(this.box) : this.sections;
+    this.scene.setClipPlanes(planes);
+    // Arrows belong to the per-axis tool; the box shows its own wireframe.
+    this.scene.setSectionHandles(this.box ? [] : this.sections);
+    this.scene.setSectionBoxOutline(this.box);
     this.scene.render();
     this.emitSection();
   }
@@ -1300,8 +1723,10 @@ class ViewerImpl implements Viewer {
 
   clearSection(): void {
     this.sections = [];
+    this.box = null;
     this.scene.clearClipPlane();
     this.scene.setSectionHandles([]);
+    this.scene.setSectionBoxOutline(null);
     this.scene.render();
     this.emitSection();
   }
@@ -1354,7 +1779,12 @@ class ViewerImpl implements Viewer {
     this.measuring = on;
     this.container.classList.toggle('ifc-measuring', on);
     this.controls.setToolActive(on);
-    if (!on) return this.resetMeasure();
+    // Placed measurements outlive the tool: they are part of the view, and the
+    // filter chip or the tool's own Clear is what takes them off.
+    if (!on) {
+      this.dropPending();
+      return this.cancelPending();
+    }
     this.scene.render();
     this.emitMeasure();
   }
@@ -1420,12 +1850,15 @@ class ViewerImpl implements Viewer {
         false,
       );
     }
-    const last = this.spans[this.spans.length - 1];
+    const placed = this.spans.filter((span) => span.shape === undefined);
+    const last = placed[placed.length - 1];
     return last ? this.spanMetrics(last.a, last.b, last.ends, last.id, true) : null;
   }
 
   getMeasurements(): Measurement[] {
-    return this.spans.map((span) => this.spanMetrics(span.a, span.b, span.ends, span.id, true));
+    return this.spans
+      .filter((span) => span.shape === undefined)
+      .map((span) => this.spanMetrics(span.a, span.b, span.ends, span.id, true));
   }
 
   removeMeasurement(id: number): void {
@@ -1462,11 +1895,8 @@ class ViewerImpl implements Viewer {
    */
   private measureDown(clientX: number, clientY: number): void {
     // Angle and area place their point on release, so the press only has to
-    // arm the gesture and keep the hover honest.
-    if (this.measureMode !== 'distance') {
-      this.measureOpening = this.chain.length === 0;
-      return this.queueMeasureHover(clientX, clientY);
-    }
+    // keep the hover honest.
+    if (this.measureMode !== 'distance') return this.queueMeasureHover(clientX, clientY);
     if (this.measureA) {
       this.measureOpening = false; // this gesture closes the span
       return this.queueMeasureHover(clientX, clientY);
@@ -1508,21 +1938,42 @@ class ViewerImpl implements Viewer {
 
     this.chain.push(point);
     if (last) {
-      this.spans.push({ id: ++this.spanSeq, a: last, b: point, ends: ['surface', hit.kind] });
+      this.spans.push({
+        id: ++this.spanSeq,
+        a: last,
+        b: point,
+        ends: ['surface', hit.kind],
+        shape: PENDING_SHAPE,
+      });
     }
     this.measureHover = hit;
     if (this.measureMode === 'angle' && this.chain.length === 3) {
       const [a, b, c] = this.chain;
+      const id = ++this.shapeSeq;
       this.shapes.push({
-        id: ++this.shapeSeq,
+        id,
         kind: 'angle',
         points: [a, b, c],
         angle: angleAt(a, b, c),
         perimeter: ringPerimeter([a, b, c], false),
       });
+      this.adoptPending(id);
       this.chain = [];
     }
     this.pushMeasure();
+  }
+
+  /** Hand the legs drawn so far to the shape that just closed over them. */
+  private adoptPending(shape: number): void {
+    for (const span of this.spans) {
+      if (span.shape === PENDING_SHAPE) span.shape = shape;
+    }
+  }
+
+  /** Throw away the half-drawn shape: its points and the legs between them. */
+  private dropPending(): void {
+    this.chain = [];
+    this.spans = this.spans.filter((span) => span.shape !== PENDING_SHAPE);
   }
 
   /** A click within this of the first point counts as closing the ring. */
@@ -1539,19 +1990,22 @@ class ViewerImpl implements Viewer {
   closeArea(): boolean {
     if (this.measureMode !== 'area' || this.chain.length < 3) return false;
     const points = this.chain;
+    const id = ++this.shapeSeq;
     this.spans.push({
       id: ++this.spanSeq,
       a: points[points.length - 1],
       b: points[0],
       ends: ['surface', 'surface'],
+      shape: PENDING_SHAPE,
     });
     this.shapes.push({
-      id: ++this.shapeSeq,
+      id,
       kind: 'area',
       points: [...points],
       area: ringArea(points),
       perimeter: ringPerimeter(points, true),
     });
+    this.adoptPending(id);
     this.chain = [];
     this.pushMeasure();
     return true;
@@ -1561,7 +2015,7 @@ class ViewerImpl implements Viewer {
     if (this.measureMode === mode) return;
     this.measureMode = mode;
     // A half-drawn shape means nothing in the mode that replaces it.
-    this.chain = [];
+    this.dropPending();
     this.measureA = null;
     this.measureAKind = null;
     this.pushMeasure();
@@ -1582,15 +2036,22 @@ class ViewerImpl implements Viewer {
   removeShapeMeasure(id: number): void {
     const before = this.shapes.length;
     this.shapes = this.shapes.filter((shape) => shape.id !== id);
-    if (this.shapes.length !== before) this.pushMeasure();
+    if (this.shapes.length === before) return;
+    // The legs were only ever the shape drawing itself; they go with it.
+    this.spans = this.spans.filter((span) => span.shape !== id);
+    this.pushMeasure();
+  }
+
+  /** Everything placed: spans plus finished shapes. Drives the filter chip. */
+  getMeasureCount(): number {
+    return this.spans.filter((span) => span.shape === undefined).length + this.shapes.length;
   }
 
   private measureUp(clientX: number, clientY: number, moved: boolean): void {
     if (!this.measuring) return;
-    if (this.measureMode !== 'distance') {
-      if (this.measureOpening && !moved) return;
-      return this.chainUp(clientX, clientY);
-    }
+    // A chain places one point per click, so the two-click guard the distance
+    // tool needs would swallow every one of them.
+    if (this.measureMode !== 'distance') return this.chainUp(clientX, clientY);
     if (!this.measureA) return;
     if (this.measureOpening && !moved) return;
     const hit = this.probe(clientX, clientY) ?? this.measureHover;
@@ -1640,11 +2101,16 @@ class ViewerImpl implements Viewer {
     });
   }
 
-  /** Hand every span to the overlay and tell the panels about them. */
+  /**
+   * Hand every span to the overlay and tell the panels about them. A chain
+   * rubber-bands from its last placed point, the same way a pair does from the
+   * first, so both tools show where the next click lands.
+   */
   private pushMeasure(): void {
+    const from = this.measureA ?? (this.measuring ? this.chain[this.chain.length - 1] ?? null : null);
     this.scene.setMeasure(
       this.spans,
-      this.measureA ? { a: this.measureA, end: this.measureHover?.point ?? null } : null,
+      from ? { a: from, end: this.measureHover?.point ?? null } : null,
       this.measuring ? this.measureHover?.point ?? null : null,
     );
     this.scene.render();
@@ -1666,9 +2132,24 @@ class ViewerImpl implements Viewer {
     for (const span of this.spans) {
       entries.push({ text: formatLength(length(span.a, span.b)), at: mid(span.a, span.b) });
     }
+    // The answer goes in the middle of the shape it answers for, so an angle
+    // and a ring read off the model without a trip to the panel.
+    for (const shape of this.shapes) {
+      const at: [number, number, number] = [0, 0, 0];
+      for (const point of shape.points) {
+        at[0] += point[0] / shape.points.length;
+        at[1] += point[1] / shape.points.length;
+        at[2] += point[2] / shape.points.length;
+      }
+      entries.push({
+        text: shape.kind === 'angle' ? formatAngle(shape.angle ?? 0) : formatArea(shape.area ?? 0),
+        at: shape.kind === 'angle' ? shape.points[1] : at,
+      });
+    }
     const end = this.measureHover?.point ?? null;
-    if (this.measureA && end && length(this.measureA, end) > 0) {
-      entries.push({ text: formatLength(length(this.measureA, end)), at: mid(this.measureA, end) });
+    const from = this.measureA ?? (this.measuring ? this.chain[this.chain.length - 1] ?? null : null);
+    if (from && end && length(from, end) > 0) {
+      entries.push({ text: formatLength(length(from, end)), at: mid(from, end) });
     }
     while (this.spanLabels.length < entries.length) {
       const node = this.container.ownerDocument.createElement('div');
@@ -1793,6 +2274,10 @@ class ViewerImpl implements Viewer {
     this.perfHud.onRender();
   }
 
+  isLoading(): boolean {
+    return this.loading;
+  }
+
   isReady(): boolean {
     return this.ready;
   }
@@ -1805,13 +2290,13 @@ class ViewerImpl implements Viewer {
     for (const node of this.spanLabels) node.remove();
     this.snapTag?.remove();
     this.planFrame?.remove();
-    if (this.currentModelID !== null) {
-      this.engine?.dispose(this.currentModelID);
-      this.currentModelID = null;
-    }
+    for (const entry of this.models.values()) this.engine?.dispose(entry.modelID);
+    this.models.clear();
     this.engine?.terminate();
     this.engine = null;
     this.initialized = null;
+    // Takes the clash worker with it, if one was ever started.
+    this.triangles.dispose();
     this.propertiesPanel?.dispose();
     this.treePanel?.dispose();
     this.perfHud.dispose();

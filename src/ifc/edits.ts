@@ -152,38 +152,58 @@ function detachElements(model: IfcModel, ids: Set<number>): void {
   }
 }
 
-export function applyEdit(model: IfcModel, op: EditOp): EditOutcome {
+/**
+ * Several operations against one copy, measured once around the whole batch.
+ *
+ * A spreadsheet re-import is naturally many operations, and running them one
+ * at a time would stage each separately, so every op but the last would be
+ * discarded. Folding them here means one diff, one approval, one Apply.
+ */
+export function applyEdits(model: IfcModel, ops: EditOp[]): EditOutcome {
   const before = signatures(model);
   const entityCountBefore = before.size;
   const affected: string[] = [];
-
-  if (op.op === "deleteElements") detachElements(model, new Set(op.ids));
-
-  if (op.op === "setAttribute" && !TEXT_ATTRIBUTES.has(op.attribute)) {
-    throw new Error(
-      `${op.attribute} is not a text attribute. Allowed: ${[...TEXT_ATTRIBUTES].join(", ")}.`,
-    );
-  }
-
   const failures: string[] = [];
-  for (const id of op.ids) {
-    const line = model.line(id);
-    if (!line) continue;
-    const guid = model.guidOf(id);
-    try {
-      applyToOne(model, op, id, line, guid, affected);
-    } catch (err) {
-      // One malformed entity must not lose the rest of the batch, and the
-      // report has to name it: web-ifc's own errors say nothing about which.
-      failures.push(`#${id} (${model.typeName(id)}): ${err instanceof Error ? err.message : String(err)}`);
+  const summaries: string[] = [];
+
+  // Validate the whole batch before touching anything: a rejected op halfway
+  // through would otherwise leave the copy half-edited and the report wrong.
+  for (const op of ops) {
+    if (op.op === "setAttribute" && !TEXT_ATTRIBUTES.has(op.attribute)) {
+      throw new Error(
+        `${op.attribute} is not a text attribute. Allowed: ${[...TEXT_ATTRIBUTES].join(", ")}.`,
+      );
     }
   }
 
+  for (const op of ops) {
+    if (op.op === "deleteElements") detachElements(model, new Set(op.ids));
+    const reached: string[] = [];
+    for (const id of op.ids) {
+      const line = model.line(id);
+      if (!line) continue;
+      const guid = model.guidOf(id);
+      try {
+        applyToOne(model, op, id, line, guid, reached);
+      } catch (err) {
+        // One malformed entity must not lose the rest of the batch, and the
+        // report has to name it: web-ifc's own errors say nothing about which.
+        failures.push(`#${id} (${model.typeName(id)}): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    summaries.push(summarise(op, reached.length));
+    for (const guid of reached) affected.push(guid);
+  }
+
   const diff = measure(model, before);
-  const summary = summarise(op, affected.length);
+  // One line for one op, a count for a batch: twenty summaries is not a summary.
+  const summary =
+    summaries.length <= 1
+      ? summaries[0] ?? "nothing to do"
+      : `${summaries.length} operations, ${new Set(affected).size} element(s) touched`;
   return {
     summary: failures.length ? `${summary}; ${failures.length} failed` : summary,
-    affectedGuids: affected,
+    affectedGuids: [...new Set(affected)],
     entityCountBefore,
     entityCountAfter: model.guidIndex().size,
     diff,

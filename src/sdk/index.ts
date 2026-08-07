@@ -10,18 +10,39 @@ export * from "./data.js";
 export * from "./parse.js";
 
 // Model analysis the app also uses, published here so a plugin runs the same
-// code rather than a second copy of it.
+// code rather than a second copy of it. Clash detection is triangle-level and
+// runs in a worker; a panel only has to hand it two sets of element ids.
 export {
-  boxesFor,
+  cancelClash,
   clashReport,
-  deepestHit,
-  sweepBoxes,
+  detectClashes,
+  idsOfTypes,
+  worstDepth,
   CLASH_LIMIT,
+  DEFAULT_TOLERANCE_MM,
   MEP,
   OPENINGS,
   STRUCTURE,
 } from "../ifc/clash.js";
-export type { BoxSource, ClashBox, ClashHit, ClashSweep } from "../ifc/clash.js";
+export type {
+  ClashKind,
+  ClashOptions,
+  ClashPair,
+  SweepProgress,
+  SweepResult,
+} from "../ifc/clash.js";
+
+// The ranked search the assistant uses, so a panel searches the same way.
+export { buildIndex, tokenize } from "../llm/retrieval.js";
+
+// Element identity across federated models. A plugin that groups by discipline
+// unpacks ids with these rather than assuming one file.
+export { byModel, expressOf, modelOf, packId } from "../viewer-core/ids.js";
+export type { Bm25Index, SearchHit, TextSource } from "../llm/retrieval.js";
+
+// What `ctx.publishFindings` takes, so a panel's results land in the report.
+export type { ReportFinding } from "../ui/report.js";
+
 export type {
   ModelElement,
   ModelInfo,
@@ -43,8 +64,10 @@ export type {
   IfcPropertySet,
   ItemProperties,
   Measurement,
+  FederatedModel,
   ModelBounds,
   ModelStats,
+  SectionBox,
   SectionState,
   SpatialNode,
   Vec3,

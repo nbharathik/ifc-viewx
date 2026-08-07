@@ -516,16 +516,29 @@ function digest(bytes: Uint8Array): Promise<string | null> {
 }
 
 /**
- * Transparent cache layer over any engine. Serves one model at a time, like
- * the app: incoming modelIDs are ignored and requests go to the single live
- * model, reopening it from the retained source bytes when a warm load never
- * parsed one.
+ * One loaded model as this layer sees it: the source bytes it was opened from,
+ * and the inner engine's handle once something has needed the parser.
+ *
+ * A warm load replays geometry straight out of the cache and never opens a
+ * parser at all, so `live` stays null until the first property read.
+ */
+interface Slot {
+  bytes: Uint8Array | null;
+  live: number | null;
+  opening: Promise<number> | null;
+}
+
+/**
+ * Transparent cache layer over any engine. Every load takes a slot, and the
+ * `modelID` handed back is that slot rather than the inner engine's handle,
+ * so a property read for the services model cannot be answered by the
+ * architecture model. Slots reopen their retained source bytes on demand,
+ * because a warm load never parsed one.
  */
 export class CachedEngine implements AsyncIfcEngine {
   private readonly store: Promise<ModelStore | null>;
-  private bytes: Uint8Array | null = null;
-  private liveID: number | null = null;
-  private opening: Promise<number> | null = null;
+  private readonly slots = new Map<number, Slot>();
+  private slotSeq = 0;
   private loadToken = 0;
 
   constructor(private readonly inner: AsyncIfcEngine) {
@@ -538,22 +551,26 @@ export class CachedEngine implements AsyncIfcEngine {
 
   async loadModel(source: LoadSource, options: AsyncLoadOptions = {}): Promise<LoadedModelMeta> {
     const token = ++this.loadToken;
-    this.bytes = source.kind === 'bytes' ? source.bytes : null;
-    this.liveID = null;
-    this.opening = null;
+    const slotID = this.slotSeq++;
+    const slot: Slot = {
+      bytes: source.kind === 'bytes' ? source.bytes : null,
+      live: null,
+      opening: null,
+    };
+    this.slots.set(slotID, slot);
 
     // A converted .ifcx file replays directly; no parser involved.
-    if (this.bytes && isFormatBytes(this.bytes)) {
-      return this.replayBuffer(this.bytes, options, token);
+    if (slot.bytes && isFormatBytes(slot.bytes)) {
+      return this.replayBuffer(slot.bytes, options, token, slotID);
     }
 
     const store = await this.store;
     const sha =
-      store && this.bytes && !options.skipGeometry ? await digest(this.bytes) : null;
+      store && slot.bytes && !options.skipGeometry ? await digest(slot.bytes) : null;
 
     if (store && sha) {
       const hit = await store.read(sha);
-      if (hit) return this.replay(store, hit, options, token);
+      if (hit) return this.replay(store, hit, options, token, slotID);
     }
 
     const writer = store && sha ? await store.beginWrite(sha) : null;
@@ -561,7 +578,7 @@ export class CachedEngine implements AsyncIfcEngine {
     try {
       const meta = await this.inner.loadModel(
         // Hand the worker a copy it can transfer; ours is retained for reopen.
-        this.bytes ? { kind: 'bytes', bytes: this.bytes.slice() } : source,
+        slot.bytes ? { kind: 'bytes', bytes: slot.bytes.slice() } : source,
         {
           ...options,
           onMeshBatch: (meshes: IfcMesh[]) => {
@@ -576,17 +593,20 @@ export class CachedEngine implements AsyncIfcEngine {
       );
       if (token !== this.loadToken) {
         this.inner.dispose(meta.modelID);
+        this.slots.delete(slotID);
         throw new CancelledError();
       }
-      this.liveID = meta.modelID;
+      slot.live = meta.modelID;
       if (writer) {
         void writer
           .commit({ stats: meta.stats, bounds: meta.bounds, tree: meta.tree })
           .catch(() => undefined);
       }
-      return meta;
+      // The slot, not the inner handle: callers address models through here.
+      return { ...meta, modelID: slotID };
     } catch (err) {
       if (writer) void writer.abort().catch(() => undefined);
+      this.slots.delete(slotID);
       throw err;
     }
   }
@@ -596,6 +616,7 @@ export class CachedEngine implements AsyncIfcEngine {
     bytes: Uint8Array,
     options: AsyncLoadOptions,
     token: number,
+    slotID: number,
   ): Promise<LoadedModelMeta> {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const size = bytes.byteLength;
@@ -630,7 +651,7 @@ export class CachedEngine implements AsyncIfcEngine {
       options.onProgress?.({ phase: 'geometry', entities: meshes, totalEntities, meshes });
     }
     options.onProgress?.({ phase: 'done', entities: totalEntities, totalEntities, meshes });
-    return { modelID: -1, bounds: manifest.bounds, stats: manifest.stats, tree: manifest.tree };
+    return { modelID: slotID, bounds: manifest.bounds, stats: manifest.stats, tree: manifest.tree };
   }
 
   private async replay(
@@ -638,6 +659,7 @@ export class CachedEngine implements AsyncIfcEngine {
     hit: CacheHit,
     options: AsyncLoadOptions,
     token: number,
+    slotID: number,
   ): Promise<LoadedModelMeta> {
     const registry = new GeometryRegistry();
     const totalEntities = hit.manifest.stats.totalEntities;
@@ -651,62 +673,68 @@ export class CachedEngine implements AsyncIfcEngine {
     }
     options.onProgress?.({ phase: 'done', entities: totalEntities, totalEntities, meshes });
     return {
-      modelID: -1,
+      modelID: slotID,
       bounds: hit.manifest.bounds,
       stats: { ...hit.manifest.stats, parseMs: 0, geometryMs: 0 },
       tree: hit.manifest.tree,
     };
   }
 
-  /** Open the retained bytes in the inner engine, parse only, at most once. */
-  private ensureLive(): Promise<number> {
-    if (this.liveID !== null) return Promise.resolve(this.liveID);
-    if (!this.opening) {
-      const bytes = this.bytes;
+  /**
+   * Open one slot's retained bytes in the inner engine, parse only, at most
+   * once per slot. A warm load replayed geometry from disk and never parsed,
+   * so the first property read is what pays for the parser.
+   */
+  private ensureLive(slotID: number): Promise<number> {
+    const slot = this.slots.get(slotID);
+    if (!slot) return Promise.reject(new Error(`model ${slotID} is not loaded`));
+    if (slot.live !== null) return Promise.resolve(slot.live);
+    if (!slot.opening) {
+      const bytes = slot.bytes;
       if (!bytes) return Promise.reject(new Error('no model loaded'));
       const opening: Promise<number> = this.inner
         .loadModel({ kind: 'bytes', bytes: bytes.slice() }, { skipGeometry: true })
         .then((meta) => {
-          if (this.opening !== opening) {
+          if (slot.opening !== opening) {
             this.inner.dispose(meta.modelID);
             throw new CancelledError();
           }
-          this.liveID = meta.modelID;
+          slot.live = meta.modelID;
           return meta.modelID;
         })
         .catch((err) => {
-          if (this.opening === opening) this.opening = null;
+          if (slot.opening === opening) slot.opening = null;
           throw err;
         });
-      this.opening = opening;
+      slot.opening = opening;
     }
-    return this.opening;
+    return slot.opening;
   }
 
   async loadCategory(
-    _modelID: number,
+    modelID: number,
     category: LazyCategory,
     onMeshBatch: (meshes: IfcMesh[]) => void,
   ): Promise<void> {
-    const id = await this.ensureLive();
+    const id = await this.ensureLive(modelID);
     return this.inner.loadCategory(id, category, onMeshBatch);
   }
 
-  async getItemProperties(_modelID: number, expressID: number): Promise<ItemProperties> {
-    const id = await this.ensureLive();
+  async getItemProperties(modelID: number, expressID: number): Promise<ItemProperties> {
+    const id = await this.ensureLive(modelID);
     return this.inner.getItemProperties(id, expressID);
   }
 
-  async getCountsByType(_modelID: number): Promise<Record<string, number>> {
-    const id = await this.ensureLive();
+  async getCountsByType(modelID: number): Promise<Record<string, number>> {
+    const id = await this.ensureLive(modelID);
     return this.inner.getCountsByType(id);
   }
 
-  dispose(_modelID: number): void {
-    if (this.liveID !== null) this.inner.dispose(this.liveID);
-    this.liveID = null;
-    this.opening = null;
-    this.bytes = null;
+  dispose(modelID: number): void {
+    const slot = this.slots.get(modelID);
+    if (!slot) return;
+    if (slot.live !== null) this.inner.dispose(slot.live);
+    this.slots.delete(modelID);
   }
 
   cancel(): void {

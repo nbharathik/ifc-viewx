@@ -97,7 +97,9 @@ describe("anthropic streaming", () => {
   });
 
   it("does not stream at all when no delta handler is given", async () => {
-    const fetchMock = vi.fn(async () => json({ content: [{ type: "text", text: "plain" }] }));
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
+      json({ content: [{ type: "text", text: "plain" }] }),
+    );
     vi.stubGlobal("fetch", fetchMock);
     expect(await chat(ANTHROPIC, ASK)).toBe("plain");
     const body = JSON.parse(String(fetchMock.mock.calls[0][1].body)) as { stream?: boolean };

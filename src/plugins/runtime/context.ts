@@ -3,8 +3,11 @@
 // The helpers are the whole point: a panel that only calls these keeps working
 // when core moves, and the subscriptions it makes are released for it when it
 // closes, so a plugin cannot leak a listener into the viewer.
+import { expressOf, modelOf } from "../../viewer-core/ids.js";
 import { toast } from "../../ui/kit.js";
+import { publishFindings } from "../../ui/report.js";
 import { classCounts, type PropertyIndex } from "../../sdk/data.js";
+import { detectClashes } from "../../ifc/clash.js";
 import { modelElements } from "../../llm/actions.js";
 import type {
   PluginContext,
@@ -69,6 +72,7 @@ export function createContext(manifest: PluginManifest, deps: ContextDeps): Scop
     tree: () => viewer.getSpatialTree(),
     subtree: (expressID) => viewer.getSubtreeElementIds(expressID),
     bounds: (expressID) => viewer.getElementBounds(expressID),
+    clash: (a, b, options) => detectClashes(viewer, a, b, options),
 
     select: (ids) => {
       if (ids === null) viewer.clearSelection();
@@ -83,11 +87,27 @@ export function createContext(manifest: PluginManifest, deps: ContextDeps): Scop
       if (expressID === undefined) viewer.fitToModel();
       else viewer.fitToElement(expressID);
     },
+    frameAt: (point, radius) => viewer.fitToPoint(point, radius),
     viewFrom: (view) => viewer.viewFrom(view),
     sections: () => viewer.getSections(),
     setSections: (states) => viewer.setSections(states),
+    sectionBox: () => viewer.getSectionBox(),
+    setSectionBox: (box) => viewer.setSectionBox(box),
+    boxAround: (ids, pad) => viewer.boxAround(ids, pad),
+    models: () => viewer.getModels(),
+    setModelVisible: (index, visible) => viewer.setModelVisible(index, visible),
+    modelOf,
+    expressOf,
+    colorBy: (assignment, colors) => {
+      if (assignment.size) viewer.setColorOverride(assignment, colors);
+      else viewer.clearColorOverride();
+    },
 
     on: (event, handler) => void bag.push(subscribe(event, handler)),
+    // Findings are keyed by plugin id, so a re-run replaces the last set
+    // rather than stacking a second copy into the report.
+    publishFindings: (summary, findings) =>
+      publishFindings({ id: manifest.id, source: manifest.name, summary, findings }),
     log: (text, kind) => deps.log(text, kind),
     toast: (text, kind) => toast(text, kind),
     run: (commandId) => deps.runCommand(commandId),

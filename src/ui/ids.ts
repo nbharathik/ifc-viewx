@@ -1,13 +1,28 @@
 // IDS: load a buildingSMART Information Delivery Specification and check the
-// model against it in this tab. Entity, attribute and property facets are
-// evaluated. Classification, material and partOf need data the viewer does not
-// carry, so they are listed as unchecked rather than silently passed.
+// model against it in this tab. Entity, attribute, property and partOf facets
+// are evaluated; partOf reads the spatial tree, which already holds the
+// containment and aggregation chain.
+//
+// Classification and material need relations the viewer does not read yet, so
+// they are reported as unsupported rather than passed. That distinction is the
+// whole point of this file: a facet that cannot be evaluated must never answer
+// a test, because in applicability a silent `true` matches the entire model
+// and every result below it describes the wrong set of elements.
 import { h, icon, spinner } from "./kit.js";
 import { emptyState } from "./shell.js";
 import { scanElements } from "./filters.js";
-import type { ItemProperties, Viewer } from "../viewer-core/viewer.js";
+import type { ItemProperties, Viewer, SpatialNode } from "../viewer-core/viewer.js";
 
 type Matcher = (value: string) => boolean;
+
+/**
+ * What a facet knows besides the element's own properties. Today that is its
+ * spatial ancestry, which is what `partOf` asks about and what no property
+ * read can answer.
+ */
+export interface FacetContext {
+  ancestors(expressID: number): Array<{ type: string; name: string }>;
+}
 
 interface Facet {
   kind: string;
@@ -15,7 +30,7 @@ interface Facet {
   label: string;
   /** Prefilter on the IFC class, so a spec only reads what it is about. */
   typeTest?: (type: string) => boolean;
-  test(props: ItemProperties): boolean;
+  test(props: ItemProperties, context: FacetContext): boolean;
 }
 
 interface Spec {
@@ -33,6 +48,13 @@ interface SpecResult {
   truncated: boolean;
   /** Elements the viewer could not read at all (geometry-only .ifcx). */
   unreadable: number;
+  /**
+   * Applicability facets this app cannot evaluate. Non-empty means the spec
+   * was NOT run: without applicability there is no way to know which elements
+   * it covers, and reporting a pass over the wrong set is worse than
+   * reporting nothing.
+   */
+  blocked: string[];
 }
 
 interface IdsDocument {
@@ -51,9 +73,11 @@ let loaded: IdsDocument | null = null;
 const loadedIds = (): IdsDocument | null => loaded;
 
 /** Parse and install, which is the only way a document becomes the loaded one. */
-function loadIds(text: string, fileName: string): IdsDocument {
+export function loadIds(text: string, fileName: string): IdsDocument {
   const parsed = parseIds(text);
   loaded = { title: parsed.title, fileName, specs: parsed.specs };
+  // Results belong to the document that produced them.
+  last = null;
   return loaded;
 }
 
@@ -186,7 +210,53 @@ function readFacet(node: Element): Facet {
       },
     };
   }
-  return { kind, supported: false, label: kind, test: () => true };
+  // partOf: is this element inside something of a given class, and optionally
+  // with a given name. The spatial tree already holds the containment and
+  // aggregation chain, so this needs no new engine call. Relations outside
+  // the spatial hierarchy (nesting, voiding) are not answered from it, and
+  // the label says which relation was asked for.
+  if (kind === "partOf") {
+    const entity = child(node, "entity");
+    const name = matcher(entity ? child(entity, "name") : null);
+    const relation = (attribute(node, "relation") || "").toUpperCase();
+    const spatial =
+      relation === "" ||
+      relation === "IFCRELCONTAINEDINSPATIALSTRUCTURE" ||
+      relation === "IFCRELAGGREGATES";
+    if (!spatial) {
+      return {
+        kind,
+        supported: false,
+        label: `part of via ${relation} (not supported by this validator)`,
+        test: () => {
+          throw new Error(`the ${relation} relation cannot be evaluated here`);
+        },
+      };
+    }
+    return {
+      kind,
+      supported: true,
+      label: `part of ${entity ? describe(child(entity, "name")) : "anything"}`,
+      test: (props, context) => {
+        const chain = context.ancestors(props.expressID);
+        if (!name) return chain.length > 0;
+        return chain.some((node_) => name(node_.type) || name(node_.name));
+      },
+    };
+  }
+
+  // An unsupported facet must never answer a test. Returning true here is how
+  // a validator quietly claims to have checked something it cannot: in
+  // applicability it would match every element in the model. Throwing means a
+  // caller that forgets the `supported` guard fails loudly instead.
+  return {
+    kind,
+    supported: false,
+    label: `${kind} (not supported by this validator)`,
+    test: () => {
+      throw new Error(`the ${kind} facet cannot be evaluated here`);
+    },
+  };
 }
 
 const readFacets = (node: Element | null): Facet[] =>
@@ -210,14 +280,42 @@ function parseIds(text: string): { title: string; specs: Spec[] } {
   return { title: (info && child(info, "title")?.textContent) || "IDS", specs };
 }
 
+/**
+ * Every element's spatial ancestry, walked once from the tree. Building it per
+ * element would be a tree walk per element; a spec over ten thousand walls
+ * would walk the tree ten thousand times.
+ */
+export function spatialContext(viewer: Viewer): FacetContext {
+  const chains = new Map<number, Array<{ type: string; name: string }>>();
+  const tree = viewer.getSpatialTree();
+  if (tree) {
+    const walk = (node: SpatialNode, above: Array<{ type: string; name: string }>): void => {
+      chains.set(node.expressID, above);
+      const below = [...above, { type: node.type, name: node.name ?? "" }];
+      for (const kid of node.children) walk(kid, below);
+    };
+    walk(tree, []);
+  }
+  return { ancestors: (expressID) => chains.get(expressID) ?? [] };
+}
+
 async function runSpec(
   viewer: Viewer,
   spec: Spec,
   onProgress: (done: number, total: number) => void,
 ): Promise<SpecResult> {
+  // Applicability decides which elements the specification is about. If any
+  // part of it cannot be evaluated, the covered set is unknown, so the whole
+  // specification is reported as not run rather than run over the wrong set.
+  const blocked = [...new Set(spec.applicability.filter((facet) => !facet.supported).map((facet) => facet.kind))];
+  if (blocked.length) {
+    return { spec, applicable: 0, passed: 0, failures: [], truncated: false, unreadable: 0, blocked };
+  }
+
   const types = viewer.getElementTypes();
   const prefilters = spec.applicability.map((facet) => facet.typeTest).filter(Boolean) as Array<(type: string) => boolean>;
   const candidates = [...types].filter(([, type]) => prefilters.every((test) => test(type))).map(([id]) => id);
+  const context = spatialContext(viewer);
 
   const reasons = new Map<number, string>();
   let applicable = 0;
@@ -226,9 +324,9 @@ async function runSpec(
     viewer,
     candidates,
     (props) => {
-      if (!spec.applicability.every((facet) => facet.test(props))) return false;
+      if (!spec.applicability.every((facet) => facet.test(props, context))) return false;
       applicable++;
-      const failed = spec.requirements.find((facet) => facet.supported && !facet.test(props));
+      const failed = spec.requirements.find((facet) => facet.supported && !facet.test(props, context));
       if (!failed) {
         passed++;
         return false;
@@ -245,6 +343,7 @@ async function runSpec(
     failures: found.ids.map((id) => ({ id, reason: reasons.get(id) ?? "requirement not met" })),
     truncated: found.truncated,
     unreadable: found.missing,
+    blocked: [],
   };
 }
 
@@ -268,12 +367,42 @@ async function runIds(
     results.push(result);
     onSpec?.(result, index, total);
   }
+  last = summarize(results);
   return results;
 }
 
-/** The same run, flattened to what an LLM can read in one report. */
-export async function idsReport(viewer: Viewer): Promise<Record<string, unknown>> {
-  const results = await runIds(viewer);
+export type IdsSpecReport = {
+  name: string;
+  status: "not_run" | "fail" | "pass";
+  applicable: number;
+  passed: number;
+  failed: number;
+  truncated: boolean;
+  blockedBy: string[];
+  notChecked: string[];
+  requirements: string[];
+  failures: Array<{ id: number; reason: string }>;
+};
+
+export type IdsReport = {
+  ids: string;
+  file: string;
+  specifications: IdsSpecReport[];
+  failedSpecifications: number;
+  notRunSpecifications: number;
+  readable: boolean;
+};
+
+/**
+ * The last run, whichever path ran it. The offline report shows this rather
+ * than starting its own pass, so what it prints is what the user saw.
+ */
+let last: IdsReport | null = null;
+
+export const lastIdsReport = (): IdsReport | null => last;
+
+/** One run flattened, shared by the assistant and the report. */
+function summarize(results: SpecResult[]): IdsReport {
   const applicable = results.reduce((sum, result) => sum + result.applicable, 0);
   const unreadable = results.reduce((sum, result) => sum + result.unreadable, 0);
   return {
@@ -281,19 +410,29 @@ export async function idsReport(viewer: Viewer): Promise<Record<string, unknown>
     file: loaded?.fileName ?? "",
     specifications: results.map((result) => ({
       name: result.spec.name,
+      // A blocked spec was not run at all; saying "0 applicable, 0 failed"
+      // without this reads exactly like a clean pass.
+      status: (result.blocked.length ? "not_run" : result.failures.length ? "fail" : "pass") as IdsSpecReport["status"],
       applicable: result.applicable,
       passed: result.passed,
       failed: result.failures.length,
       truncated: result.truncated,
+      blockedBy: result.blocked,
       notChecked: [...new Set([...result.spec.applicability, ...result.spec.requirements]
         .filter((facet) => !facet.supported).map((facet) => facet.kind))],
       requirements: result.spec.requirements.map((facet) => facet.label),
       failures: result.failures.slice(0, 20),
     })),
     failedSpecifications: results.filter((result) => result.failures.length > 0).length,
+    notRunSpecifications: results.filter((result) => result.blocked.length > 0).length,
     // A geometry-only .ifcx reads as a clean pass, which would be a lie.
     readable: !(applicable === 0 && unreadable > 0),
   };
+}
+
+/** The same run, flattened to what an LLM can read in one report. */
+export async function idsReport(viewer: Viewer): Promise<IdsReport> {
+  return summarize(await runIds(viewer));
 }
 
 export interface IdsActions {

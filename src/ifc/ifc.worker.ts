@@ -5,7 +5,7 @@ import { IfcAPI } from "web-ifc";
 import { IfcModel } from "./model.js";
 import { validate } from "./checks.js";
 import { schedule } from "./schedule.js";
-import { applyEdit, type EditOp } from "./edits.js";
+import { applyEdits, type EditOp } from "./edits.js";
 
 export type IfcRequest =
   | { type: "init"; id: number; wasmPath: string }
@@ -13,7 +13,8 @@ export type IfcRequest =
   | { type: "validate"; id: number }
   | { type: "schedule"; id: number; ifcType: string; properties: string[]; limit: number }
   | { type: "types"; id: number }
-  | { type: "propose"; id: number; op: EditOp };
+  | { type: "propose"; id: number; op: EditOp }
+  | { type: "proposeBatch"; id: number; ops: EditOp[] };
 
 export type IfcResponse =
   | { type: "ready"; id: number }
@@ -112,8 +113,11 @@ self.addEventListener("message", (event: MessageEvent<IfcRequest>) => {
         return post({ type: "result", id: request.id, payload: counts });
       }
 
-      if (request.type === "propose") {
-        const { value, bytes } = withCopy((copy) => applyEdit(copy, request.op));
+      if (request.type === "propose" || request.type === "proposeBatch") {
+        // One copy for the whole batch: a spreadsheet re-import is many
+        // operations that have to be approved and applied as one thing.
+        const ops = request.type === "propose" ? [request.op] : request.ops;
+        const { value, bytes } = withCopy((copy) => applyEdits(copy, ops));
         const buffer = bytes.slice().buffer as ArrayBuffer;
         return post({ type: "proposed", id: request.id, bytes: buffer, payload: value }, [buffer]);
       }

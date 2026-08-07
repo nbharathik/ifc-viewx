@@ -139,8 +139,13 @@ export class IfcEngine {
   }
 
   async propose(op: EditOp): Promise<ProposedEdit> {
+    return this.proposeBatch([op]);
+  }
+
+  /** Several ops against one copy, staged as one approval. */
+  async proposeBatch(ops: EditOp[]): Promise<ProposedEdit> {
     await this.ready();
-    const message = await this.send({ type: "propose", id: 0, op });
+    const message = await this.send({ type: "proposeBatch", id: 0, ops });
     if (message.type !== "proposed") throw new Error("unexpected response");
     return { ...(message.payload as EditOutcome), bytes: new Uint8Array(message.bytes) };
   }

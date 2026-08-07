@@ -139,6 +139,7 @@
           </select>
         </div>
         <label class="field check"><input type="checkbox" id="set-adaptive" checked  aria-describedby="set-adaptive-tip" /><span class="field-label">Adaptive resolution<span class="tip" id="set-adaptive-tip">Drops resolution while orbiting heavy scenes.</span></span></label>
+        <label class="field check"><input type="checkbox" id="set-lod" checked  aria-describedby="set-lod-tip" /><span class="field-label">Skip tiny objects<span class="tip" id="set-lod-tip">Stops drawing repeated parts smaller than a couple of pixels. On a services model this is a third of the draw calls.</span></span></label>
         <label class="field check"><input type="checkbox" id="set-doubleside" checked  aria-describedby="set-doubleside-tip" /><span class="field-label">Double-sided surfaces<span class="tip" id="set-doubleside-tip">Turn off for roughly double the fill rate; some models show holes.</span></span></label>
         <label class="field check"><input type="checkbox" id="set-aa" checked  aria-describedby="set-aa-tip" /><span class="field-label">Antialiasing<span class="tip" id="set-aa-tip">Applies after reload.</span></span></label>
         <label class="field check"><input type="checkbox" id="set-hud"  aria-describedby="set-hud-tip" /><span class="field-label">Performance HUD<span class="tip" id="set-hud-tip">Live render cost, draw calls and load timings.</span></span></label>
@@ -222,6 +223,9 @@
     </dialog>
 
     <input id="file-input" type="file" accept=".ifc,.ifcx" hidden />
+    <!-- Separate from file-input so opening and adding cannot share a change
+         handler and one path silently replace the model the other added. -->
+    <input id="attach-input" type="file" accept=".ifc,.ifcx" hidden />
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

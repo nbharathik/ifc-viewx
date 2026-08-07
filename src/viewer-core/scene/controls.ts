@@ -78,6 +78,7 @@ const CLICK_MOVE_TOLERANCE_PX = 5;
 export class ViewerControls {
   private readonly orbit: OrbitControls;
   private readonly resizeObserver: ResizeObserver | null = null;
+  private readonly viewportHandler: () => void;
   private readonly doc: Document;
   private readonly keyHandler: (e: KeyboardEvent) => void;
   private readonly dblHandler: (e: MouseEvent) => void;
@@ -140,6 +141,8 @@ export class ViewerControls {
       // Widgets floating over the canvas (dock, gizmo) own their own clicks.
       this.toolClaimed = false;
       if (e.button !== 0 || e.target !== dom) return;
+      // Layout may have moved since the last hover; a gesture starts fresh.
+      this.invalidateRect();
       const [x, y] = this.toNdc(e.clientX, e.clientY);
       if (this.handlers.onHandleDown?.(x, y)) {
         this.toolClaimed = true; // releasing a handle is not a selection either
@@ -178,6 +181,13 @@ export class ViewerControls {
 
     this.keyHandler = (e) => this.onKey(e);
     this.doc.addEventListener('keydown', this.keyHandler);
+
+    // A ResizeObserver catches the canvas changing size, but not the page
+    // scrolling or a sibling panel shifting it sideways, and both move the
+    // rect without resizing it.
+    this.viewportHandler = () => this.invalidateRect();
+    window.addEventListener('resize', this.viewportHandler);
+    window.addEventListener('scroll', this.viewportHandler, true);
 
     if (typeof ResizeObserver !== 'undefined') {
       this.resizeObserver = new ResizeObserver(() => this.onResize());
@@ -264,6 +274,28 @@ export class ViewerControls {
     return pose;
   }
 
+  /**
+   * Frame a point in space at a given working radius, keeping the current
+   * viewing direction. What a clash result zooms to: the collision itself,
+   * not the box around whichever element happens to be listed first.
+   */
+  fitToPoint(point: [number, number, number], radius: number): CameraPose {
+    const centre = new THREE.Vector3(...point);
+    const current = this.scene.camera.position.clone().sub(this.orbit.target);
+    const dir = current.lengthSq() > 1e-6 ? current : new THREE.Vector3(1, 0.8, 1);
+    const scene = this.scene.getBounds();
+    const span = new THREE.Vector3(
+      scene.max.x - scene.min.x,
+      scene.max.y - scene.min.y,
+      scene.max.z - scene.min.z,
+    ).length();
+    const safe = Math.max(radius, 0.25);
+    const pose = framePose(centre, safe, dir, this.scene.camera.fov, 1.6, this.scene.camera.aspect);
+    this.applyNearFar(safe, Number.isFinite(span) && span > 0 ? span : safe);
+    this.setPose(pose);
+    return pose;
+  }
+
   /** Frame a single element by expressID; keeps the current viewing direction. */
   fitToElement(expressID: number): CameraPose | null {
     const bounds = this.scene.getElementBounds(expressID);
@@ -291,20 +323,63 @@ export class ViewerControls {
     return pose;
   }
 
+  /**
+   * The canvas rectangle, cached.
+   *
+   * Every pointer coordinate conversion needs it, and hover runs one per mouse
+   * move. `getBoundingClientRect` forces a synchronous layout, and the hover
+   * handler writes a class immediately before it, so reading it per move was a
+   * full style and layout recalc on every move: measured at 1.65 ms per move
+   * on a 293-element model, which is most of a frame spent on nothing.
+   *
+   * Invalidated by the events that can actually move the canvas, plus at the
+   * start of every gesture, so a drag never works from a stale rect.
+   */
+  private rect: DOMRect | null = null;
+
+  private canvasRect(): DOMRect {
+    if (!this.rect) this.rect = this.scene.renderer.domElement.getBoundingClientRect();
+    return this.rect;
+  }
+
+  /** Call when anything could have moved or resized the canvas. */
+  invalidateRect(): void {
+    this.rect = null;
+  }
+
+  /**
+   * What is under a client point, from whichever view it landed in.
+   *
+   * The plan inset sits over the bottom-left of the same canvas, so a click
+   * there would otherwise be answered by the 3D camera and select whatever
+   * happens to be behind the inset. Routing it to the plan camera is what
+   * makes the two views one navigable thing rather than a picture in a corner.
+   */
   pickAt(clientX: number, clientY: number): PickResult | null {
-    const rect = this.scene.renderer.domElement.getBoundingClientRect();
-    return this.scene.pick(clientX - rect.left, clientY - rect.top);
+    const rect = this.canvasRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    const inset = this.scene.getPlanRect();
+    if (inset) {
+      // The inset rect is measured from the bottom-left, as GL viewports are.
+      const left = inset.x;
+      const top = rect.height - inset.y - inset.size;
+      if (x >= left && x <= left + inset.size && y >= top && y <= top + inset.size) {
+        return this.scene.pickInPlan(x - left, y - top);
+      }
+    }
+    return this.scene.pick(x, y);
   }
 
   /** Client coordinates to canvas CSS coordinates, which the scene picks in. */
   toCanvas(clientX: number, clientY: number): [number, number] {
-    const rect = this.scene.renderer.domElement.getBoundingClientRect();
+    const rect = this.canvasRect();
     return [clientX - rect.left, clientY - rect.top];
   }
 
   /** Client coordinates to normalized device coordinates in the canvas. */
   private toNdc(clientX: number, clientY: number): [number, number] {
-    const rect = this.scene.renderer.domElement.getBoundingClientRect();
+    const rect = this.canvasRect();
     return [
       ((clientX - rect.left) / rect.width) * 2 - 1,
       -((clientY - rect.top) / rect.height) * 2 + 1,
@@ -401,6 +476,7 @@ export class ViewerControls {
   }
 
   private onResize(): void {
+    this.invalidateRect();
     const rect = this.container.getBoundingClientRect();
     this.scene.resize(rect.width, rect.height);
     this.requestRender();
@@ -418,5 +494,7 @@ export class ViewerControls {
     dom.removeEventListener('dblclick', this.dblHandler);
     this.doc.removeEventListener('keydown', this.keyHandler);
     this.resizeObserver?.disconnect();
+    window.removeEventListener('resize', this.viewportHandler);
+    window.removeEventListener('scroll', this.viewportHandler, true);
   }
 }

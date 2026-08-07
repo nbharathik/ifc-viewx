@@ -8,17 +8,18 @@ import { listCachedModels, loadCachedSource, storeSourceBytes, type CachedModel 
 import type { LoadProgress } from "./viewer-core/engine/types.js";
 import { PythonEngine, type ProposedEdit } from "./python/pythonEngine.js";
 import { IfcEngine, type EditOp, type ValidationReport } from "./ifc/ifcEngine.js";
-import { chat, findProvider, isConfigured, isVerified, loadSettings, type ChatMessage } from "./llm/llmClient.js";
+import { isStep, sniffSchema, worthConverting } from "./ifc/format.js";
+import { chat, converse, findProvider, isConfigured, isVerified, loadSettings, type ChatMessage } from "./llm/llmClient.js";
 import { systemPrompt, repairPrompt, extractCode, stripBlock } from "./llm/prompts.js";
 import { buildModelBrief, elementCounts, elementsByType, runViewerAction, type SemanticActions } from "./llm/actions.js";
-import type { ToolAvailability } from "./llm/tools.js";
+import { callToBlock, nativeTools as toolDefs, type ToolAvailability } from "./llm/tools.js";
 import { AssistantPanel, type PendingEditView } from "./ui/sidePanel.js";
 import { TypesPane } from "./ui/typesPane.js";
 import { FilterChip, FilterPanel, FilterStore } from "./ui/filters.js";
 import type { IdsPanel } from "./ui/ids.js";
 import type { BcfPanel } from "./ui/bcf.js";
 import { Shell, emptyState, type PaneId, type TabId } from "./ui/shell.js";
-import { Dock, saveViewpoint as storeViewpoint } from "./ui/dock.js";
+import { Dock, readViewpoints, saveViewpoint as storeViewpoint, viewpointKey } from "./ui/dock.js";
 import { Connection } from "./ui/connection.js";
 import { CommandRegistry } from "./ui/commands.js";
 import { Ribbon, type RibbonControl, type RibbonTab } from "./ui/ribbon.js";
@@ -62,6 +63,7 @@ window.addEventListener("unhandledrejection", (e) =>
 
 const dropzone = $("dropzone");
 const fileInput = $<HTMLInputElement>("file-input");
+const attachInput = $<HTMLInputElement>("attach-input");
 const settingsDialog = $<HTMLDialogElement>("settings-dialog");
 const helpDialog = $<HTMLDialogElement>("help-dialog");
 
@@ -78,16 +80,21 @@ interface Settings {
   doubleSided: boolean;
   antialias: boolean;
   hud: boolean;
+  /** Skip instanced parts below a couple of pixels on screen. */
+  lod: boolean;
   /** Say when Local Studio's IfcOpenShell conversion would pay off. */
   offerConvert: boolean;
 }
 const SETTINGS_KEY = "ifcviewx.settings";
+/** Screen size below which a repeated part is not worth a draw call. */
+const LOD_PIXELS = 2;
 const DEFAULTS: Settings = {
   scale: 1,
   adaptive: true,
   doubleSided: true,
   antialias: true,
   hud: false,
+  lod: true,
   offerConvert: true,
 };
 let settings: Settings = DEFAULTS;
@@ -105,8 +112,6 @@ interface PendingEdit extends ProposedEdit {
   diff?: EditDiff;
 }
 const MAX_CHECKPOINTS = 10;
-/** Above this, IfcOpenShell wins on threads and has no 4 GB wasm ceiling. */
-const BIG_MODEL_BYTES = 50e6;
 /** Past this, browser Python is worth a warning before the first boot. */
 const PY_BROWSER_WARN_BYTES = 100e6;
 
@@ -151,11 +156,14 @@ const viewer = createViewer(shell.viewerHost, {
 viewer.warmup();
 viewer.setRenderScale(settings.scale);
 viewer.setAdaptiveResolution(settings.adaptive);
+viewer.setLodThreshold(settings.lod ? LOD_PIXELS : 0);
 viewer.setDoubleSided(settings.doubleSided);
 viewer.setPerfHud(settings.hud);
 applyTheme();
 
 const dock = new Dock(shell.viewerHost, viewer);
+// The dock lists the federated models; picking a file to add is the app's job.
+dock.onAddModel = () => attachInput.click();
 
 // Filters own the visible set; the pill in the bottom-right corner is where
 // the user sees what is applied and drops it, one filter or all at once.
@@ -274,6 +282,12 @@ async function schedulePanel(): Promise<SchedulePanel> {
         viewer.select(id);
         viewer.fitToElement(id);
       },
+      // An imported sheet stages like any other edit: one approval for the
+      // whole batch, and the pending bar is what applies it.
+      stageEdits: async (ops) => {
+        await proposeIfcEdits(ops, "user");
+        shell.selectTab("properties");
+      },
     });
   }
   return scheduleUi;
@@ -379,39 +393,6 @@ function toggleTheme(): void {
 
 // ---------------------------------------------------------------------------
 // Model lifecycle
-function sniffSchema(bytes: Uint8Array): string | null {
-  const head = new TextDecoder("latin1").decode(bytes.subarray(0, 4096));
-  return /FILE_SCHEMA\s*\(\s*\(\s*'([^']+)'/i.exec(head)?.[1] ?? null;
-}
-
-/**
- * STEP or the converted container, read from the bytes. The name lies: an edit
- * made through Local Studio comes back as real STEP under a .ifcx file name,
- * and trusting the extension there silently disarms the semantic engine.
- */
-function isStep(bytes: Uint8Array): boolean {
-  return new TextDecoder("latin1").decode(bytes.subarray(0, 512)).includes("ISO-10303-21");
-}
-
-/** Byte-level substring search: a 50 MB file is never decoded just to find one token. */
-function containsAscii(bytes: Uint8Array, needle: string): boolean {
-  const first = needle.charCodeAt(0);
-  const limit = bytes.length - needle.length;
-  for (let i = 0; i <= limit; i++) {
-    if (bytes[i] !== first) continue;
-    let k = 1;
-    while (k < needle.length && bytes[i + k] === needle.charCodeAt(k)) k++;
-    if (k === needle.length) return true;
-  }
-  return false;
-}
-
-/** Plan §5.1: threads and exact solids win on big or brep-heavy files. */
-function worthConverting(bytes: Uint8Array, name: string): boolean {
-  if (name.toLowerCase().endsWith(".ifcx")) return false;
-  return bytes.length > BIG_MODEL_BYTES || containsAscii(bytes, "IFCADVANCEDBREP");
-}
-
 /**
  * One loading screen for anything the viewport waits on: opening a file,
  * replaying a cached model, fetching one from Local Studio, or a conversion.
@@ -528,7 +509,7 @@ async function loadBytes(bytes: Uint8Array, name: string, preserveCamera = false
   const step = isStep(bytes);
   const semanticCopy = step ? bytes.slice() : null;
   try {
-    await viewer.load(bytes, { onProgress: (progress) => loadingUi.update(progress) });
+    await viewer.load(bytes, { name, onProgress: (progress) => loadingUi.update(progress) });
   } catch (err) {
     // viewer.load drops whatever was on screen before it parses, so a failure
     // leaves an empty viewport. App state has to follow it down instead of
@@ -620,6 +601,37 @@ async function openSample(): Promise<void> {
   if (pendingEdit) discardPending();
   await loadBytes(sampleModel(), SAMPLE_NAME);
   shell.log("Opened the sample building. Open your own file any time.", "success");
+}
+
+/**
+ * Add a file beside the open model instead of replacing it. The semantic
+ * engine, the edit staging and the Python bridge all address one model, so
+ * they stay pointed at the first one; everything the viewer owns (geometry,
+ * tree, selection, properties, filters) is federated.
+ */
+async function attachFile(file: File): Promise<void> {
+  // Adding during a load would land in a viewer that is about to be cleared,
+  // and "no model yet" would silently turn the add into a replace.
+  if (viewer.isLoading()) {
+    toast("Wait for the current load to finish", "info");
+    return;
+  }
+  if (!hasModel()) return void openFile(file);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  shell.setStatus("Loading", "busy");
+  loadingUi.show(file.name, () => viewer.cancelLoad());
+  try {
+    const added = await viewer.addModel(bytes, {
+      name: file.name,
+      onProgress: (progress) => loadingUi.update(progress),
+    });
+    shell.log(`Added ${file.name} as model ${added.index + 1}`, "success");
+    summaryDirty = true;
+    updateModelChrome();
+  } finally {
+    loadingUi.hide();
+    shell.setStatus("Ready", "idle");
+  }
 }
 
 async function openFile(file: File): Promise<void> {
@@ -751,6 +763,27 @@ viewer.onMeasureChange(() => {
   syncTools();
 });
 
+/**
+ * The box starts around the selection when there is one, because that is what
+ * it is nearly always wanted for, and around the whole model otherwise so the
+ * sliders in the section popover have somewhere to start.
+ */
+function toggleSectionBox(): void {
+  if (viewer.getSectionBox()) {
+    viewer.setSectionBox(null);
+  } else {
+    const selected = viewer.getSelectedIds();
+    const box = (selected.length ? viewer.boxAround(selected) : null) ?? viewer.getModelBox();
+    viewer.setSectionBox(box);
+    shell.log(
+      selected.length
+        ? `Section box around ${selected.length} selected element(s). Section tool has the sliders.`
+        : "Section box on. Drag the sliders in the Section tool to close it in.",
+    );
+  }
+  syncTools();
+}
+
 function toggleSection(): void {
   if (viewer.getSections().length) {
     viewer.clearSection();
@@ -767,12 +800,14 @@ function toggleSection(): void {
 let hadSections = false;
 viewer.onSectionChange(() => {
   const has = viewer.getSections().length > 0;
-  if (has === hadSections) return;
-  hadSections = has;
-  if (viewer.isPlanView() !== has) {
-    viewer.setPlanView(has);
-    syncTools();
+  if (has !== hadSections) {
+    hadSections = has;
+    if (viewer.isPlanView() !== has) viewer.setPlanView(has);
   }
+  // Sections move from plugins, the assistant and the MCP bridge as well as
+  // from the toolbar, so the pressed states are refreshed on every change
+  // rather than only when the plan inset flips.
+  syncTools();
 });
 
 const midOf = (axis: number): number => {
@@ -900,9 +935,19 @@ async function withPyStatus<T>(onStatus: ((text: string) => void) | undefined, r
 // Typed edits: no generated code, no runtime download. Every op runs on a
 // disposable copy in the semantic worker and lands in the pending bar.
 async function proposeIfcEdit(op: EditOp, source: "user" | "ai" | "mcp"): Promise<string> {
+  return proposeIfcEdits([op], source);
+}
+
+/**
+ * Stage a batch as one approval. A spreadsheet re-import is many operations,
+ * and staging them one at a time would leave only the last one pending.
+ */
+async function proposeIfcEdits(ops: EditOp[], source: "user" | "ai" | "mcp"): Promise<string> {
   if (!activeBytes) throw new Error("Open a model first.");
-  if (op.ids.length === 0) throw new Error("No elements selected for this edit.");
-  const edit = await ifc.propose(op);
+  if (ops.length === 0 || ops.every((op) => op.ids.length === 0)) {
+    throw new Error("No elements selected for this edit.");
+  }
+  const edit = await ifc.proposeBatch(ops);
   // A partial batch is a result, not a crash: say which elements refused and
   // why, so the pending bar's counts are never a mystery.
   for (const failure of edit.failures) shell.log(`Edit skipped ${failure}`, "error");
@@ -1173,9 +1218,9 @@ const semanticActions: SemanticActions = {
     const { idsReport } = await import("./ui/ids.js");
     return idsReport(viewer);
   },
-  clash: async (a, b, tolerance) => {
+  clash: async (a, b, tolerance, clearance) => {
     const { clashReport } = await import("./ifc/clash.js");
-    return clashReport(viewer, a, b, tolerance);
+    return clashReport(viewer, a, b, tolerance, clearance);
   },
 };
 
@@ -1233,14 +1278,7 @@ function askModel(messages: ChatMessage[], stream?: StreamView): Promise<string>
     withSystem(messages),
     service.proxiesLlm() ? (turns) => service.chat(turns) : undefined,
     chatAbort?.signal,
-    {
-      onDelta: stream ? (chunk) => stream.push(chunk) : undefined,
-      onUsage: (usage) => {
-        tokenTotals.input += usage.input;
-        tokenTotals.output += usage.output;
-        assistant().setUsage(usage, tokenTotals);
-      },
-    },
+    { onDelta: stream ? (chunk) => stream.push(chunk) : undefined, onUsage: recordUsage },
   );
 }
 
@@ -1309,6 +1347,110 @@ function stopChat(): void {
   ui.addMessage("system", "Stopped.");
 }
 
+/** One tool the model asked for, however it asked. */
+interface WantedCall {
+  /** Native call id, or "" on the fenced protocol. */
+  id: string;
+  /** What the transcript card is titled with. */
+  label: string;
+  block: { code: string; kind: "viewer" | "modelEdit" };
+}
+
+/** What one turn produced, with the protocol difference already absorbed. */
+interface Turn {
+  calls: WantedCall[];
+  /** Generated Python, which is shown and never run. */
+  python: { code: string; kind: "query" | "edit" } | null;
+}
+
+/**
+ * Whether this endpoint takes tools natively. Null until a turn has answered;
+ * false latches for the session, so a local server without tool support is
+ * asked the expensive way exactly once.
+ */
+let nativeTools: boolean | null = null;
+
+/**
+ * Ask for one turn and normalise the answer. Native tool calling is tried
+ * first; the fenced protocol is the fallback, and the only path when Local
+ * Studio proxies the key, since the proxy answers in one piece.
+ */
+async function askTurn(ui: AssistantPanel): Promise<Turn> {
+  const proxied = service.proxiesLlm();
+  if (!proxied && nativeTools !== false) {
+    const result = await converse(
+      loadSettings(),
+      withSystem(history, true),
+      toolDefs(assistantMode()),
+      chatAbort?.signal,
+      { onUsage: recordUsage },
+    );
+    if (result.toolsUsed) {
+      nativeTools = true;
+      if (result.text) ui.addMessage("assistant", result.text);
+      remember({ role: "assistant", content: result.text, calls: result.calls });
+      const calls: WantedCall[] = [];
+      for (const call of result.calls) {
+        const block = callToBlock(call.name, call.input);
+        if (!block) continue;
+        calls.push({ id: call.id, label: call.name, block });
+      }
+      return { calls, python: null };
+    }
+    nativeTools = false;
+    shell.log("This endpoint does not take tools natively; using the text protocol instead");
+  }
+
+  const stream = ui.startStream();
+  const reply = await askModel(history, stream);
+  remember({ role: "assistant", content: reply });
+  const extracted = extractCode(reply);
+  // The call becomes a card below, so the prose keeps the sentence that
+  // introduced it and loses the JSON: printing both says it twice.
+  stream.settle(extracted ? stripBlock(reply, extracted.code) : reply);
+  if (!extracted) return { calls: [], python: null };
+  const isPython = extracted.kind === "query" || extracted.kind === "edit";
+  // A block the mode forbids is not offered as an escalation: it goes to
+  // runTool, which refuses it in words the model can correct from.
+  if (isPython && !modeRefusal(extracted.kind)) {
+    return { calls: [], python: { code: extracted.code, kind: extracted.kind as "query" | "edit" } };
+  }
+  return {
+    calls: [{ id: "", label: extracted.kind, block: extracted as { code: string; kind: "viewer" | "modelEdit" } }],
+    python: null,
+  };
+}
+
+/** A tool report goes back the way the call came, or the model loses the thread. */
+function rememberToolResult(
+  wanted: WantedCall,
+  done: { title: string; report: string } | null,
+  report: string,
+  giveUp: boolean,
+): void {
+  if (wanted.id) {
+    remember({ role: "tool", callId: wanted.id, name: wanted.label, content: report });
+    return;
+  }
+  // No repair prompt on the way out: the transcript would end with an
+  // instruction to retry that nothing is going to answer.
+  if (giveUp) return;
+  remember(
+    done
+      ? {
+          role: "user",
+          content: `${done.title}:\n${report}\n\nContinue with another tool call if needed; otherwise answer in plain text.`,
+        }
+      : { role: "user", content: repairPrompt(report) },
+  );
+}
+
+function recordUsage(usage: { input: number; output: number }): void {
+  tokenTotals.input += usage.input;
+  tokenTotals.output += usage.output;
+  assistant().setUsage(usage, tokenTotals);
+}
+
 async function handleChat(text: string): Promise<void> {
   const ui = assistant();
   if (chatAbort) return void toast("The assistant is still answering", "info");
@@ -1328,68 +1470,52 @@ async function handleChat(text: string): Promise<void> {
     ui.resetAttachment();
     let repairs = 0;
     let rounds = 0;
-    let stream = ui.startStream();
-    let reply = await askModel(history, stream);
+    let turn = await askTurn(ui);
     for (;;) {
-      if (mine !== chatSeq) return void stream.settle("");
-      remember({ role: "assistant", content: reply });
-      const extracted = extractCode(reply);
-      // The call itself becomes a card below, so the prose keeps the sentence
-      // that introduced it and loses the JSON: printing both says it twice.
-      const prose = extracted ? stripBlock(reply, extracted.code) : reply;
-      // The stream showed the raw reply including the block; settling with the
-      // prose is what removes the JSON once it is known to be a tool call.
-      stream.settle(prose);
-      if (!extracted) break;
+      if (mine !== chatSeq) return;
+      if (turn.python) {
+        // Generated Python is always shown and never run, on every tier: the
+        // user reads it and decides, and the loop ends there.
+        ui.addEscalation(turn.python.code, turn.python.kind === "edit" ? "edit" : "query");
+        break;
+      }
+      if (turn.calls.length === 0) break;
       if (rounds >= MAX_TOOL_ROUNDS) {
         // Ending on a silently dropped tool call looks like the turn stalled.
         ui.addMessage("system", `Stopped after ${MAX_TOOL_ROUNDS} tool calls. Ask again to continue.`);
         break;
       }
-      // Generated Python is always shown and never run, on every tier: the user
-      // reads it and decides, and the loop ends there. Viewer actions and typed
-      // edits are the assistant's own tools, so they are never escalated.
-      // A block the mode forbids is not offered as an escalation either: it
-      // goes to runTool, which refuses it in words the model can correct from.
-      const isPython = extracted.kind === "query" || extracted.kind === "edit";
-      if (isPython && !modeRefusal(extracted.kind)) {
-        ui.addEscalation(extracted.code, extracted.kind === "edit" ? "edit" : "query");
-        break;
-      }
       rounds += 1;
 
-      const call = ui.addToolCall(extracted.kind, extracted.code);
-      ui.setStatus("Running the tool");
-      let report: string;
-      let done: { title: string; report: string } | null = null;
-      try {
-        done = await runTool(extracted);
-        report = done.report;
-      } catch (err) {
-        report = err instanceof Error ? err.message : String(err);
-      }
-
-      if (!done) {
-        const giveUp = repairs >= MAX_REPAIRS;
-        call.settle(report, false, !giveUp);
+      let failed = false;
+      // Native tool calling can ask for several at once. They run in order, so
+      // a hide followed by an isolate cannot land the wrong way round.
+      for (const wanted of turn.calls) {
+        if (mine !== chatSeq) return;
+        const card = ui.addToolCall(wanted.label, wanted.block.code);
+        ui.setStatus("Running the tool");
+        let report: string;
+        let done: { title: string; report: string } | null = null;
+        try {
+          done = await runTool(wanted.block);
+          report = done.report;
+        } catch (err) {
+          report = err instanceof Error ? err.message : String(err);
+        }
+        if (!done) failed = true;
+        const giveUp = !done && repairs >= MAX_REPAIRS;
+        card.settle(report, done !== null, !done && !giveUp);
+        if (!done) repairs += 1;
+        rememberToolResult(wanted, done, report, giveUp);
         if (giveUp) {
-          // No repair prompt on the way out: the transcript would end with an
-          // instruction to retry that nothing is going to answer.
           ui.addMessage("system", `Failed after ${MAX_REPAIRS + 1} attempts. The error is in the card above.`);
           break;
         }
-        remember({ role: "user", content: repairPrompt(report) });
-        repairs += 1;
-      } else {
-        call.settle(report, true);
-        remember({
-          role: "user",
-          content: `${done.title}:\n${report}\n\nContinue with another tool call if needed; otherwise answer in plain text.`,
-        });
       }
+      if (failed && repairs > MAX_REPAIRS) break;
+
       ui.setStatus("Reading the report");
-      stream = ui.startStream();
-      reply = await askModel(history, stream);
+      turn = await askTurn(ui);
     }
     persistChat();
   } catch (err) {
@@ -1483,9 +1609,9 @@ function retryChat(): void {
   void handleChat(last).catch(reportError);
 }
 
-function withSystem(messages: ChatMessage[]): ChatMessage[] {
+function withSystem(messages: ChatMessage[], native = false): ChatMessage[] {
   const brief = buildModelBrief(viewer, fileName, schemaName);
-  return [{ role: "system", content: systemPrompt(brief, assistantMode()) }, ...messages];
+  return [{ role: "system", content: systemPrompt(brief, assistantMode(), native) }, ...messages];
 }
 
 function newChat(): void {
@@ -1661,6 +1787,34 @@ async function validateModel(): Promise<void> {
   }
 }
 
+/**
+ * The offline report. Nothing here runs a check of its own: it prints the
+ * checks, IDS run and plugin findings this session already produced, and marks
+ * the rest "not run". A report that quietly re-ran the work under different
+ * settings would not describe what the user saw.
+ */
+async function buildReport(): Promise<void> {
+  if (!viewer.getStats()) return toast("Open a model first", "info");
+  shell.setStatus("Building the report", "busy");
+  try {
+    const { buildReport: render, collectReport } = await import("./ui/report.js");
+    const { lastIdsReport } = await import("./ui/ids.js");
+    const model = await collectReport({
+      viewer,
+      title: fileName.replace(/\.[^.]+$/, "") || "Model report",
+      app: `IFCViewX ${__APP_VERSION__}`,
+      checks: () => lastReport,
+      ids: () => lastIdsReport(),
+      issues: () => bcfUi?.reportIssues() ?? null,
+    });
+    const html = render(model);
+    download(`${model.title.replace(/[^\w.-]+/g, "-")}-report.html`, html, "text/html;charset=utf-8");
+    shell.log(`Report saved (${Math.round(html.length / 1024)} kB). Open it and print to PDF.`, "success", true);
+  } finally {
+    updateModelChrome();
+  }
+}
+
 function renderChecks(page: HTMLElement): void {
   const head = h("div", { class: "group-title" }, [
     h("span", { text: "Model checks" }),
@@ -1747,6 +1901,7 @@ function recentMenu(): MenuItem[] {
 // Settings dialog: the same values the ribbon edits, with their explanations
 const setScale = $<HTMLSelectElement>("set-scale");
 const setAdaptive = $<HTMLInputElement>("set-adaptive");
+const setLod = $<HTMLInputElement>("set-lod");
 const setDoubleside = $<HTMLInputElement>("set-doubleside");
 const setAa = $<HTMLInputElement>("set-aa");
 const setHudInput = $<HTMLInputElement>("set-hud");
@@ -1754,6 +1909,7 @@ const setConvert = $<HTMLInputElement>("set-convert");
 
 setScale.value = String(settings.scale);
 setAdaptive.checked = settings.adaptive;
+setLod.checked = settings.lod;
 setDoubleside.checked = settings.doubleSided;
 setAa.checked = settings.antialias;
 setHudInput.checked = settings.hud;
@@ -1764,6 +1920,11 @@ setScale.addEventListener("change", () => {
   viewer.setRenderScale(settings.scale);
   persistSettings();
   ribbon.sync();
+});
+setLod.addEventListener("change", () => {
+  settings.lod = setLod.checked;
+  viewer.setLodThreshold(settings.lod ? LOD_PIXELS : 0);
+  persistSettings();
 });
 setAdaptive.addEventListener("change", () => {
   settings.adaptive = setAdaptive.checked;
@@ -1825,6 +1986,7 @@ const registry = new CommandRegistry();
 
 registry.add([
   { id: "file.open", label: "Open", icon: "folder", section: "File", shortcut: "Ctrl+O", hint: "Open an IFC or .ifcx file", run: () => fileInput.click() },
+  { id: "file.attach", label: "Add model", icon: "layers", section: "File", hint: "Load a second model beside this one", enabled: hasModel, run: () => attachInput.click() },
   { id: "file.sample", label: "Sample model", icon: "cube", section: "File", hint: "A small two-storey building, generated here, to try the viewer on", run: () => void openSample().catch(reportError) },
   { id: "file.export", label: "Export", icon: "download", section: "File", hint: "Download the active IFC", enabled: hasModel, run: exportModel },
   { id: "file.close", label: "Close", icon: "x", section: "File", enabled: hasModel, run: closeOrConfirm },
@@ -1833,6 +1995,7 @@ registry.add([
   { id: "file.convert", label: "Convert", icon: "refresh", section: "Local Studio", tier: "local", available: () => canLocal("convert"), hint: "IfcOpenShell → .ifcx, then reopens are instant", enabled: hasModel, run: () => void convertWithService() },
   { id: "file.check", label: "Checks", icon: "shield", section: "Review", hint: "Structural QA in this tab, no generated code", enabled: () => hasModel() && !checking, run: () => void validateModel().catch(reportError) },
   { id: "file.schedule", label: "Schedule", icon: "table", section: "Review", hint: "Tabular export of a class, with pset columns resolved through the type", enabled: hasModel, run: () => shell.selectTab("schedule") },
+  { id: "file.report", label: "Report", icon: "clipboard", section: "Review", hint: "One offline HTML page: checks, IDS, findings and issues. Print it for PDF", enabled: hasModel, run: () => void buildReport().catch(reportError) },
 
   { id: "edit.undo", label: "Undo", icon: "undo", section: "Edit", shortcut: "Ctrl+Z", enabled: () => checkpoints.length > 0, run: () => void undo().catch(reportError) },
   { id: "edit.redo", label: "Redo", icon: "redo", section: "Edit", shortcut: "Ctrl+Y", enabled: () => redoStack.length > 0, run: () => void redo().catch(reportError) },
@@ -1863,7 +2026,8 @@ registry.add([
 
   { id: "tool.measure", label: "Measure", icon: "ruler", section: "Tools", shortcut: "M", pressed: () => viewer.isMeasuring(), run: toggleMeasure },
   { id: "tool.section", label: "Section", icon: "section", section: "Tools", shortcut: "X", hint: "Slice on X, Y and Z", pressed: () => viewer.getSections().length > 0, run: toggleSection },
-  { id: "tool.plan", label: "2D plan", icon: "layers", section: "Tools", shortcut: "G", hint: "Floorplan inset, cut by the horizontal section", enabled: hasModel, pressed: () => viewer.isPlanView(), run: togglePlan },
+  { id: "tool.box", label: "Section box", icon: "cube", section: "Tools", shortcut: "B", hint: "Six planes at once, around the selection", enabled: hasModel, pressed: () => viewer.getSectionBox() !== null, run: toggleSectionBox },
+  { id: "tool.plan", label: "2D plan", icon: "layers", section: "Tools", shortcut: "G", hint: "Floorplan inset, cut by the horizontal section. Click it to select in 3D", enabled: hasModel, pressed: () => viewer.isPlanView(), run: togglePlan },
   { id: "tool.hud", label: "Perf HUD", icon: "gauge", section: "Tools", pressed: () => settings.hud, run: () => setHud(!settings.hud) },
 
   { id: "panel.tree", label: "Structure", icon: "panel-left-close", section: "Panels", shortcut: "Ctrl+B", pressed: () => shell.isPanelOpen("outliner"), run: () => { shell.togglePanel("outliner"); ribbon.sync(); } },
@@ -1902,6 +2066,7 @@ const RIBBON: RibbonTab[] = [
       { label: "Model", items: [
         { kind: "cmd", id: "file.open" },
         { kind: "menu", label: "Recent", icon: "clock", items: recentMenu },
+        { kind: "cmd", id: "file.attach", size: "sm" },
         { kind: "cmd", id: "file.close", size: "sm" },
         { kind: "cmd", id: "app.connection", size: "sm" },
       ] },
@@ -1916,19 +2081,13 @@ const RIBBON: RibbonTab[] = [
       ] },
     ],
   },
+  // Home is the tab that is open by default, so it carries only what is used
+  // constantly. Cameras live on View, panels on Model, and both are one click
+  // away there; repeating them here made the strip scroll on a laptop.
   {
     id: "home",
     label: "Home",
     groups: [
-      { label: "Edit", items: [
-        { kind: "cmd", id: "edit.rename" },
-        { kind: "cmd", id: "edit.property" },
-        { kind: "cmd", id: "edit.undo", size: "sm" },
-        { kind: "cmd", id: "edit.redo", size: "sm" },
-        { kind: "cmd", id: "edit.delete", size: "sm" },
-        { kind: "cmd", id: "edit.apply", size: "sm" },
-        { kind: "cmd", id: "edit.discard", size: "sm" },
-      ] },
       { label: "Assistant", items: [
         { kind: "cmd", id: "panel.ai" },
         { kind: "cmd", id: "ai.new", size: "sm" },
@@ -1936,31 +2095,28 @@ const RIBBON: RibbonTab[] = [
       { label: "Selection", items: [
         { kind: "cmd", id: "vis.isolate" },
         { kind: "cmd", id: "vis.hide" },
-        { kind: "cmd", id: "vis.all", size: "sm" },
+        { kind: "cmd", id: "cam.fitsel", size: "sm" },
         { kind: "cmd", id: "sel.clear", size: "sm" },
       ] },
       { label: "Filter", items: [
         { kind: "cmd", id: "vis.filters" },
         { kind: "cmd", id: "vis.clear", size: "sm" },
-        { kind: "cmd", id: "panel.types", size: "sm" },
-      ] },
-      { label: "Camera", items: [
-        { kind: "cmd", id: "cam.fit" },
-        { kind: "cmd", id: "cam.fitsel" },
-        { kind: "cmd", id: "cam.front", size: "sm" },
-        { kind: "cmd", id: "cam.top", size: "sm" },
-        { kind: "cmd", id: "cam.right", size: "sm" },
-        { kind: "cmd", id: "cam.iso", size: "sm" },
+        { kind: "cmd", id: "vis.undo", size: "sm" },
+        { kind: "cmd", id: "vis.redo", size: "sm" },
       ] },
       { label: "Tools", items: [
         { kind: "cmd", id: "tool.measure" },
         { kind: "cmd", id: "tool.section" },
-        { kind: "cmd", id: "tool.plan" },
+        { kind: "cmd", id: "tool.box", size: "sm" },
+        { kind: "cmd", id: "tool.plan", size: "sm" },
       ] },
-      { label: "Panels", items: [
-        { kind: "cmd", id: "panel.props", size: "sm" },
-        { kind: "cmd", id: "panel.types", size: "sm" },
-        { kind: "cmd", id: "panel.summary", size: "sm" },
+      { label: "Edit", items: [
+        { kind: "cmd", id: "edit.undo", size: "sm" },
+        { kind: "cmd", id: "edit.redo", size: "sm" },
+        { kind: "cmd", id: "edit.rename", size: "sm" },
+        { kind: "cmd", id: "edit.property", size: "sm" },
+        { kind: "cmd", id: "edit.apply", size: "sm" },
+        { kind: "cmd", id: "edit.discard", size: "sm" },
       ] },
     ],
   },
@@ -1986,7 +2142,8 @@ const RIBBON: RibbonTab[] = [
       ] },
       { label: "Section", items: [
         { kind: "cmd", id: "tool.section" },
-        { kind: "cmd", id: "tool.plan" },
+        { kind: "cmd", id: "tool.box" },
+        { kind: "cmd", id: "tool.plan", size: "sm" },
       ] },
       { label: "Display", items: [
         { kind: "control", build: buildScaleControl },
@@ -2044,7 +2201,8 @@ const RIBBON: RibbonTab[] = [
         { kind: "cmd", id: "file.viewpoint", size: "sm" },
       ] },
       { label: "Report", items: [
-        { kind: "cmd", id: "panel.summary" },
+        { kind: "cmd", id: "file.report" },
+        { kind: "cmd", id: "panel.summary", size: "sm" },
         { kind: "cmd", id: "file.screenshot", size: "sm" },
         { kind: "cmd", id: "panel.log", size: "sm" },
       ] },
@@ -2307,6 +2465,48 @@ bridge.register("fit_view", (params) => {
   else viewer.fitToModel();
   return { ok: true };
 });
+/**
+ * Everything the in-tab assistant can do is reachable over the bridge too,
+ * and through the same runner rather than a second copy of it, so an external
+ * client and the panel cannot drift apart. Edit-tier actions are deliberately
+ * absent: an MCP client stages nothing the user has not seen.
+ */
+const BRIDGED_ACTIONS = [
+  "find", "search", "counts", "storeys", "selection", "visibility",
+  "isolate", "hide", "unhide", "show", "categories", "color",
+  "section", "sectionBox", "camera", "clash", "check", "schedule", "ids",
+] as const;
+for (const name of BRIDGED_ACTIONS) {
+  bridge.register(name, async (params) => {
+    const report = await runViewerAction(viewer, JSON.stringify({ action: name, ...params }), semanticActions);
+    // Half the actions answer with JSON and half with a sentence; hand back
+    // the parsed object when there is one so the client is not double-decoding.
+    try {
+      return JSON.parse(report) as unknown;
+    } catch {
+      return { report };
+    }
+  });
+}
+bridge.register("capture_view", async (params) => {
+  const width = Number(params.max_width);
+  const blob = await viewer.captureImage(Number.isFinite(width) && width > 0 ? Math.min(width, 2048) : 1024, "image/png");
+  if (!blob) throw new Error("nothing to capture");
+  const buffer = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  for (const byte of buffer) binary += String.fromCharCode(byte);
+  const viewport = viewer.getViewport();
+  return { mimeType: "image/png", base64: btoa(binary), width: viewport.width, height: viewport.height };
+});
+bridge.register("list_viewpoints", () => {
+  const key = viewpointKey(viewer);
+  return { viewpoints: key ? readViewpoints(key).map((view) => view.name) : [] };
+});
+bridge.register("save_viewpoint", (params) => {
+  const name = storeViewpoint(viewer, typeof params.name === "string" ? params.name : undefined);
+  if (!name) throw new Error("no model loaded");
+  return { saved: name };
+});
 // No run_python here on purpose. An MCP client is an AI client, and generated
 // code is never executed for one, in this tab or anywhere else. MCP reads the
 // model and stages typed edits; arbitrary Python belongs to the user and to the
@@ -2318,6 +2518,11 @@ fileInput.addEventListener("change", () => {
   const file = fileInput.files?.[0];
   if (file) void openFile(file).catch(reportError);
   fileInput.value = "";
+});
+attachInput.addEventListener("change", () => {
+  const file = attachInput.files?.[0];
+  if (file) void attachFile(file).catch(reportError);
+  attachInput.value = "";
 });
 $("btn-open-first").addEventListener("click", () => fileInput.click());
 $("btn-sample").addEventListener("click", () => void openSample().catch(reportError));

@@ -53,7 +53,6 @@ export class Shell {
   /** Top bar icon cluster; main.ts mounts the plugins button here. */
   readonly topSlot = h("span", { class: "top-slot" });
   private readonly tabButtons = new Map<TabId, HTMLButtonElement>();
-  private readonly tabBadges = new Map<TabId, HTMLElement>();
   private readonly panes = new Map<string, HTMLElement>();
   private readonly paneButtons = new Map<PaneId, HTMLButtonElement>();
   private readonly status: Record<string, HTMLElement> = {};
@@ -66,7 +65,6 @@ export class Shell {
   private readonly themeButton: HTMLButtonElement;
   private readonly mounted = new Set<TabId>();
   private activeTab: TabId = "properties";
-  private activityCount = 0;
 
   constructor(private readonly actions: ShellActions) {
     const bar = $("topbar");
@@ -114,8 +112,6 @@ export class Shell {
       this.activityList.replaceChildren();
       this.activityList.classList.add("hidden");
       this.activityEmpty.classList.remove("hidden");
-      this.activityCount = 0;
-      this.setTabBadge("activity", 0);
     });
     $("tab-activity").appendChild(
       h("div", { class: "page" }, [
@@ -166,7 +162,6 @@ export class Shell {
   private buildTabs(): void {
     const rail = $("rail");
     for (const tab of TABS) {
-      const badge = h("span", { class: "tab-badge hidden" });
       const first = tab.id === "properties";
       const button = h("button", {
         class: `rail-btn${first ? " active" : ""}`,
@@ -179,7 +174,7 @@ export class Shell {
         tabindex: first ? "0" : "-1",
         title: tab.key ? `${tab.label}  ${tab.key}` : tab.label,
         "aria-label": tab.label,
-      }, [icon(tab.icon, 16), badge]);
+      }, [icon(tab.icon, 16)]);
       button.addEventListener("click", () => {
         // Clicking the panel you are already on closes it, like a toggle.
         if (this.activeTab === tab.id && this.isPanelOpen("inspector")) this.togglePanel("inspector");
@@ -187,7 +182,6 @@ export class Shell {
       });
       button.addEventListener("keydown", (e) => this.railKey(e));
       this.tabButtons.set(tab.id, button);
-      this.tabBadges.set(tab.id, badge);
       rail.appendChild(button);
     }
   }
@@ -220,10 +214,6 @@ export class Shell {
       button.tabIndex = id === tab ? 0 : -1;
     }
     for (const item of TABS) this.panes.get(item.id)?.classList.toggle("hidden", item.id !== tab);
-    if (tab === "activity") {
-      this.activityCount = 0;
-      this.setTabBadge("activity", 0);
-    }
     if (!this.mounted.has(tab)) {
       this.mounted.add(tab);
       this.actions.tabShown(tab);
@@ -273,13 +263,6 @@ export class Shell {
     this.themeButton.replaceChildren(icon(dark ? "moon" : "sun"));
   }
 
-  setTabBadge(tab: TabId, value: number): void {
-    const badge = this.tabBadges.get(tab);
-    if (!badge) return;
-    badge.textContent = value > 99 ? "99+" : String(value);
-    badge.classList.toggle("hidden", !value);
-  }
-
   setProject(name: string, schema: string | null): void {
     this.projectName.textContent = name || "No model";
     this.project.classList.toggle("blank", !name);
@@ -324,7 +307,11 @@ export class Shell {
     this.selection.replaceChildren(open, clear, h("span", { class: "sb-sep" }));
   }
 
-  /** Append to the activity log and badge the tab when it is not visible. */
+  /**
+   * Append to the activity log. The tab carries no count: the app logs
+   * something on nearly every action, so a number there is always high and
+   * never means anything. Errors already raise a toast.
+   */
   log(message: string, kind: "info" | "success" | "error" = "info", notify = false): void {
     const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     const mark = { info: "info", success: "check-circle", error: "alert" }[kind];
@@ -341,7 +328,6 @@ export class Shell {
       ]),
     );
     if (follow) list.scrollTop = list.scrollHeight;
-    if (this.activeTab !== "activity") this.setTabBadge("activity", ++this.activityCount);
     if (notify) toast(message, kind);
   }
 }

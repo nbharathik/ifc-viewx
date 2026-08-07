@@ -142,7 +142,7 @@ export class Connection {
       rows.push(
         h("div", { class: "pop-title", text: "Web Studio" }),
         h("p", { class: "note", text: "Everything runs in this tab. Nothing is uploaded, nothing is installed." }),
-        h("p", { class: "note", text: "Local Studio is a separate app. Install it and it opens its own copy of this viewer from your machine, with conversion, native Python and the MCP bridge already on. This tab is not involved and never reaches your machine." }),
+        h("p", { class: "note", text: "Local Studio is a separate app. Install it and it opens its own copy of this viewer from your machine, with conversion, native Python and the MCP bridge already on. " }),
         h("div", { class: "row" }, [this.copyButton(), this.moreLink()]),
       );
     }

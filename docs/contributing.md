@@ -3,8 +3,10 @@
 ```bash
 npm install
 npm run dev          # the viewer, with hot reload
-npm run check        # typecheck plus the plugin boundary check
+npm test             # the Vitest suite
+npm run check        # typecheck, the plugin boundary check, then the tests
 npm run build        # check, then a production build into dist/
+npm run eval         # score the assistant's tool choice against a real model
 npm run docs         # this site, with live reload
 ```
 

@@ -48,7 +48,32 @@ describe("sample model", () => {
     expect(found.get("IfcDoor")).toBe(2);
     expect(found.get("IfcWindow")).toBe(2);
     expect(found.get("IfcBuildingStorey")).toBe(2);
-    expect(found.get("IfcPropertySet")).toBe(8);
+    // Two rooms per storey, each with a quantity set and a property set.
+    expect(found.get("IfcSpace")).toBe(4);
+    expect(found.get("IfcElementQuantity")).toBe(4);
+    expect(found.get("IfcPropertySet")).toBe(12);
+  });
+
+  it("gives every space the quantities a room book reads", () => {
+    const spaces = api.GetLineIDsWithType(modelID, api.GetTypeCodeFromName("IFCSPACE"));
+    expect(spaces.size()).toBe(4);
+    const first = api.GetLine(modelID, spaces.get(0)) as {
+      Name?: { value?: string };
+      LongName?: { value?: string };
+    };
+    expect(first.Name?.value).toBe("101");
+    expect(first.LongName?.value).toBe("Office");
+
+    const quantities = api.GetLineIDsWithType(modelID, api.GetTypeCodeFromName("IFCQUANTITYAREA"));
+    // Net and gross floor area on each of the four rooms.
+    expect(quantities.size()).toBe(8);
+    const area = api.GetLine(modelID, quantities.get(0)) as {
+      Name?: { value?: string };
+      AreaValue?: { value?: number };
+    };
+    expect(area.Name?.value).toBe("NetFloorArea");
+    // Half of a 9.4 by 7.4 metre inner footprint.
+    expect(area.AreaValue?.value).toBeCloseTo(34.78, 1);
   });
 
   it("tessellates into real geometry", () => {
@@ -68,8 +93,9 @@ describe("sample model", () => {
   });
 
   it("reads back the property set the walls carry", () => {
+    // Eight walls plus the four rooms' Pset_SpaceCommon.
     const sets = api.GetLineIDsWithType(modelID, api.GetTypeCodeFromName("IFCPROPERTYSET"));
-    expect(sets.size()).toBe(8);
+    expect(sets.size()).toBe(12);
     const first = api.GetLine(modelID, sets.get(0)) as { Name?: { value?: string } };
     expect(first.Name?.value).toBe("Pset_WallCommon");
   });

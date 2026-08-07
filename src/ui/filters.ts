@@ -85,6 +85,7 @@ export class FilterStore {
     viewer.onModelLoaded(() => this.emit());
     viewer.onVisibilityChange(() => this.emit());
     viewer.onSectionChange(() => this.emit());
+    viewer.onMeasureChange(() => this.emit());
   }
 
   list(): FilterRule[] {
@@ -106,6 +107,7 @@ export class FilterStore {
   clear(): void {
     this.viewer.clearSection();
     this.viewer.showAll();
+    this.viewer.resetMeasure();
   }
 
   /** Everything currently narrowing the view, rules and viewer state alike. */
@@ -131,6 +133,25 @@ export class FilterStore {
         remove: () => this.viewer.clearSection(),
       });
     }
+    const box = this.viewer.getSectionBox();
+    if (box) {
+      const size = box.max.map((value, i) => value - box.min[i]);
+      out.push({
+        label: "Section box",
+        detail: size.map((value) => value.toFixed(1)).join(" x "),
+        remove: () => this.viewer.setSectionBox(null),
+      });
+    }
+    // Measurements stay on the model after the tool closes, so this is where
+    // they come off, next to everything else drawn over the view.
+    const measures = this.viewer.getMeasureCount();
+    if (measures > 0) {
+      out.push({
+        label: "Measurements",
+        detail: `${measures.toLocaleString()} placed`,
+        remove: () => this.viewer.resetMeasure(),
+      });
+    }
     return out;
   }
 
@@ -154,7 +175,7 @@ export class FilterChip {
   private readonly count = h("span");
   private readonly button = h(
     "button",
-    { class: "chip-btn", type: "button", title: "Active filters. The model is partly hidden." },
+    { class: "chip-btn", type: "button", title: "What is applied to this view. Click to take any of it off." },
     [icon("funnel", 13)],
   );
 
@@ -169,7 +190,7 @@ export class FilterChip {
 
   private sync(): void {
     const entries = this.store.entries();
-    this.count.textContent = `${entries.length} filter${entries.length === 1 ? "" : "s"}`;
+    this.count.textContent = `${entries.length} applied`;
     this.root.classList.toggle("hidden", entries.length === 0);
     const open = this.root.querySelector<HTMLElement>(".pop");
     if (open) this.build(open);
@@ -187,10 +208,10 @@ export class FilterChip {
         ]),
       );
     }
-    const clear = h("button", { class: "btn grow", type: "button", text: "Clear all filters" });
+    const clear = h("button", { class: "btn grow", type: "button", text: "Clear everything" });
     clear.addEventListener("click", () => this.store.clear());
     pop.replaceChildren(
-      h("div", { class: "pop-title", text: `Applied filters (${entries.length})` }),
+      h("div", { class: "pop-title", text: `Applied to this view (${entries.length})` }),
       list,
       h("div", { class: "pop-row" }, [clear]),
     );

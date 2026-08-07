@@ -5,10 +5,14 @@
 // Everything here is either a plain description of a plugin or a narrow view
 // of the viewer, so the surface stays small enough to document on one page.
 import type { PropertyIndex } from "./data.js";
+import type { ClashOptions, SweepResult } from "../ifc/clash.js";
+import type { ReportFinding } from "../ui/report.js";
 import type { ServiceClient } from "../bridge/serviceClient.js";
 import type {
+  FederatedModel,
   ItemProperties,
   ModelBounds,
+  SectionBox,
   SectionState,
   SpatialNode,
   Viewer,
@@ -136,6 +140,12 @@ export interface PluginContext {
   /** Element ids under a spatial node. */
   subtree(expressID: number): number[];
   bounds(expressID: number): ModelBounds | null;
+  /**
+   * Triangle-level clash detection between two sets of element ids, run in a
+   * worker over the geometry already loaded. Hard clashes come from real mesh
+   * intersection; set `clearanceMm` to also catch pairs that pass too close.
+   */
+  clash(a: number[], b: number[], options?: ClashOptions): Promise<SweepResult>;
 
   // -- driving the viewport --------------------------------------------------
   select(ids: number | number[] | null): void;
@@ -145,13 +155,35 @@ export interface PluginContext {
   showAll(): void;
   /** Frame one element, or the whole model when no id is given. */
   frame(expressID?: number): void;
+  /** Frame a point in space, such as where two elements collide. */
+  frameAt(point: [number, number, number], radius?: number): void;
   viewFrom(view: ViewPreset): void;
   sections(): SectionState[];
   setSections(states: SectionState[]): void;
+  /** Six planes at once. Replaces any per-axis section, and vice versa. */
+  sectionBox(): SectionBox | null;
+  setSectionBox(box: SectionBox | null): void;
+  /** A padded box around these elements, or null when none has geometry. */
+  boxAround(ids: number[], pad?: number): SectionBox | null;
+  /** Colour elements by group; an empty map takes the colouring back off. */
+  colorBy(assignment: Map<number, number>, colors: Array<[number, number, number]>): void;
+
+  // -- federated models ------------------------------------------------------
+  /**
+   * Every open model. Element ids carry their model, so `modelOf(id)` names
+   * the file an id came from and a plugin can work per discipline.
+   */
+  models(): FederatedModel[];
+  setModelVisible(index: number, visible: boolean): void;
+  /** Which model an element id belongs to, and its raw STEP line number. */
+  modelOf(id: number): number;
+  expressOf(id: number): number;
 
   // -- app -------------------------------------------------------------------
   /** Released when the plugin closes, so there is nothing to unsubscribe. */
   on(event: PluginEvent, handler: () => void): void;
+  /** Contribute to the offline report. Publishing again replaces the last set. */
+  publishFindings(summary: string, findings: ReportFinding[]): void;
   /** A line in the activity log. */
   log(text: string, kind?: "info" | "success" | "error"): void;
   /** A transient message over the viewport. */

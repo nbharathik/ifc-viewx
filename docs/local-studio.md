@@ -10,6 +10,7 @@ pip install ifcviewx
 ifcviewx                     # serves the viewer and opens the browser
 ifcviewx model.ifc           # with that model already open
 ifcviewx model.ifc --convert # convert to .ifcx first, then open
+ifcviewx check model.ifc     # checks in the terminal, for CI
 ifcviewx mcp                 # expose the running viewer to MCP clients
 ```
 
@@ -30,6 +31,37 @@ code or writes to the model.
 
 **A key vault.** The service holds your assistant provider key and proxies each
 turn, so the key never reaches the page or its storage.
+
+**Checks in CI.** `ifcviewx check` runs the same structural pass the viewer
+runs, with no browser and no network.
+
+## Checking a model from a terminal
+
+```bash
+pip install "ifcviewx[check]"
+ifcviewx check model.ifc --ids spec.ids --json result.json --fail-on error
+```
+
+| exit | meaning |
+| --- | --- |
+| 0 | nothing at or above `--fail-on` |
+| 1 | findings at or above `--fail-on` |
+| 2 | bad input, a missing dependency, or a crash |
+
+That split is the point. With one non-zero code a broken pipeline and a broken
+model look identical, and the wrong person gets paged.
+
+`--fail-on` takes `error` (the default), `warning`, `info` or `none`. `--ids`
+is repeatable. `--json out.json` writes a versioned result carrying a
+`schemaVersion`, the model's sha256, every check with its count, and the
+elements that failed each specification; `--json -` writes it to stdout
+instead of the summary.
+
+IDS runs through [ifctester](https://pypi.org/project/ifctester/), the
+buildingSMART reference implementation, so every facet is evaluated here,
+including the classification and material ones the in-browser validator
+reports as unsupported. It is an optional dependency: without it, `--ids`
+exits 2 and says what to install rather than skipping the check quietly.
 
 ## They are separate apps
 

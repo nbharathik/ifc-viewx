@@ -117,6 +117,13 @@ export class SceneController {
   private sizedHeight = -1;
   /** Kept because clearModel builds a fresh batcher, which defaults to on. */
   private doubleSided = true;
+  /**
+   * Instanced entries smaller than this on screen are skipped. Measured across
+   * the corpus, 2 px removes up to 40 percent of draw calls on instancing-heavy
+   * models and none of the triangles anyone can see. Zero turns it off.
+   */
+  private lodThreshold = 2;
+  private lodCulled = 0;
   /** Same reason: a fresh batcher would forget the ghost preference. */
   private ghostHidden = false;
   private readonly planCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 1000);
@@ -124,6 +131,10 @@ export class SceneController {
   private readonly gizmoScene = new THREE.Scene();
   private readonly gizmos = new THREE.Group();
   private readonly handleAxes = new Map<THREE.Object3D, 'x' | 'y' | 'z'>();
+  /** Built once and then only moved; a slider drag must not allocate. */
+  private boxOutline: THREE.LineSegments | null = null;
+  /** Axes the current handle set was built for, so a drag only repositions. */
+  private handleKey = '';
   private readonly gizmoMaterial = new THREE.MeshBasicMaterial({
     color: 0x3b82f6,
     depthTest: false,
@@ -144,6 +155,8 @@ export class SceneController {
       powerPreference: 'high-performance',
     });
     this.renderer.setPixelRatio(1); // pinned; user scale handled in applySize
+    // render() reads the counters after every pass, so it owns the reset.
+    this.renderer.info.autoReset = false;
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(colors.background);
@@ -170,8 +183,8 @@ export class SceneController {
   }
 
   /** Feed a batch of engine meshes into the GPU batcher. */
-  addMeshes(meshes: IfcMesh[]): void {
-    this.batcher.ingest(meshes);
+  addMeshes(meshes: IfcMesh[], modelIndex = 0): void {
+    this.batcher.ingest(meshes, modelIndex);
   }
 
   // -- visibility ---------------------------------------------------------
@@ -250,6 +263,26 @@ export class SceneController {
     return this.batcher.getBounds();
   }
 
+  setModelVisible(modelIndex: number, visible: boolean): void {
+    this.batcher.setModelVisible(modelIndex, visible);
+  }
+
+  isModelVisible(modelIndex: number): boolean {
+    return this.batcher.isModelVisible(modelIndex);
+  }
+
+  setModelTransform(modelIndex: number, offset: [number, number, number]): void {
+    this.batcher.setModelTransform(modelIndex, offset);
+  }
+
+  getModelTransform(modelIndex: number): [number, number, number] {
+    return this.batcher.getModelTransform(modelIndex);
+  }
+
+  removeModel(modelIndex: number): void {
+    this.batcher.removeModel(modelIndex);
+  }
+
   /** Origin subtracted from IFC coordinates when the model sits far out. */
   getModelOrigin(): [number, number, number] {
     const origin = this.batcher.getOrigin();
@@ -273,6 +306,21 @@ export class SceneController {
   }
 
   /** Timing of the most recent render pass and renders in the last second. */
+  /** Instanced entries the last frame skipped as too small to see. */
+  getLodCulled(): number {
+    return this.lodCulled;
+  }
+
+  /** Pixel threshold for instance culling; 0 draws everything. */
+  setLodThreshold(pixels: number): void {
+    this.lodThreshold = Math.max(0, pixels);
+    if (this.lodThreshold === 0) this.batcher.clearLod();
+  }
+
+  getLodThreshold(): number {
+    return this.lodThreshold;
+  }
+
   getRenderTiming(): { lastMs: number; rendersLastSecond: number } {
     const cutoff = performance.now() - 1000;
     this.renderTimestamps = this.renderTimestamps.filter((t) => t > cutoff);
@@ -297,7 +345,35 @@ export class SceneController {
     out: Uint8Array,
   ): boolean {
     const size = this.renderer.getSize(_size);
+    return this.renderPickWith(this.camera, size.x, size.y, canvasX, canvasY, spread, target, out);
+  }
+
+  /**
+   * The id pass, against any camera and any view size. The plan inset picks
+   * with the same code as the viewport rather than a second implementation:
+   * an inset that disagreed with the 3D view about what is under the cursor
+   * would be worse than one that cannot be clicked at all.
+   *
+   * `viewWidth`/`viewHeight` are the drawing-buffer pixels the given camera
+   * fills, which is the whole canvas for the main camera and the inset square
+   * for the plan one.
+   */
+  private renderPickWith(
+    camera: THREE.PerspectiveCamera | THREE.OrthographicCamera,
+    viewWidth: number,
+    viewHeight: number,
+    canvasX: number,
+    canvasY: number,
+    spread: number,
+    target: THREE.WebGLRenderTarget,
+    out: Uint8Array,
+  ): boolean {
+    const size = { x: viewWidth, y: viewHeight };
     if (size.x < 1 || size.y < 1) return false;
+    // Screen-size culling is a decision about the last drawn frame from the
+    // main camera. The pick pass answers "what is under this pixel" and must
+    // see everything, or a small element becomes unclickable and unsnappable.
+    this.batcher.clearLod();
     // CSS px -> drawing-buffer px (differs while the resolution is scaled).
     // Capped at the target size: a span wider than the patch would downsample
     // and thin silhouettes would vanish from the candidate read.
@@ -314,7 +390,7 @@ export class SceneController {
     const overlayShown = this.measure?.visible ?? false;
     if (this.measure) this.measure.visible = false;
 
-    this.camera.setViewOffset(
+    camera.setViewOffset(
       size.x,
       size.y,
       Math.floor(canvasX * scale) - half,
@@ -326,10 +402,10 @@ export class SceneController {
     this.scene.overrideMaterial = this.batcher.pickMaterial;
     this.renderer.setRenderTarget(target);
     this.renderer.setClearColor(0x000000, 0);
-    this.renderer.render(this.scene, this.camera);
+    this.renderer.render(this.scene, camera);
     this.renderer.readRenderTargetPixels(target, 0, 0, target.width, target.height, out);
 
-    this.camera.clearViewOffset();
+    camera.clearViewOffset();
     this.scene.background = prevBackground;
     this.scene.overrideMaterial = prevOverride;
     this.renderer.setRenderTarget(prevTarget);
@@ -408,7 +484,11 @@ export class SceneController {
     return [point.x, point.y, point.z];
   }
 
-  /** Clip on any combination of the three axis-aligned planes. */
+  /**
+   * Clip on any combination of axis-aligned planes. Materials keep three's
+   * default `clipIntersection = false`, so a fragment outside any one plane is
+   * dropped: six planes are therefore a box, with no extra clipping code.
+   */
   setClipPlanes(planes: Array<{ axis: 'x' | 'y' | 'z'; offset: number; flip: boolean }>): void {
     this.renderer.clippingPlanes = planes.map(({ axis, offset, flip }) => {
       const normal = new THREE.Vector3(
@@ -419,10 +499,45 @@ export class SceneController {
       if (flip) normal.negate();
       return new THREE.Plane(normal, flip ? -offset : offset);
     });
+    this.batcher.setCapMode(planes.length > 0);
   }
 
   clearClipPlane(): void {
     this.renderer.clippingPlanes = [];
+    this.batcher.setCapMode(false);
+  }
+
+  /**
+   * Wireframe around the section box. One unit-cube geometry, moved and scaled
+   * rather than rebuilt, because this is driven from a slider drag.
+   */
+  setSectionBoxOutline(box: { min: [number, number, number]; max: [number, number, number] } | null): void {
+    if (!box) {
+      if (this.boxOutline) this.boxOutline.visible = false;
+      return;
+    }
+    if (!this.boxOutline) {
+      const edges = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1));
+      this.boxOutline = new THREE.LineSegments(
+        edges,
+        new THREE.LineBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.85 }),
+      );
+      this.boxOutline.renderOrder = 1000;
+      this.gizmoScene.add(this.boxOutline);
+    }
+    // Both the box and the batch bounds are in scene space, which is already
+    // origin-subtracted, so nothing is rebased here.
+    this.boxOutline.visible = true;
+    this.boxOutline.scale.set(
+      Math.max(1e-4, box.max[0] - box.min[0]),
+      Math.max(1e-4, box.max[1] - box.min[1]),
+      Math.max(1e-4, box.max[2] - box.min[2]),
+    );
+    this.boxOutline.position.set(
+      (box.min[0] + box.max[0]) / 2,
+      (box.min[1] + box.max[1]) / 2,
+      (box.min[2] + box.max[2]) / 2,
+    );
   }
 
   // -- section handles ------------------------------------------------------
@@ -432,6 +547,20 @@ export class SceneController {
    * it) and without depth test, so a control is never buried in geometry.
    */
   setSectionHandles(planes: Array<{ axis: 'x' | 'y' | 'z'; offset: number; flip: boolean }>): void {
+    // Dragging a handle calls this on every pointermove. The arrows only
+    // depend on which axes are cut, so an unchanged axis set is repositioned
+    // rather than torn down and rebuilt, which is four GPU geometries per
+    // plane per mouse move.
+    const key = planes.map((plane) => plane.axis).sort().join(',');
+    if (key && key === this.handleKey) {
+      for (const [group, axis] of this.handleAxes) {
+        const plane = planes.find((entry) => entry.axis === axis);
+        if (!plane) continue;
+        group.position[axis] = plane.offset;
+      }
+      return;
+    }
+    this.handleKey = key;
     for (const child of [...this.gizmos.children]) {
       this.gizmos.remove(child);
       child.traverse((node) => {
@@ -532,7 +661,7 @@ export class SceneController {
   }
 
   private renderGizmos(): void {
-    if (this.gizmos.children.length === 0) return;
+    if (this.gizmos.children.length === 0 && !this.boxOutline?.visible) return;
     const saved = this.renderer.clippingPlanes;
     this.renderer.clippingPlanes = [];
     this.renderer.autoClear = false;
@@ -563,11 +692,14 @@ export class SceneController {
     return size < 90 ? null : { x: 14, y: 14, size };
   }
 
-  private renderPlan(): void {
-    const rect = this.getPlanRect();
+  /**
+   * Aim the plan camera at the model from directly above. Shared by the inset
+   * render and the inset pick, so a click can never resolve against a
+   * different framing than the one on screen.
+   */
+  private configurePlanCamera(): boolean {
     const b = this.batcher.getBounds();
-    if (!rect || !Number.isFinite(b.min.x) || b.max.x < b.min.x) return;
-
+    if (!Number.isFinite(b.min.x) || b.max.x < b.min.x) return false;
     const cx = (b.min.x + b.max.x) / 2;
     const cz = (b.min.z + b.max.z) / 2;
     const half = (Math.max(b.max.x - b.min.x, b.max.z - b.min.z) * 0.54) || 1;
@@ -583,6 +715,47 @@ export class SceneController {
     cam.up.set(0, 0, -1);
     cam.lookAt(cx, b.min.y, cz);
     cam.updateProjectionMatrix();
+    return true;
+  }
+
+  /**
+   * What is under a point in the plan inset, in inset CSS pixels from its
+   * top-left. The id pass runs against the plan camera over the inset square,
+   * which is why the drawing-buffer scale is applied to the inset size rather
+   * than to the canvas.
+   */
+  pickInPlan(insetX: number, insetY: number): ScenePick | null {
+    const rect = this.getPlanRect();
+    if (!rect || !this.configurePlanCamera()) return null;
+    if (insetX < 0 || insetY < 0 || insetX > rect.size || insetY > rect.size) return null;
+    const scale = this.resolutionScale * this.userScale;
+    const side = Math.max(1, Math.round(rect.size * scale));
+    if (!this.renderPickWith(this.planCamera, side, side, insetX, insetY, 0, this.pickTarget, _pixel)) {
+      return null;
+    }
+    const id = _pixel[0] * 65536 + _pixel[1] * 256 + _pixel[2];
+    if (id === 0) return null;
+    const expressID = this.batcher.expressIDForIndex(id - 1);
+    if (expressID === null) return null;
+    // Straight down, so the world point is the element's own extent under the
+    // click rather than a ray through a perspective frustum.
+    const bounds = this.batcher.elementBounds(expressID);
+    const point: [number, number, number] = bounds
+      ? [
+          (bounds.min.x + bounds.max.x) / 2,
+          (bounds.min.y + bounds.max.y) / 2,
+          (bounds.min.z + bounds.max.z) / 2,
+        ]
+      : [0, 0, 0];
+    return { expressID, point };
+  }
+
+  private renderPlan(): void {
+    // The inset looks down its own orthographic camera, so the main camera's
+    // size decisions do not apply to it.
+    this.batcher.clearLod();
+    const rect = this.getPlanRect();
+    if (!rect || !this.configurePlanCamera()) return;
 
     const scale = this.resolutionScale * this.userScale;
     const px = Math.round(rect.x * scale);
@@ -592,7 +765,7 @@ export class SceneController {
     r.setScissorTest(true);
     r.setViewport(px, py, size, size);
     r.setScissor(px, py, size, size);
-    r.render(this.scene, cam);
+    r.render(this.scene, this.planCamera);
     r.setScissorTest(false);
     const buffer = r.getDrawingBufferSize(new THREE.Vector2());
     r.setViewport(0, 0, buffer.x, buffer.y);
@@ -926,6 +1099,13 @@ export class SceneController {
   render(): void {
     const t0 = performance.now();
     if (this.measure?.visible) this.layoutMeasure();
+    // Counters are read after the whole frame, so three must not reset them at
+    // the start of each pass: without this the gizmo pass is what the perf HUD
+    // reports, which is a handful of arrows rather than the model.
+    this.renderer.info.reset();
+    this.lodCulled = this.lodThreshold > 0
+      ? this.batcher.applyLod(this.camera, this.renderer.domElement.height, this.lodThreshold)
+      : 0;
     this.renderer.render(this.scene, this.camera);
     this.renderGizmos();
     if (this.plan) this.renderPlan();
@@ -970,6 +1150,7 @@ export class SceneController {
   clearModel(): void {
     this.setMeasure([], null, null);
     this.setSectionHandles([]);
+    this.setSectionBoxOutline(null);
     this.clearClipPlane();
     this.scene.remove(this.batcher.group);
     this.batcher.dispose();
@@ -988,6 +1169,10 @@ export class SceneController {
       this.measureParts.live.dispose();
     }
     this.gizmoMaterial.dispose();
+    if (this.boxOutline) {
+      this.boxOutline.geometry.dispose();
+      (this.boxOutline.material as THREE.Material).dispose();
+    }
     this.scene.remove(this.batcher.group);
     this.batcher.dispose();
     this.pickTarget.dispose();
