@@ -220,6 +220,10 @@ export class Shell {
     }
   }
 
+  currentTab(): TabId {
+    return this.activeTab;
+  }
+
   /** A panel whose lazy build failed is not mounted, so it can be retried. */
   unmount(tab: TabId): void {
     this.mounted.delete(tab);

@@ -6,17 +6,22 @@
 // of the viewer, so the surface stays small enough to document on one page.
 import type { PropertyIndex } from "./data.js";
 import type { ClashOptions, SweepResult } from "../ifc/clash.js";
+import type { DistanceOptions, DistanceResult } from "../geometry/distance.js";
+import type { LaserOptions, LaserResult } from "../geometry/laser.js";
 import type { ReportFinding } from "../ui/report.js";
 import type { ServiceClient } from "../bridge/serviceClient.js";
 import type {
   FederatedModel,
   ItemProperties,
+  Measurement,
   ModelBounds,
   SectionBox,
   SectionState,
   SpatialNode,
   Viewer,
   ViewPreset,
+  CameraPose,
+  PickResult,
 } from "../viewer-core/viewer.js";
 
 /**
@@ -108,6 +113,21 @@ export interface PluginPython {
   propose(code: string, onStatus?: (text: string) => void): Promise<string>;
 }
 
+export interface PluginCapabilitySummary {
+  id: string;
+  title: string;
+  description: string;
+  effect: "read" | "view" | "propose" | "write" | "external";
+  cost: "instant" | "interactive" | "long";
+  parallelSafe: boolean;
+}
+
+export interface PluginCapabilities {
+  /** Capabilities this bundled plugin is allowed to invoke. */
+  list(): PluginCapabilitySummary[];
+  execute<T = unknown>(id: string, input?: Record<string, unknown>, signal?: AbortSignal): Promise<T>;
+}
+
 /** One placed element, taken from the spatial tree. */
 export interface ModelElement {
   id: number;
@@ -125,6 +145,7 @@ export interface PluginContext {
   readonly viewer: Viewer;
   readonly service: ServiceClient;
   readonly python: PluginPython;
+  readonly capabilities: PluginCapabilities;
 
   model(): ModelInfo;
 
@@ -146,10 +167,16 @@ export interface PluginContext {
    * intersection; set `clearanceMm` to also catch pairs that pass too close.
    */
   clash(a: number[], b: number[], options?: ClashOptions): Promise<SweepResult>;
+  /** Exact shortest mesh distance and the closest point on each element. */
+  distance(a: number, b: number, options?: DistanceOptions): Promise<DistanceResult>;
+  /** Axis-aligned distances from a picked surface to the next visible meshes. */
+  laser(origin: [number, number, number], options?: LaserOptions): Promise<LaserResult>;
 
   // -- driving the viewport --------------------------------------------------
   select(ids: number | number[] | null): void;
   selection(): number[];
+  lastPick(): PickResult | null;
+  isVisible(id: number): boolean;
   isolate(ids: number[], label?: string): void;
   hide(ids: number[]): void;
   showAll(): void;
@@ -158,6 +185,8 @@ export interface PluginContext {
   /** Frame a point in space, such as where two elements collide. */
   frameAt(point: [number, number, number], radius?: number): void;
   viewFrom(view: ViewPreset): void;
+  camera(): CameraPose;
+  setCamera(pose: CameraPose): void;
   sections(): SectionState[];
   setSections(states: SectionState[]): void;
   /** Six planes at once. Replaces any per-axis section, and vice versa. */
@@ -167,6 +196,9 @@ export interface PluginContext {
   boxAround(ids: number[], pad?: number): SectionBox | null;
   /** Colour elements by group; an empty map takes the colouring back off. */
   colorBy(assignment: Map<number, number>, colors: Array<[number, number, number]>): void;
+  measurements(): Measurement[];
+  addMeasurement(a: [number, number, number], b: [number, number, number]): Measurement;
+  removeMeasurement(id: number): void;
 
   // -- federated models ------------------------------------------------------
   /**
@@ -181,7 +213,7 @@ export interface PluginContext {
 
   // -- app -------------------------------------------------------------------
   /** Released when the plugin closes, so there is nothing to unsubscribe. */
-  on(event: PluginEvent, handler: () => void): void;
+  on(event: PluginEvent, handler: () => void): () => void;
   /** Contribute to the offline report. Publishing again replaces the last set. */
   publishFindings(summary: string, findings: ReportFinding[]): void;
   /** A line in the activity log. */

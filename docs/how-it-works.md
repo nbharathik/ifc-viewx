@@ -26,12 +26,20 @@ files. Anything needing every property builds the
 [property index](plugins/api.md#the-property-index) once and shares it.
 
 Merged chunks free their arrays once the GPU has them, so a drawn model only
-exists in graphics memory. Analysis that needs real surfaces rather than boxes,
-clash detection today, reads a second and much leaner copy of the same
-triangles: positions and indices, one entry per unique geometry, no normals or
-colours. It is handed to the clash worker on the first sweep and never copied
-again, and it is never a second geometry pipeline: the triangles are the ones
-the renderer was given.
+exists in graphics memory. Analysis that needs real surfaces rather than boxes
+reads a second and much leaner copy of the same triangles: positions and
+indices, one entry per unique geometry, no normals or colours. It is handed to
+one lazy geometry worker on the first query and never copied again. Clash,
+shortest-distance, and six-direction axis laser queries share this
+representation. New algorithms extend the service rather than retaining
+another copy.
+
+Assistant viewer tools, browser MCP actions, bundled extensions, and installed
+extension RPC calls share a typed capability registry. Each operation declares
+its schema, effect, cost,
+availability, and cancellation behavior. Large structured outputs can live in
+the bounded result store and be addressed by handles instead of being copied
+into chat history.
 
 ## The parts
 
@@ -40,8 +48,12 @@ the renderer was given.
 | `viewer-core/` | Parsing, geometry, scene, camera, picking |
 | `ui/` | Shell, ribbon, commands, and the built in panels |
 | `ifc/` | Model checks, typed edits, schedules, clash |
+| `capabilities/` | Typed operations, policy checks, and result handles |
+| `geometry/` | Shared retained-mesh worker and geometry queries |
+| `extensions/` | Manifest validation, scoped resources, installed packages, and sandbox RPC |
 | `python/` | Pyodide with IfcOpenShell |
-| `llm/` | The assistant |
+| `assistant/` | Agent runtime, evidence, result tools, provider transports |
+| `llm/` | Provider wire formats, prompts, and compatibility tools |
 | `bridge/` | Talking to Local Studio |
 | `sdk/` | The plugin contract |
 | `plugins/` | The plugins |
@@ -50,16 +62,20 @@ the renderer was given.
 
 The same app runs in two places. In a browser tab it is bounded by what a tab
 can do. Under Local Studio the page also talks to a local service, which adds
-IfcOpenShell conversion, native Python, the MCP bridge and the key vault.
+IfcOpenShell conversion, native Python, trusted native providers, the MCP
+bridge and the key vault.
 
 The hosted viewer never reaches your machine, so there is no pairing step. A
-plugin can ask which tier it is on with `ctx.service.mode()`.
+v2 extension with a declared companion can read its provider state through
+`ctx.local.status()`. The raw service client and session token remain private
+to the host.
 
 ## Rules the code holds to
 
-- **Nothing leaves the machine.** No upload, no telemetry. The only network
-  calls are the WASM binary, the Pyodide runtime on first Python run, and your
-  own assistant provider if you configure one.
+- **The model file stays on the machine.** There is no model upload or
+  telemetry. If you configure an assistant provider, compact viewer context and
+  bounded tool reports are sent to it. A viewport image is sent only when you
+  explicitly attach it for that turn. See [Assistant](assistant.md).
 - **Edits are staged, never applied.** Every edit runs on a copy and comes back
   as a diff you approve. Undo restores the previous checkpoint.
 - **The assistant cannot execute code.** It writes Python and hands it to the

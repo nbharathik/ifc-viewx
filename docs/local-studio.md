@@ -30,10 +30,17 @@ model and select, isolate and frame elements. Read and view only: no tool runs
 code or writes to the model.
 
 **A key vault.** The service holds your assistant provider key and proxies each
-turn, so the key never reaches the page or its storage.
+turn, so the key never reaches the page or its storage. The proxy supports the
+same native tools and streaming events as the browser transports. View images
+are off unless both the user attaches one and the service declares multimodal
+support. See [Assistant](assistant.md).
 
 **Checks in CI.** `ifcviewx check` runs the same structural pass the viewer
 runs, with no browser and no network.
+
+**Native providers.** Separately installed trusted Python packages can add
+exact geometry, large batch jobs, preprocessing, and future native workflows
+through a versioned capability and job protocol.
 
 ## Checking a model from a terminal
 
@@ -69,18 +76,16 @@ The hosted viewer does not reach your machine, so there is no pairing step and
 nothing to paste. Local Studio is a second copy of the same app with a service
 behind it. Your files stay on your machine either way.
 
-## Writing a local tier plugin
+## Writing a native provider
 
-A plugin needing the service is not a folder under `src/plugins`, because the
-work is Python. It is:
+A provider is a separate Python package registered through the
+`ifcviewx.providers` entry-point group. A browser extension declares its
+provider ID and compatible version in `localCompanion`, then calls the
+permission-checked `ctx.local` service. See [Local Studio providers](local-providers.md)
+for the manifest, job, security, and installation contracts.
 
-1. A capability the service reports, in `local-bridge/src/ifcviewx/`.
-2. An entry in `src/plugins/shortcuts.ts` with `tier: "local"`, the
-   `capability` name, and the `command` that opens it.
+The browser extension installer never installs native code. Install the
+provider into the Local Studio Python environment and restart the service.
 
-The catalog then lists it for everyone: greyed with an install hint in a
-browser tab, live in Local Studio. A `web` plugin can also check
-`ctx.service.mode()` and use the service when it is there, which is what the
-Python console does.
-
-Details in [local-bridge/README.md](https://github.com/nbharathik/ifc-viewx/blob/main/local-bridge/README.md).
+Built-in Local Studio details remain in
+[local-bridge/README.md](https://github.com/nbharathik/ifc-viewx/blob/main/local-bridge/README.md).

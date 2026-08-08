@@ -5,6 +5,8 @@ import { elementsOf } from "../sdk/data.js";
 import { buildIndex, type Bm25Index } from "./retrieval.js";
 import type { CameraPose, SectionBox, SpatialNode, Viewer, ViewPreset } from "../viewer-core/viewer.js";
 import type { ModelElement } from "../sdk/types.js";
+import { measureDistance } from "../geometry/distance.js";
+import { measureLaser } from "../geometry/laser.js";
 
 export type IndexedElement = ModelElement;
 
@@ -105,7 +107,7 @@ export interface SemanticActions {
   /** Validate against whatever IDS the user has loaded. */
   ids(): Promise<unknown>;
   /** Triangle-level sweep between two class sets; empty sets mean the preset. */
-  clash(a: string[], b: string[], tolerance: number, clearance: number): Promise<unknown>;
+  clash(a: string[], b: string[], tolerance: number, clearance: number, signal?: AbortSignal): Promise<unknown>;
 }
 
 /** Rows a report may carry into the context before it starts crowding it out. */
@@ -177,6 +179,7 @@ export async function runViewerAction(
   viewer: Viewer,
   raw: string,
   semantic?: SemanticActions,
+  signal?: AbortSignal,
 ): Promise<string> {
   let action: Record<string, unknown>;
   try {
@@ -462,8 +465,92 @@ export async function runViewerAction(
           stringList(action.b),
           Number.isFinite(tolerance) && tolerance >= 0 ? tolerance : 10,
           Number.isFinite(clearance) && clearance > 0 ? clearance : 0,
+          signal,
         ),
       );
+    }
+    case "distance": {
+      const a = Number(action.a);
+      const b = Number(action.b);
+      const maxDistance = Number(action.maxDistance);
+      const result = await measureDistance(viewer, a, b, {
+        maxDistance: Number.isFinite(maxDistance) && maxDistance >= 0 ? maxDistance : undefined,
+        signal,
+      });
+      if (result.missing > 0) throw new Error("one or both elements have no retained mesh geometry");
+      if (result.distance === null) {
+        return JSON.stringify({
+          ...result,
+          note: "the elements are farther apart than maxDistance",
+        });
+      }
+      let measurementId: number | null = null;
+      if (result.pointA && result.pointB && result.point) {
+        viewer.selectMany([a, b], "replace");
+        if (result.distance > 0) {
+          measurementId = viewer.addMeasurement(result.pointA, result.pointB).id;
+        }
+        viewer.fitToPoint(result.point, Math.max(0.5, result.distance * 1.5));
+      }
+      return JSON.stringify({
+        ...result,
+        measurementId,
+        distanceMm: Number((result.distance * 1000).toFixed(2)),
+        pointA: result.pointA?.map(round3),
+        pointB: result.pointB?.map(round3),
+        point: result.point?.map(round3),
+      });
+    }
+    case "laser": {
+      const lastPick = viewer.getLastPick();
+      const supplied = Array.isArray(action.origin) ? action.origin.map(Number) : null;
+      const origin = supplied?.length === 3 && supplied.every(Number.isFinite)
+        ? supplied as [number, number, number]
+        : lastPick?.point;
+      if (!origin) throw new Error("click a model surface or provide an origin point first");
+      const sourceValue = Number(action.source);
+      const maxDistance = Number(action.maxDistance);
+      const result = await measureLaser(viewer, origin, {
+        source: Number.isFinite(sourceValue) && sourceValue > 0 ? sourceValue : lastPick?.expressID,
+        includeHidden: action.includeHidden === true,
+        maxDistance: Number.isFinite(maxDistance) && maxDistance > 0 ? maxDistance : 30,
+        signal,
+      });
+      const measurementIds: number[] = [];
+      const rows = result.axes.flatMap((axis) => [axis.negative, axis.positive]
+        .filter((hit): hit is NonNullable<typeof hit> => hit !== null)
+        .map((hit) => ({
+          axis: hit.axis,
+          direction: hit.direction,
+          id: hit.elementId,
+          type: hit.elementType,
+          distanceMm: Number((hit.distance * 1000).toFixed(2)),
+          point: hit.point.map(round3),
+        })));
+      for (const axis of result.axes) {
+        const start = axis.negative?.point ?? result.origin;
+        const end = axis.positive?.point ?? result.origin;
+        if (start === result.origin && end === result.origin) continue;
+        measurementIds.push(viewer.addMeasurement(start, end).id);
+      }
+      const ids = [...new Set(rows.map((row) => row.id))];
+      if (result.source) ids.unshift(result.source);
+      if (ids.length) viewer.selectMany(ids, "replace");
+      const reach = Math.max(0.75, ...rows.map((row) => row.distanceMm / 1000));
+      viewer.fitToPoint(result.origin, Math.min(reach, 20));
+      return JSON.stringify({
+        ...result,
+        origin: result.origin.map(round3),
+        sourceNormal: result.sourceNormal?.map(round3) ?? null,
+        axes: result.axes.map((axis) => ({
+          axis: axis.axis,
+          negativeMm: axis.negative ? Number((axis.negative.distance * 1000).toFixed(2)) : null,
+          positiveMm: axis.positive ? Number((axis.positive.distance * 1000).toFixed(2)) : null,
+          spanMm: axis.span === null ? null : Number((axis.span * 1000).toFixed(2)),
+        })),
+        rows,
+        measurementIds,
+      });
     }
     default:
       throw new Error(`unknown action "${kind}"`);

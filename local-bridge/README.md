@@ -7,6 +7,7 @@ cannot do:
 - IFC to `.ifcx` conversion with IfcOpenShell, with live progress and cancel
 - native IfcOpenShell Python, so the browser never downloads a runtime
 - model checks and element schedules that need no generated code
+- versioned native providers with bounded asynchronous jobs
 - the viewer exposed to MCP clients (Claude Desktop, Claude Code) as tools
 - an optional assistant proxy so the provider key never reaches the browser
 
@@ -77,6 +78,10 @@ Environment variables use the `IFCVIEWX_` prefix (the pre-rename
 | `IFCVIEWX_CONVERT_TIMEOUT` | `900` | seconds before a conversion is killed |
 | `IFCVIEWX_MEMORY_GB` | `4` | address-space cap for child processes (POSIX) |
 | `IFCVIEWX_RESULT_TTL_S` | `3600` | how long an unapplied edit result is kept |
+| `IFCVIEWX_PROVIDER_TIMEOUT` | `900` | maximum seconds allowed for any provider job |
+| `IFCVIEWX_JOB_TTL_S` | `86400` | how long terminal job metadata is retained |
+| `IFCVIEWX_JOB_CONCURRENCY` | `4` | global concurrent provider job limit |
+| `IFCVIEWX_JOB_QUEUE` | `64` | maximum queued and running provider jobs |
 | `IFCVIEWX_LLM_PROVIDER` | (unset) | `openai-compatible` or `anthropic` to enable the proxy |
 | `IFCVIEWX_LLM_BASE_URL` / `_API_KEY` / `_MODEL` | (unset) | proxy target |
 
@@ -99,6 +104,11 @@ Environment variables use the `IFCVIEWX_` prefix (the pre-rename
 | `POST /llm/chat` | assistant proxy (when configured) |
 | `GET /audit` | recent activity |
 | `WS /ws?token=` | MCP bridge to the browser |
+| `GET /api/v1/providers` | native provider manifests and availability |
+| `POST /api/v1/jobs` | start a typed provider job |
+| `GET /api/v1/jobs/{id}` | provider job status and structured progress |
+| `POST /api/v1/jobs/{id}/cancel` | cancel a provider job |
+| `GET /api/v1/jobs/{id}/result` | read a versioned provider result |
 
 Everything except `/health` and `/models/{sha}` requires the `X-IFC-Token`
 header.
@@ -142,6 +152,26 @@ Unapplied edit results expire. No filename ever comes from a client.
 **Auditing.** Every guarded action appends one line to
 `~/.cache/ifcviewx/audit.jsonl`: what ran, when, from where, and for code
 its hash and first line, never the source itself.
+
+## Native providers
+
+Third-party native capabilities are discovered through the
+`ifcviewx.providers` Python entry-point group. A provider publishes a validated
+schema version 1 manifest and a `run(capability_id, context, inputs, progress)`
+method. Install it into the Local Studio Python environment and restart the
+service.
+
+Provider jobs receive typed JSON and an optional service-resolved model path.
+The browser supplies only the model's SHA-256 content hash. Provider input
+schemas and requests cannot carry filesystem paths. Jobs run in killable child
+processes with global and per-provider concurrency, memory, timeout, result
+size, and TTL limits. Job metadata survives restart; interrupted jobs become
+`failed` with `service_restarted`.
+
+Native packages are trusted software. Process limits contain runaway work but
+do not make an unknown provider safe. The browser extension installer never
+installs native code. The complete author contract is in the viewer docs under
+Local Studio providers.
 
 **What this is not.** The service executes IfcOpenShell code on your machine by
 design. The layers above make accidental and casual-hostile code fail closed;

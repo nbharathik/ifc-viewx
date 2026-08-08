@@ -11,139 +11,18 @@ import {
   disposeElement,
   hardClash,
   type ElementMesh,
-  type Placement,
 } from "./narrow.js";
 import { modelOf } from "../../viewer-core/ids.js";
-import type { TriangleChunk } from "../../viewer-core/scene/triangleStore.js";
+import { GeometryIndex } from "../../geometry/geometryIndex.js";
 import { MM, type ClashPair, type SweepProgress, type SweepResult, type SweepSpec } from "./types.js";
-
-interface StoredGeometry {
-  positions: Float32Array;
-  indices: Uint32Array;
-  /** minX,minY,minZ,maxX,maxY,maxZ in the geometry's own space. */
-  bounds: Float32Array;
-}
-
-interface StoredElement {
-  type: string;
-  geometryIDs: number[];
-  matrices: Float64Array[];
-}
 
 /** Triangles of BVH kept alive between pairs before the oldest are dropped. */
 const BVH_CACHE_TRIANGLES = 4_000_000;
 /** Pairs tested between yields, so cancel and progress get a turn. */
 const SLICE = 400;
 
-export class ClashGeometryIndex {
-  private readonly geometries = new Map<number, Map<number, StoredGeometry>>();
-  private readonly elements = new Map<number, StoredElement>();
 
-  addChunk(chunk: TriangleChunk): void {
-    let table = this.geometries.get(chunk.model);
-    if (!table) {
-      table = new Map();
-      this.geometries.set(chunk.model, table);
-    }
-    let po = 0;
-    let io = 0;
-    for (let i = 0; i < chunk.geometryIDs.length; i++) {
-      const vertexFloats = chunk.vertexCounts[i] * 3;
-      const indexCount = chunk.indexCounts[i];
-      table.set(chunk.geometryIDs[i], {
-        positions: chunk.positions.subarray(po, po + vertexFloats),
-        indices: chunk.indices.subarray(io, io + indexCount),
-        bounds: chunk.localBounds.subarray(i * 6, i * 6 + 6),
-      });
-      po += vertexFloats;
-      io += indexCount;
-    }
-    for (let i = 0; i < chunk.elementIDs.length; i++) {
-      const id = chunk.elementIDs[i];
-      let element = this.elements.get(id);
-      if (!element) {
-        element = { type: chunk.types[i], geometryIDs: [], matrices: [] };
-        this.elements.set(id, element);
-      }
-      element.geometryIDs.push(chunk.geometryOf[i]);
-      element.matrices.push(chunk.matrices.subarray(i * 16, i * 16 + 16));
-    }
-  }
-
-  dropModel(model: number): void {
-    this.geometries.delete(model);
-    for (const id of [...this.elements.keys()]) {
-      if (modelOf(id) === model) this.elements.delete(id);
-    }
-  }
-
-  clear(): void {
-    this.geometries.clear();
-    this.elements.clear();
-  }
-
-  has(id: number): boolean {
-    return this.elements.has(id);
-  }
-
-  typeOf(id: number): string {
-    return this.elements.get(id)?.type ?? "";
-  }
-
-  get elementCount(): number {
-    return this.elements.size;
-  }
-
-  placements(id: number): Placement[] {
-    const element = this.elements.get(id);
-    const table = this.geometries.get(modelOf(id));
-    if (!element || !table) return [];
-    const out: Placement[] = [];
-    for (let i = 0; i < element.geometryIDs.length; i++) {
-      const geometry = table.get(element.geometryIDs[i]);
-      if (geometry) {
-        out.push({ positions: geometry.positions, indices: geometry.indices, matrix: element.matrices[i] });
-      }
-    }
-    return out;
-  }
-
-  /**
-   * Scene-space AABB from the geometry's own box rather than its vertices:
-   * eight corners instead of a full pass, and being conservative under
-   * rotation is exactly what a broad phase wants.
-   */
-  worldBounds(id: number, origin: [number, number, number], offset: [number, number, number]): BroadItem | null {
-    const element = this.elements.get(id);
-    const table = this.geometries.get(modelOf(id));
-    if (!element || !table) return null;
-    const min: [number, number, number] = [Infinity, Infinity, Infinity];
-    const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
-    let any = false;
-    for (let i = 0; i < element.geometryIDs.length; i++) {
-      const geometry = table.get(element.geometryIDs[i]);
-      if (!geometry) continue;
-      const b = geometry.bounds;
-      const m = element.matrices[i];
-      for (let corner = 0; corner < 8; corner++) {
-        const lx = corner & 1 ? b[3] : b[0];
-        const ly = corner & 2 ? b[4] : b[1];
-        const lz = corner & 4 ? b[5] : b[2];
-        const x = m[0] * lx + m[4] * ly + m[8] * lz + m[12] - origin[0] + offset[0];
-        const y = m[1] * lx + m[5] * ly + m[9] * lz + m[13] - origin[1] + offset[1];
-        const z = m[2] * lx + m[6] * ly + m[10] * lz + m[14] - origin[2] + offset[2];
-        if (x < min[0]) min[0] = x;
-        if (y < min[1]) min[1] = y;
-        if (z < min[2]) min[2] = z;
-        if (x > max[0]) max[0] = x;
-        if (y > max[1]) max[1] = y;
-        if (z > max[2]) max[2] = z;
-        any = true;
-      }
-    }
-    return any ? { id, min, max } : null;
-  }
-}
+export { GeometryIndex as ClashGeometryIndex };
 
 /** BVHs kept between pairs, oldest dropped once the triangle budget is met. */
 class MeshCache {
@@ -189,7 +68,7 @@ export interface SweepHooks {
 }
 
 export async function runSweep(
-  index: ClashGeometryIndex,
+  index: GeometryIndex,
   spec: SweepSpec,
   hooks: SweepHooks = {},
 ): Promise<SweepResult> {
@@ -315,5 +194,8 @@ export async function runSweep(
     truncated: truncated || cancelled,
     elapsedMs: Date.now() - started,
     missing,
+    fidelity: "mesh",
+    engine: "browser-bvh",
+    geometryRevision: index.revision,
   };
 }

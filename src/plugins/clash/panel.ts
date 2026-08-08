@@ -4,11 +4,11 @@
 // published through the SDK, so this panel and the assistant's clash tool run
 // one algorithm and can never disagree about a model.
 import {
-  bar, button, cancelClash, classCounts, classPicker, CLASH_LIMIT, copyTable, emptyState, field,
+  bar, button, classCounts, classPicker, CLASH_LIMIT, copyTable, emptyState, field,
   grid, h, hint, idsOfTypes, MEP, note, number, OPENINGS, page, progress, saveCsv, select, stats,
   STRUCTURE, worstDepth,
 } from "@ifcviewx/sdk";
-import type { ClashPair, GridRow, PluginContext, PluginInstance, ReportFinding, SweepResult } from "@ifcviewx/sdk";
+import type { ClashPair, ExtensionContextV2, GridRow, PluginInstance, ReportFinding, SweepResult } from "@ifcviewx/sdk";
 
 const PRESETS: Array<[string, string[], string[]]> = [
   ["Structure vs services", STRUCTURE, MEP],
@@ -22,13 +22,15 @@ const REPORT = ["Kind", "A id", "A GlobalId", "A class", "A name", "B id", "B Gl
 /** Hard clashes deeper than this are the ones that stop work on site. */
 const SEVERE_MM = 50;
 
-export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
+export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstance {
   const setA = new Set<string>();
   const setB = new Set<string>();
-  let tolerance = ctx.read("tolerance", 10);
-  let clearance = ctx.read("clearance", 0);
+  let tolerance = ctx.storage.read("tolerance", 10);
+  let clearance = ctx.storage.read("clearance", 0);
   let result: SweepResult | null = null;
+  let resultHandle = "";
   let running = false;
+  let sweepController: AbortController | null = null;
   /** Bumped by every model change, so a sweep in flight knows it is stale. */
   let models = 0;
 
@@ -39,13 +41,13 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
   const root = page();
 
   const build = (): void => {
-    const elements = ctx.elements();
+    const elements = ctx.model.elements();
     root.replaceChildren();
     if (elements.length === 0) {
       root.appendChild(emptyState("cube", "No model loaded", "Open an IFC file and the class lists fill in."));
       return;
     }
-    const counts = classCounts(elements.filter((el) => ctx.bounds(el.id) !== null));
+    const counts = classCounts(elements.filter((el) => ctx.model.bounds(el.id) !== null));
     const presets: Array<[string, string]> = [["", "Preset"], ...PRESETS.map(([label]) => [label, label] as [string, string])];
 
     const controls = bar(
@@ -58,17 +60,17 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
       }),
       field("Tolerance mm", number(tolerance, (value) => {
         tolerance = Math.max(0, value);
-        ctx.write("tolerance", tolerance);
+        ctx.storage.write("tolerance", tolerance);
       }, 1)),
       field("Clearance mm", number(clearance, (value) => {
         clearance = Math.max(0, value);
-        ctx.write("clearance", clearance);
+        ctx.storage.write("clearance", clearance);
       }, 5)),
       running
-        ? button("Stop", () => cancelClash(ctx.viewer), "warn")
+        ? button("Stop", () => sweepController?.abort(), "warn")
         : button("Run sweep", () => void sweep(), "accent"),
       button("Isolate hits", () => isolateHits()),
-      button("Show all", () => ctx.showAll()),
+      button("Show all", () => ctx.view.showAll()),
       button("CSV", () => void exportCsv()),
       button("Copy", () => void copyRows()),
     );
@@ -108,21 +110,24 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
   const sweep = async (): Promise<void> => {
     if (running) return;
     if (setA.size === 0 || setB.size === 0) {
-      ctx.log("Pick at least one class in each set", "error");
+      ctx.feedback.log("Pick at least one class in each set", "error");
       return;
     }
     const generation = models;
-    const elements = ctx.elements();
-    const has = (id: number): boolean => ctx.bounds(id) !== null;
+    const elements = ctx.model.elements();
+    const has = (id: number): boolean => ctx.model.bounds(id) !== null;
     const a = idsOfTypes(elements, setA, has);
     const b = idsOfTypes(elements, setB, has);
+    const controller = new AbortController();
+    sweepController = controller;
     running = true;
     build();
     status.set(0, 1, `Preparing ${a.length.toLocaleString()} against ${b.length.toLocaleString()} elements`);
     try {
-      const swept = await ctx.clash(a, b, {
+      const swept = await ctx.geometry.clash(a, b, {
         toleranceMm: tolerance,
         clearanceMm: clearance,
+        signal: controller.signal,
         onProgress: ({ done, total, hits }) =>
           status.set(done, total, `Testing geometry, ${hits.toLocaleString()} found so far`),
       });
@@ -130,16 +135,29 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
       // the one that replaced it while the sweep ran.
       if (generation !== models) return;
       result = swept;
+      if (resultHandle) ctx.results.dispose(resultHandle);
+      resultHandle = ctx.results.create("clash.results", swept.hits, {
+        metadata: {
+          toleranceMm: tolerance,
+          clearanceMm: clearance,
+          pairsTested: swept.pairsTested,
+          fidelity: "mesh",
+          engine: "browser-bvh",
+        },
+      }).id;
     } catch (err) {
-      if (generation === models) ctx.log(err instanceof Error ? err.message : String(err), "error");
+      if (generation === models && (!(err instanceof DOMException) || err.name !== "AbortError")) {
+        ctx.feedback.log(err instanceof Error ? err.message : String(err), "error");
+      }
       return;
     } finally {
       status.hide();
       running = false;
+      if (sweepController === controller) sweepController = null;
       if (generation === models) build();
     }
     const hard = hits().filter((hit) => hit.kind === "hard").length;
-    ctx.log(
+    ctx.feedback.log(
       `Clash sweep: ${hard.toLocaleString()} clash(es) in ${(result.elapsedMs / 1000).toFixed(1)}s across ${result.pairsTested.toLocaleString()} geometry tests`,
       hard ? "info" : "success",
     );
@@ -176,7 +194,7 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
       findings.push({ severity: "info", title: `Stopped at ${CLASH_LIMIT.toLocaleString()} results, so the sweep is incomplete` });
     }
     const sets = `${[...setA].join(", ")} against ${[...setB].join(", ")}`;
-    ctx.publishFindings(
+    ctx.feedback.publishFindings(
       `${hard.length.toLocaleString()} clash(es) over ${tolerance} mm from ${result.pairsTested.toLocaleString()} geometry tests. ${sets}.`,
       findings,
     );
@@ -218,8 +236,8 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
       }
       return;
     }
-    const names = new Map(ctx.elements().map((element) => [element.id, element.name]));
-    const label = (id: number, type: string): string => `${type.replace(/^Ifc/, "")} #${ctx.expressOf(id)}`;
+    const names = new Map(ctx.model.elements().map((element) => [element.id, element.name]));
+    const label = (id: number, type: string): string => `${type.replace(/^Ifc/, "")} #${ctx.model.expressOf(id)}`;
     const rows: GridRow[] = hits().slice(0, 500).map((hit) => ({
       cells: [
         hit.kind === "hard" ? "clash" : "close",
@@ -245,22 +263,22 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
 
   /** Both elements alone, framed on the collision rather than on either box. */
   const show = (hit: ClashPair): void => {
-    ctx.isolate([hit.a, hit.b]);
-    ctx.select([hit.a, hit.b]);
+    ctx.view.isolate([hit.a, hit.b]);
+    ctx.view.select([hit.a, hit.b]);
     const reach = Math.max(hit.extent[0], hit.extent[1], hit.extent[2], 0.4);
-    ctx.frameAt(hit.point, reach * 2.5);
+    ctx.view.frameAt(hit.point, reach * 2.5);
   };
 
   /** Everything caught by the sweep, so the whole problem is on screen at once. */
   const isolateHits = (): void => {
-    if (hits().length === 0) return void ctx.log("Run a sweep first", "error");
+    if (hits().length === 0) return void ctx.feedback.log("Run a sweep first", "error");
     const ids = new Set<number>();
     for (const hit of hits()) {
       ids.add(hit.a);
       ids.add(hit.b);
     }
-    ctx.isolate([...ids]);
-    ctx.log(`Isolated ${ids.size.toLocaleString()} clashing element(s)`);
+    ctx.view.isolate([...ids]);
+    ctx.feedback.log(`Isolated ${ids.size.toLocaleString()} clashing element(s)`);
   };
 
   /**
@@ -271,7 +289,7 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
    */
   const globalIds = async (): Promise<Map<number, string>> => {
     const guid = new Map<number, string>();
-    const index = ctx.index();
+    const index = ctx.model.index();
     if (index.ready()) {
       for (const row of index.all()) guid.set(row.id, row.globalId);
       return guid;
@@ -280,7 +298,7 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
     let next = 0;
     const pump = async (): Promise<void> => {
       for (let at = next++; at < ids.length; at = next++) {
-        const props = await ctx.properties(ids[at]).catch(() => null);
+        const props = await ctx.model.properties(ids[at]).catch(() => null);
         const value = props?.attributes.find((item) => item.name === "GlobalId")?.value;
         if (value !== undefined && value !== null) guid.set(ids[at], String(value));
       }
@@ -291,28 +309,31 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
 
   const reportRows = async (): Promise<Array<Array<string | number>>> => {
     const guid = await globalIds();
-    const names = new Map(ctx.elements().map((element) => [element.id, element.name]));
+    const names = new Map(ctx.model.elements().map((element) => [element.id, element.name]));
     return hits().map((hit) => [
       hit.kind,
-      ctx.expressOf(hit.a), guid.get(hit.a) ?? "", hit.aType, names.get(hit.a) ?? "",
-      ctx.expressOf(hit.b), guid.get(hit.b) ?? "", hit.bType, names.get(hit.b) ?? "",
+      ctx.model.expressOf(hit.a), guid.get(hit.a) ?? "", hit.aType, names.get(hit.a) ?? "",
+      ctx.model.expressOf(hit.b), guid.get(hit.b) ?? "", hit.bType, names.get(hit.b) ?? "",
       Math.round(hit.distance * 1000),
       Number(hit.point[0].toFixed(3)), Number(hit.point[1].toFixed(3)), Number(hit.point[2].toFixed(3)),
     ]);
   };
 
   const copyRows = async (): Promise<void> => {
-    if (hits().length === 0) return void ctx.log("Run a sweep first", "error");
+    if (hits().length === 0) return void ctx.feedback.log("Run a sweep first", "error");
     copyTable(REPORT, await reportRows());
   };
 
   const exportCsv = async (): Promise<void> => {
-    if (hits().length === 0) return void ctx.log("Run a sweep first", "error");
-    saveCsv(`clashes-${ctx.model().name || "model"}.csv`, REPORT, await reportRows());
+    if (hits().length === 0) return void ctx.feedback.log("Run a sweep first", "error");
+    saveCsv(`clashes-${ctx.session.model().name || "model"}.csv`, REPORT, await reportRows());
   };
 
-  ctx.on("model", () => {
+  ctx.events.on("model", () => {
     models += 1;
+    sweepController?.abort();
+    if (resultHandle) ctx.results.dispose(resultHandle);
+    resultHandle = "";
     result = null;
     build();
   });
@@ -321,6 +342,6 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
   host.appendChild(root);
 
   return {
-    dispose: () => cancelClash(ctx.viewer),
+    dispose: () => sweepController?.abort(),
   };
 }

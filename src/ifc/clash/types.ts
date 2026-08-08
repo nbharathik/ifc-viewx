@@ -4,8 +4,6 @@
 // and the tests all speak these shapes, so the engine can be exercised in Node
 // without a renderer.
 
-import type { TriangleChunk } from "../../viewer-core/scene/triangleStore.js";
-
 export type ClashKind = "hard" | "clearance";
 
 /** One pair of elements that failed the test, with where and how badly. */
@@ -56,6 +54,10 @@ export interface SweepResult {
   elapsedMs: number;
   /** Requested elements with no retained geometry, so the answer is partial. */
   missing: number;
+  /** Analysis provenance, added without changing existing clash consumers. */
+  fidelity?: "mesh";
+  engine?: "browser-bvh";
+  geometryRevision?: number;
 }
 
 export interface SweepProgress {
@@ -63,18 +65,6 @@ export interface SweepProgress {
   total: number;
   hits: number;
 }
-
-export type ClashRequest =
-  | { type: "geometry"; chunk: TriangleChunk }
-  | { type: "dropModel"; model: number }
-  | { type: "clear" }
-  | { type: "sweep"; id: number; spec: SweepSpec }
-  | { type: "cancel" };
-
-export type ClashResponse =
-  | { type: "progress"; id: number; progress: SweepProgress }
-  | { type: "result"; id: number; result: SweepResult }
-  | { type: "fail"; id: number; message: string };
 
 /** Millimetres per metre. Tolerances are quoted in mm, geometry is in metres. */
 export const MM = 1000;

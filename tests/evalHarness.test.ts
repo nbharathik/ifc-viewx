@@ -4,9 +4,15 @@
 // reporting a clean run. These tests are what make the copy honest.
 import { describe, expect, it } from "vitest";
 import { CASES, TOOLS as MIRROR } from "../scripts/eval-assistant.mjs";
-import { TOOLS, nativeTools } from "../src/llm/tools.js";
+import { AssistantCapabilityAdapter } from "../src/assistant/capabilityAdapter.js";
+import { createViewerCapabilityRegistry } from "../src/capabilities/viewer.js";
+import { TOOLS } from "../src/llm/tools.js";
+import type { Viewer } from "../src/viewer-core/viewer.js";
 
-const real = nativeTools("query");
+const real = new AssistantCapabilityAdapter(
+  createViewerCapabilityRegistry(),
+  { viewer: {} as Viewer },
+).tools("query");
 const mirrorNames = (MIRROR as Array<[string, string, object, string[]]>).map(([name]) => name);
 
 describe("eval tool mirror", () => {
@@ -15,7 +21,7 @@ describe("eval tool mirror", () => {
   });
 
   it("offers no tool the app does not have", () => {
-    const known = new Set(TOOLS.map((tool) => tool.name));
+    const known = new Set(real.map((tool) => tool.name));
     for (const name of mirrorNames) expect(known).toContain(name);
   });
 

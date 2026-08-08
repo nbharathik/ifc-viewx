@@ -9,10 +9,19 @@ import type { LoadProgress } from "./viewer-core/engine/types.js";
 import { PythonEngine, type ProposedEdit } from "./python/pythonEngine.js";
 import { IfcEngine, type EditOp, type ValidationReport } from "./ifc/ifcEngine.js";
 import { isStep, sniffSchema, worthConverting } from "./ifc/format.js";
-import { chat, converse, findProvider, isConfigured, isVerified, loadSettings, type ChatMessage } from "./llm/llmClient.js";
-import { systemPrompt, repairPrompt, extractCode, stripBlock } from "./llm/prompts.js";
-import { buildModelBrief, elementCounts, elementsByType, runViewerAction, type SemanticActions } from "./llm/actions.js";
-import { callToBlock, nativeTools as toolDefs, type ToolAvailability } from "./llm/tools.js";
+import { findProvider, isConfigured, isVerified, loadSettings, type ChatMessage } from "./llm/llmClient.js";
+import { systemPrompt } from "./llm/prompts.js";
+import { buildModelBrief, elementCounts, elementsByType, type SemanticActions } from "./llm/actions.js";
+import type { ToolAvailability } from "./llm/tools.js";
+import { createViewerCapabilityRegistry } from "./capabilities/viewer.js";
+import { VIEWER_POLICY } from "./capabilities/policy.js";
+import { AgentRuntime } from "./assistant/agentRuntime.js";
+import { AssistantCapabilityAdapter } from "./assistant/capabilityAdapter.js";
+import { buildViewerContext, modelRevision } from "./assistant/context.js";
+import { ExtensionToolApprovals } from "./assistant/extensionTools.js";
+import { browserProviderTransport, localProviderTransport } from "./assistant/providerTransport.js";
+import type { AssistantTraceEvent, EvidenceReference, ViewImageAttachment } from "./assistant/types.js";
+import { ViewTransactionManager } from "./assistant/viewTransactions.js";
 import { AssistantPanel, type PendingEditView } from "./ui/sidePanel.js";
 import { TypesPane } from "./ui/typesPane.js";
 import { FilterChip, FilterPanel, FilterStore } from "./ui/filters.js";
@@ -27,11 +36,12 @@ import type { SchedulePanel } from "./ui/schedules.js";
 import { buildMenu, busyRow, CommandPalette, confirmAction, h, icon, lightDismiss, menuKeys, openLayer, promptForm, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
 import { ageLabel, clearChats, readChats, saveChat, type Conversation } from "./llm/chatStore.js";
 import { sampleModel, SAMPLE_NAME } from "./ui/sample.js";
-import type { StreamView } from "./ui/sidePanel.js";
 import { download } from "./sdk/data.js";
 import type { PluginPython } from "./sdk/types.js";
 import { PluginHost } from "./plugins/runtime/host.js";
 import { PluginBrowser } from "./plugins/runtime/browser.js";
+import { CATALOG, setInstalledExtensions } from "./plugins/registry.js";
+import { InstalledExtensionManager, activeInstalledVersion } from "./extensions/installed/manager.js";
 import { ServiceClient, type EditDiff } from "./bridge/serviceClient.js";
 import { BridgeClient } from "./bridge/bridgeClient.js";
 
@@ -196,17 +206,33 @@ let scheduleUi: SchedulePanel | null = null;
 let filterUi: FilterPanel | null = null;
 let idsUi: IdsPanel | null = null;
 let bcfUi: BcfPanel | null = null;
+let assistantAgent: AgentRuntime | null = null;
+
+function agent(): AgentRuntime {
+  if (!assistantAgent) throw new Error("The assistant runtime is still starting");
+  return assistantAgent;
+}
 
 function assistant(): AssistantPanel {
   if (!assistantUi) {
     assistantUi = new AssistantPanel($("tab-assistant"), {
-      onSend: (text) => void handleChat(text),
+      onSend: (text) => void agent().run(text),
       onNewChat: () => newChat(),
-      onStop: () => stopChat(),
+      onStop: () => agent().stop(),
       onSettingsChange: () => refreshAssistantEngine(),
       onRetry: () => retryChat(),
       onHistory: (anchor) => showChatHistory(anchor),
       onAttachmentChange: () => syncAttachment(),
+      onViewAttachmentChange: () => syncAttachment(),
+      onEvidence: (reference) => openEvidence(reference),
+      onIssueProposal: (payload) => void acceptIssueProposal(payload),
+      extensionTools: () => plugins.assistantToolContributions().map(({ owner, contribution }) => ({
+        owner,
+        id: contribution.id,
+        capability: contribution.capability,
+        enabled: extensionToolApprovals.isEnabled(owner, contribution.id),
+      })),
+      onExtensionToolChange: (owner, id, enabled) => extensionToolApprovals.set(owner, id, enabled),
       openConsole: (code) => void plugins.open("python", true, code),
       openLocal: () => connection.open(),
     });
@@ -488,6 +514,9 @@ function dropModelState(): void {
   ifc.setModel(null);
   if (pendingEdit) discardPending();
   service.forgetModel();
+  assistantCapabilities.results.clear();
+  activeAssistantResult = "";
+  focusedAssistantRow = undefined;
   showDropzone();
 }
 
@@ -533,6 +562,9 @@ async function loadBytes(bytes: Uint8Array, name: string, preserveCamera = false
   pythonSynced = false;
   summaryDirty = true;
   lastReport = null;
+  assistantCapabilities.results.clear();
+  activeAssistantResult = "";
+  focusedAssistantRow = undefined;
   // .ifcx is our converted container, not STEP, so the semantic engine gets
   // the original bytes or nothing: it must never answer from a previous model.
   ifc.setModel(semanticCopy);
@@ -1182,35 +1214,8 @@ function discardPending(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Assistant loop: reply -> tool block -> execute -> feed the report back
-const history: ChatMessage[] = [];
-const MAX_REPAIRS = 2;
-const MAX_TOOL_ROUNDS = 8;
-/**
- * Turns kept in the transcript sent to the model. Tool reports are large, so an
- * uncapped history walks into the context limit and costs more every turn. The
- * system prompt is rebuilt each call and is not part of this.
- */
-const MAX_HISTORY = 24;
-
-/**
- * Append a turn, dropping the oldest ones once the window is full. The cut
- * lands on a user message: several providers reject a transcript that opens
- * with an assistant turn, so trimming to an exact count is not enough.
- */
-function remember(entry: ChatMessage): void {
-  history.push(entry);
-  if (history.length <= MAX_HISTORY) return;
-  let cut = history.length - MAX_HISTORY;
-  while (cut < history.length && history[cut].role !== "user") cut += 1;
-  if (cut < history.length) history.splice(0, cut);
-}
-
-/**
- * Everything a viewer action delegates outside this module. IDS and clash are
- * dynamic imports: both belong to panels the user may never open, and neither
- * should sit in the startup bundle just because the assistant might ask.
- */
+// Assistant runtime. Provider transport, tool execution, result state and the
+// transcript live behind one agent so every entry point observes one turn.
 const semanticActions: SemanticActions = {
   check: () => ifc.validate(),
   schedule: (type, properties) => ifc.schedule(type, properties),
@@ -1218,106 +1223,59 @@ const semanticActions: SemanticActions = {
     const { idsReport } = await import("./ui/ids.js");
     return idsReport(viewer);
   },
-  clash: async (a, b, tolerance, clearance) => {
+  clash: async (a, b, tolerance, clearance, signal) => {
     const { clashReport } = await import("./ifc/clash.js");
-    return clashReport(viewer, a, b, tolerance, clearance);
+    return clashReport(viewer, a, b, tolerance, clearance, signal);
   },
 };
 
-/**
- * The mode is a rule, not a hint, so it is enforced where the tool runs rather
- * than only asked for in the prompt. Query refuses every write; edit refuses
- * deletion, which is the one typed op that changes what the viewer draws.
- */
-function modeRefusal(kind: "query" | "edit" | "viewer" | "modelEdit"): string | null {
-  const writes = kind === "modelEdit" || kind === "edit";
-  if (!writes) return null;
-  if (assistantMode() === "query") {
-    return "Refused: this session is in Query mode, which is read-only. Answer the question instead, or tell the user to switch the assistant to Edit mode.";
-  }
-  return null;
-}
+const viewerCapabilities = createViewerCapabilityRegistry();
+let activeAssistantResult = "";
+let focusedAssistantRow: number | undefined;
+const viewerCapabilityContext = {
+  viewer,
+  semantic: semanticActions,
+  viewport: shell.viewerHost,
+  revision: () => modelRevision(viewer),
+  setActiveResult: (id: string, row?: number) => {
+    activeAssistantResult = id;
+    focusedAssistantRow = row;
+  },
+  stageEdit: async (input: Record<string, unknown>) => {
+    const op = parseEditOp(JSON.stringify(input));
+    if (op.op === "deleteElements") throw new Error("Deleting geometry is not available to the assistant");
+    return proposeIfcEdit(op, "ai");
+  },
+};
+const assistantCapabilities = new AssistantCapabilityAdapter(viewerCapabilities, viewerCapabilityContext);
+const extensionToolApprovals = new ExtensionToolApprovals();
+const viewTransactions = new ViewTransactionManager(viewer);
+const tokenTotals = { input: 0, output: 0 };
+const assistantTrace: AssistantTraceEvent[] = [];
+let assistantChatId: string = crypto.randomUUID();
 
 const assistantMode = (): "query" | "edit" =>
   assistantUi ? assistantUi.activeMode() : loadSettings().mode;
 
-/** The report, plus the line that titles it for the model. */
-async function runTool(extracted: {
-  code: string;
-  kind: "query" | "edit" | "viewer" | "modelEdit";
-}): Promise<{ title: string; report: string }> {
-  const refusal = modeRefusal(extracted.kind);
-  if (refusal) throw new Error(refusal);
-  if (extracted.kind === "viewer") {
-    return {
-      title: "Viewer action report",
-      report: await runViewerAction(viewer, extracted.code, semanticActions),
-    };
-  }
-  if (extracted.kind === "modelEdit") {
-    const op = parseEditOp(extracted.code);
-    if (op.op === "deleteElements") {
-      throw new Error(
-        "Refused: deleting entities removes geometry, which Edit mode does not allow. Restrict yourself to setAttribute, renameByPattern and setProperty.",
-      );
-    }
-    return { title: "Edit report", report: await proposeIfcEdit(op, "ai") };
-  }
-  // Python blocks never reach here: handleChat sends them to the escalation
-  // card instead. This is the invariant, stated where it would be broken.
-  throw new Error("Generated Python is never executed. Show it to the user instead.");
+function recordUsage(usage: { input: number; output: number }): void {
+  tokenTotals.input += usage.input;
+  tokenTotals.output += usage.output;
+  assistant().setUsage(usage, tokenTotals);
 }
 
-/** Tokens this session, as the providers reported them. */
-const tokenTotals = { input: 0, output: 0 };
-
-/** Local Studio can hold the provider key, so the browser never sees one. */
-function askModel(messages: ChatMessage[], stream?: StreamView): Promise<string> {
-  return chat(
-    loadSettings(),
-    withSystem(messages),
-    service.proxiesLlm() ? (turns) => service.chat(turns) : undefined,
-    chatAbort?.signal,
-    { onDelta: stream ? (chunk) => stream.push(chunk) : undefined, onUsage: recordUsage },
-  );
-}
-
-/**
- * The selection, as a line the model can act on. Ids are what every viewer
- * action takes, so they go in alongside the names.
- */
-function selectionContext(): string | null {
-  if (!assistant().attachmentEnabled()) return null;
-  const ids = viewer.getSelectedIds();
-  if (ids.length === 0) return null;
-  const types = viewer.getElementTypes();
-  const shown = ids.slice(0, 40);
-  const rows = shown.map((id) => `${types.get(id) ?? "element"} #${id}`);
-  const more = ids.length > shown.length ? `, and ${ids.length - shown.length} more` : "";
-  return `The user has ${ids.length} element(s) selected in the viewer: ${rows.join(", ")}${more}. "This", "these" and "the selection" mean exactly those ids.`;
-}
-
-/**
- * Openers written from the model in front of the user. A generic list invites
- * generic questions; naming the classes this file actually has does not.
- */
 function modelSuggestions(): string[] {
   const counts = elementCounts(viewer);
   const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
   if (entries.length === 0) return [];
-  const out: string[] = [];
   const plain = (type: string): string => type.replace(/^Ifc/, "").replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
-  const biggest = entries[0];
-  out.push(`How many ${plain(biggest[0])}s are there, and on which storeys?`);
+  const out = [`How many ${plain(entries[0][0])}s are there, and on which storeys?`];
   const named = entries.find(([type]) => /Door|Window|Wall|Space|Slab/i.test(type));
   if (named) out.push(`List the ${plain(named[0])}s with their properties`);
   out.push("Run the checks and summarise what is wrong");
-  if (idsLoaded) out.push("Validate this model against the loaded IDS");
-  else if (entries.length > 3) out.push(`What is in this model? Break it down by class`);
+  out.push(idsLoaded ? "Validate this model against the loaded IDS" : "What is in this model? Break it down by class");
   return out.slice(0, 4);
 }
 
-/** The chip under the composer, kept honest as the selection moves. */
 function syncAttachment(): void {
   if (!assistantUi) return;
   const ids = viewer.getSelectedIds();
@@ -1328,213 +1286,74 @@ function syncAttachment(): void {
   );
 }
 
-/**
- * One turn at a time. Stop and New chat both bump the generation, so a turn
- * the user has walked away from can neither write into the transcript nor
- * repopulate the history it was abandoned from.
- */
-let chatSeq = 0;
-let chatAbort: AbortController | null = null;
-
-function stopChat(): void {
-  if (!chatAbort) return;
-  chatSeq += 1;
-  chatAbort.abort();
-  chatAbort = null;
-  const ui = assistant();
-  ui.setBusy(false);
-  ui.setStatus("");
-  ui.addMessage("system", "Stopped.");
+function blobDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read the viewport image"));
+    reader.readAsDataURL(blob);
+  });
 }
 
-/** One tool the model asked for, however it asked. */
-interface WantedCall {
-  /** Native call id, or "" on the fenced protocol. */
-  id: string;
-  /** What the transcript card is titled with. */
-  label: string;
-  block: { code: string; kind: "viewer" | "modelEdit" };
-}
-
-/** What one turn produced, with the protocol difference already absorbed. */
-interface Turn {
-  calls: WantedCall[];
-  /** Generated Python, which is shown and never run. */
-  python: { code: string; kind: "query" | "edit" } | null;
-}
-
-/**
- * Whether this endpoint takes tools natively. Null until a turn has answered;
- * false latches for the session, so a local server without tool support is
- * asked the expensive way exactly once.
- */
-let nativeTools: boolean | null = null;
-
-/**
- * Ask for one turn and normalise the answer. Native tool calling is tried
- * first; the fenced protocol is the fallback, and the only path when Local
- * Studio proxies the key, since the proxy answers in one piece.
- */
-async function askTurn(ui: AssistantPanel): Promise<Turn> {
-  const proxied = service.proxiesLlm();
-  if (!proxied && nativeTools !== false) {
-    const result = await converse(
-      loadSettings(),
-      withSystem(history, true),
-      toolDefs(assistantMode()),
-      chatAbort?.signal,
-      { onUsage: recordUsage },
-    );
-    if (result.toolsUsed) {
-      nativeTools = true;
-      if (result.text) ui.addMessage("assistant", result.text);
-      remember({ role: "assistant", content: result.text, calls: result.calls });
-      const calls: WantedCall[] = [];
-      for (const call of result.calls) {
-        const block = callToBlock(call.name, call.input);
-        if (!block) continue;
-        calls.push({ id: call.id, label: call.name, block });
-      }
-      return { calls, python: null };
-    }
-    nativeTools = false;
-    shell.log("This endpoint does not take tools natively; using the text protocol instead");
+async function captureAssistantContext(includeImage: boolean): Promise<{
+  snapshot: ReturnType<typeof buildViewerContext>;
+  image: ViewImageAttachment | null;
+}> {
+  let image: ViewImageAttachment | null = null;
+  if (includeImage) {
+    const blob = await viewer.captureImage(1280, "image/jpeg", 0.78);
+    if (!blob) throw new Error("The current view could not be captured");
+    const rect = shell.viewerHost.getBoundingClientRect();
+    const scale = Math.min(1, 1280 / Math.max(1, rect.width));
+    image = {
+      mimeType: "image/jpeg",
+      dataUrl: await blobDataUrl(blob),
+      width: Math.max(1, Math.round(rect.width * scale)),
+      height: Math.max(1, Math.round(rect.height * scale)),
+      explicit: true,
+    };
   }
-
-  const stream = ui.startStream();
-  const reply = await askModel(history, stream);
-  remember({ role: "assistant", content: reply });
-  const extracted = extractCode(reply);
-  // The call becomes a card below, so the prose keeps the sentence that
-  // introduced it and loses the JSON: printing both says it twice.
-  stream.settle(extracted ? stripBlock(reply, extracted.code) : reply);
-  if (!extracted) return { calls: [], python: null };
-  const isPython = extracted.kind === "query" || extracted.kind === "edit";
-  // A block the mode forbids is not offered as an escalation: it goes to
-  // runTool, which refuses it in words the model can correct from.
-  if (isPython && !modeRefusal(extracted.kind)) {
-    return { calls: [], python: { code: extracted.code, kind: extracted.kind as "query" | "edit" } };
-  }
-  return {
-    calls: [{ id: "", label: extracted.kind, block: extracted as { code: string; kind: "viewer" | "modelEdit" } }],
-    python: null,
-  };
+  const snapshot = buildViewerContext(viewer, {
+    fileName,
+    schema: schemaName,
+    panel: shell.currentTab(),
+    activeExtension: plugins.activeId() || undefined,
+    activeResult: activeAssistantResult || undefined,
+    focusedRow: focusedAssistantRow,
+    image,
+  });
+  if (assistantUi && !assistantUi.attachmentEnabled()) snapshot.selection = [];
+  return { snapshot, image };
 }
 
-/** A tool report goes back the way the call came, or the model loses the thread. */
-function rememberToolResult(
-  wanted: WantedCall,
-  done: { title: string; report: string } | null,
-  report: string,
-  giveUp: boolean,
-): void {
-  if (wanted.id) {
-    remember({ role: "tool", callId: wanted.id, name: wanted.label, content: report });
-    return;
-  }
-  // No repair prompt on the way out: the transcript would end with an
-  // instruction to retry that nothing is going to answer.
-  if (giveUp) return;
-  remember(
-    done
-      ? {
-          role: "user",
-          content: `${done.title}:\n${report}\n\nContinue with another tool call if needed; otherwise answer in plain text.`,
-        }
-      : { role: "user", content: repairPrompt(report) },
-  );
+function assistantTransport() {
+  return service.proxiesLlm()
+    ? localProviderTransport(service)
+    : browserProviderTransport(loadSettings());
 }
 
-function recordUsage(usage: { input: number; output: number }): void {
-  tokenTotals.input += usage.input;
-  tokenTotals.output += usage.output;
-  assistant().setUsage(usage, tokenTotals);
+function assistantSystem(messages: ChatMessage[], native: boolean): ChatMessage[] {
+  const brief = buildModelBrief(viewer, fileName, schemaName);
+  return [{ role: "system", content: systemPrompt(brief, assistantMode(), native) }, ...messages];
 }
 
-async function handleChat(text: string): Promise<void> {
-  const ui = assistant();
-  if (chatAbort) return void toast("The assistant is still answering", "info");
-  const mine = ++chatSeq;
-  chatAbort = new AbortController();
-  shell.selectTab("assistant");
-  ui.addMessage("user", text);
-  ui.setBusy(true);
-  ui.setStatus("Thinking");
-  try {
-    // The selection rides in front of the question, as a separate turn, so it
-    // is obvious in the transcript what the model was told and never mistaken
-    // for something the user typed.
-    const context = selectionContext();
-    if (context) remember({ role: "user", content: context });
-    remember({ role: "user", content: text });
-    ui.resetAttachment();
-    let repairs = 0;
-    let rounds = 0;
-    let turn = await askTurn(ui);
-    for (;;) {
-      if (mine !== chatSeq) return;
-      if (turn.python) {
-        // Generated Python is always shown and never run, on every tier: the
-        // user reads it and decides, and the loop ends there.
-        ui.addEscalation(turn.python.code, turn.python.kind === "edit" ? "edit" : "query");
-        break;
-      }
-      if (turn.calls.length === 0) break;
-      if (rounds >= MAX_TOOL_ROUNDS) {
-        // Ending on a silently dropped tool call looks like the turn stalled.
-        ui.addMessage("system", `Stopped after ${MAX_TOOL_ROUNDS} tool calls. Ask again to continue.`);
-        break;
-      }
-      rounds += 1;
-
-      let failed = false;
-      // Native tool calling can ask for several at once. They run in order, so
-      // a hide followed by an isolate cannot land the wrong way round.
-      for (const wanted of turn.calls) {
-        if (mine !== chatSeq) return;
-        const card = ui.addToolCall(wanted.label, wanted.block.code);
-        ui.setStatus("Running the tool");
-        let report: string;
-        let done: { title: string; report: string } | null = null;
-        try {
-          done = await runTool(wanted.block);
-          report = done.report;
-        } catch (err) {
-          report = err instanceof Error ? err.message : String(err);
-        }
-        if (!done) failed = true;
-        const giveUp = !done && repairs >= MAX_REPAIRS;
-        card.settle(report, done !== null, !done && !giveUp);
-        if (!done) repairs += 1;
-        rememberToolResult(wanted, done, report, giveUp);
-        if (giveUp) {
-          ui.addMessage("system", `Failed after ${MAX_REPAIRS + 1} attempts. The error is in the card above.`);
-          break;
-        }
-      }
-      if (failed && repairs > MAX_REPAIRS) break;
-
-      ui.setStatus("Reading the report");
-      turn = await askTurn(ui);
-    }
-    persistChat();
-  } catch (err) {
-    // An abort is the user pressing Stop, and stopChat already said so.
-    if (mine === chatSeq) {
-      ui.addMessage("system", `Error: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  } finally {
-    if (mine === chatSeq) {
-      chatAbort = null;
-      ui.setBusy(false);
-      ui.setStatus("");
-      syncAttachment();
-    }
-  }
-}
-
-/** The id the current transcript is stored under; a new chat mints a new one. */
-let chatId: string = crypto.randomUUID();
+assistantAgent = new AgentRuntime({
+  ui: () => assistant(),
+  mode: assistantMode,
+  transport: assistantTransport,
+  tools: assistantCapabilities,
+  viewTransactions,
+  captureContext: captureAssistantContext,
+  attachView: () => assistant().viewAttachmentEnabled(),
+  approvals: () => extensionToolApprovals.list(plugins.assistantToolContributions()),
+  system: assistantSystem,
+  onUsage: recordUsage,
+  onPersist: (messages) => saveChat(chatModelKey(), assistantChatId, messages, Date.now()),
+  onTrace: (event) => {
+    assistantTrace.push(event);
+    if (assistantTrace.length > 200) assistantTrace.splice(0, assistantTrace.length - 200);
+  },
+});
 
 function chatModelKey(): string {
   const stats = viewer.getStats();
@@ -1542,22 +1361,17 @@ function chatModelKey(): string {
 }
 
 function persistChat(): void {
-  saveChat(chatModelKey(), chatId, history, Date.now());
+  saveChat(chatModelKey(), assistantChatId, agent().history(), Date.now());
 }
 
-/** Replay a stored conversation into both the transcript and the history. */
 function openChat(chat: Conversation): void {
-  chatSeq += 1;
-  chatAbort?.abort();
-  chatAbort = null;
-  chatId = chat.id;
-  history.length = 0;
+  assistantChatId = chat.id;
+  agent().replaceHistory(chat.messages);
   const ui = assistant();
   ui.reset();
   ui.setBusy(false);
   for (const message of chat.messages) {
-    history.push(message);
-    if (message.role === "user" || message.role === "assistant") {
+    if ((message.role === "user" && !message.context) || message.role === "assistant") {
       ui.addMessage(message.role, message.content);
     }
   }
@@ -1576,16 +1390,15 @@ function showChatHistory(anchor: HTMLElement): void {
   items.push({ separator: true });
   items.push({
     label: "Delete all saved chats",
-    run: () =>
-      confirmAction(
-        "Delete saved chats",
-        `${chats.length} conversation(s) for this model will be removed from this browser.`,
-        "Delete",
-        () => {
-          clearChats(model);
-          shell.log("Saved chats deleted");
-        },
-      ),
+    run: () => confirmAction(
+      "Delete saved chats",
+      `${chats.length} conversation(s) for this model will be removed from this browser.`,
+      "Delete",
+      () => {
+        clearChats(model);
+        shell.log("Saved chats deleted");
+      },
+    ),
   });
   const menu = buildMenu(items);
   const rect = anchor.getBoundingClientRect();
@@ -1598,43 +1411,54 @@ function showChatHistory(anchor: HTMLElement): void {
 
 function retryChat(): void {
   const ui = assistant();
-  if (chatAbort) return void toast("The assistant is still answering", "info");
+  if (agent().busy) return void toast("The assistant is still answering", "info");
   const last = ui.lastPrompt();
   if (!last) return void toast("Nothing to ask again", "info");
-  // Drop the previous exchange so the model answers the question rather than
-  // continuing from the answer it already gave.
-  let at = history.length - 1;
-  while (at >= 0 && !(history[at].role === "user" && history[at].content === last)) at -= 1;
-  if (at >= 0) history.length = at;
-  void handleChat(last).catch(reportError);
-}
-
-function withSystem(messages: ChatMessage[], native = false): ChatMessage[] {
-  const brief = buildModelBrief(viewer, fileName, schemaName);
-  return [{ role: "system", content: systemPrompt(brief, assistantMode(), native) }, ...messages];
+  agent().rewind(last);
+  void agent().run(last).catch(reportError);
 }
 
 function newChat(): void {
-  // Fence the turn in flight before the transcript goes: otherwise its reply
-  // lands in the new chat and its tool reports go back into the history.
-  chatSeq += 1;
-  chatAbort?.abort();
-  chatAbort = null;
-  // Keep what was said before clearing it, so New chat is not a delete button.
   persistChat();
-  chatId = crypto.randomUUID();
-  history.length = 0;
+  assistantChatId = crypto.randomUUID();
+  agent().clear();
   assistant().reset();
   assistant().setBusy(false);
   shell.selectTab("assistant");
 }
 
+function openEvidence(reference: EvidenceReference): void {
+  if (reference.resultId) {
+    activeAssistantResult = reference.resultId;
+    focusedAssistantRow = reference.row;
+  }
+  const ids = reference.elementIds?.filter((id) => viewer.hasGeometry(id)) ?? [];
+  if (ids.length) {
+    viewer.selectMany(ids, "replace");
+    const box = viewer.boxAround(ids, 0.15);
+    if (box) viewer.fitToPoint([
+      (box.min[0] + box.max[0]) / 2,
+      (box.min[1] + box.max[1]) / 2,
+      (box.min[2] + box.max[2]) / 2,
+    ]);
+    shell.selectTab("properties");
+  } else if (reference.point) {
+    viewer.fitToPoint(reference.point);
+  }
+  shell.log(`Opened evidence ${reference.id}: ${reference.label}`, "info", true);
+}
+
+async function acceptIssueProposal(payload: Record<string, unknown>): Promise<void> {
+  const ids = Array.isArray(payload.elementIds)
+    ? payload.elementIds.map(Number).filter((id) => Number.isFinite(id) && id > 0)
+    : [];
+  await raiseIssue(String(payload.title ?? "Assistant issue"), ids);
+}
+
 function reportError(err: unknown): void {
-  // A cancelled load is the user's own decision, not a failure to shout about.
   if (err instanceof Error && err.name === "CancelledError") return shell.log("Load cancelled");
   shell.log(err instanceof Error ? err.message : String(err), "error", true);
 }
-
 // ---------------------------------------------------------------------------
 // Summary pane
 function renderSummary(): void {
@@ -2261,15 +2085,41 @@ function runCommandOrExplain(id: string): void {
   toast(id.startsWith("edit.") ? "Select an element first" : "Open a model first", "info");
 }
 
+const installedExtensions = new InstalledExtensionManager();
+installedExtensions.reserve(CATALOG.map((plugin) => plugin.id));
+
 const plugins = new PluginHost(
   $("tab-plugins"),
   viewer,
   service,
   {
+    list: () => viewerCapabilities.list((capability) => capability.exposure.sdk === true).map((capability) => ({
+      id: capability.id,
+      title: capability.title,
+      description: capability.description,
+      effect: capability.effect,
+      cost: capability.cost,
+      parallelSafe: capability.parallelSafe,
+    })),
+    execute: <T,>(id: string, input: Record<string, unknown> = {}, signal?: AbortSignal) =>
+      viewerCapabilities.executeValue<T>(id, input, viewerCapabilityContext, {
+        policy: VIEWER_POLICY,
+        signal,
+      }),
+  },
+  {
     showPanel: () => shell.selectTab("plugins"),
     setPanelVisible: () => undefined,
     log: (text, kind) => shell.log(text, kind),
     runCommand: runCommandOrExplain,
+    registerCommand: (contribution, run) => registry.register({
+      id: contribution.id,
+      label: contribution.title,
+      icon: contribution.icon,
+      shortcut: contribution.shortcut,
+      section: "Extensions",
+      run,
+    }),
     // Taken from the viewer, not from activeBytes: onModelLoaded fires from
     // inside viewer.load(), before the load path here records the new bytes.
     modelKey: () => {
@@ -2278,7 +2128,10 @@ const plugins = new PluginHost(
     },
     modelName: () => fileName,
     python: pythonFacet,
-    changed: () => syncPluginToggle(),
+    changed: () => {
+      syncPluginToggle();
+      refreshAssistantEngine();
+    },
   },
   (id) => pluginBrowser.open(id),
 );
@@ -2286,6 +2139,55 @@ const plugins = new PluginHost(
 const pluginBrowser = new PluginBrowser(plugins, service, {
   runCommand: runCommandOrExplain,
   openConnection: () => connection.open(),
+}, installedExtensions);
+
+const installedCommands = new Map<string, () => void>();
+
+function syncInstalledExtensions(): void {
+  setInstalledExtensions(installedExtensions.list(), (id) => installedExtensions.loadModule(id));
+  for (const remove of installedCommands.values()) remove();
+  installedCommands.clear();
+  for (const installation of installedExtensions.list()) {
+    if (!installation.enabled || installation.sessionDisabled) continue;
+    const manifest = activeInstalledVersion(installation).manifest;
+    for (const contribution of manifest.contributes.commands ?? []) {
+      try {
+        installedCommands.set(contribution.id, registry.register({
+          id: contribution.id,
+          label: contribution.title,
+          icon: contribution.icon,
+          shortcut: contribution.shortcut,
+          section: "Extensions",
+          run: () => void plugins.open(manifest.id, true, { type: "command", id: contribution.id }),
+        }));
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        installedExtensions.audit.record({ extensionId: manifest.id, action: "command.register", outcome: "failed", detail });
+        shell.log(`${manifest.name}: ${detail}`, "error");
+      }
+    }
+  }
+  plugins.catalogChanged();
+  pluginBrowser.refresh();
+}
+
+installedExtensions.onChange((change) => {
+  const reload = change.id !== "*" && plugins.isOpen(change.id) &&
+    (change.kind === "updated" || change.kind === "rolled-back");
+  if (change.id !== "*" && (reload || change.kind === "disabled" || change.kind === "uninstalled" || change.kind === "session-disabled")) {
+    plugins.close(change.id);
+  }
+  syncInstalledExtensions();
+  if (reload) void plugins.open(change.id, false, { type: "reload" });
+});
+
+void installedExtensions.initialize().then(() => {
+  const devUrl = new URL(location.href).searchParams.get("extensionDev");
+  if (devUrl) void installedExtensions.connectDevelopment(devUrl).catch((error) => {
+    toast(error instanceof Error ? error.message : String(error), "error");
+  });
+}).catch((error) => {
+  shell.log(`Installed extensions could not start: ${error instanceof Error ? error.message : String(error)}`, "error");
 });
 
 // One way in, in the top bar with the other app-wide controls: the catalog is
@@ -2471,21 +2373,14 @@ bridge.register("fit_view", (params) => {
  * client and the panel cannot drift apart. Edit-tier actions are deliberately
  * absent: an MCP client stages nothing the user has not seen.
  */
-const BRIDGED_ACTIONS = [
-  "find", "search", "counts", "storeys", "selection", "visibility",
-  "isolate", "hide", "unhide", "show", "categories", "color",
-  "section", "sectionBox", "camera", "clash", "check", "schedule", "ids",
-] as const;
-for (const name of BRIDGED_ACTIONS) {
+const bridgedCapabilities = viewerCapabilities.list((capability) => capability.exposure.mcp === true);
+for (const capability of bridgedCapabilities) {
+  const name = capability.id;
   bridge.register(name, async (params) => {
-    const report = await runViewerAction(viewer, JSON.stringify({ action: name, ...params }), semanticActions);
-    // Half the actions answer with JSON and half with a sentence; hand back
-    // the parsed object when there is one so the client is not double-decoding.
-    try {
-      return JSON.parse(report) as unknown;
-    } catch {
-      return { report };
-    }
+    const value = await viewerCapabilities.executeValue(name, params, viewerCapabilityContext, {
+      policy: VIEWER_POLICY,
+    });
+    return typeof value === "string" ? { report: value } : value;
   });
 }
 bridge.register("capture_view", async (params) => {

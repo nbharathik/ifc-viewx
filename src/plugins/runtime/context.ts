@@ -8,9 +8,12 @@ import { toast } from "../../ui/kit.js";
 import { publishFindings } from "../../ui/report.js";
 import { classCounts, type PropertyIndex } from "../../sdk/data.js";
 import { detectClashes } from "../../ifc/clash.js";
+import { measureDistance } from "../../geometry/distance.js";
+import { measureLaser } from "../../geometry/laser.js";
 import { modelElements } from "../../llm/actions.js";
 import type {
   PluginContext,
+  PluginCapabilities,
   PluginEvent,
   PluginManifest,
   PluginPython,
@@ -22,6 +25,7 @@ export interface ContextDeps {
   viewer: Viewer;
   service: ServiceClient;
   python: PluginPython;
+  capabilities: PluginCapabilities;
   index(): PropertyIndex;
   modelKey(): string;
   modelName(): string;
@@ -38,7 +42,7 @@ export interface ScopedContext {
   release(): void;
 }
 
-export function createContext(manifest: PluginManifest, deps: ContextDeps): ScopedContext {
+export function createContext(manifest: Pick<PluginManifest, "id" | "name">, deps: ContextDeps): ScopedContext {
   const bag: Array<() => void> = [];
   const scope = (key: string): string => `ifcviewx.plug.${manifest.id}.${key}`;
   const { viewer } = deps;
@@ -62,6 +66,7 @@ export function createContext(manifest: PluginManifest, deps: ContextDeps): Scop
     viewer,
     service: deps.service,
     python: deps.python,
+    capabilities: deps.capabilities,
 
     model: () => ({ key: deps.modelKey(), name: deps.modelName(), loaded: deps.modelKey() !== "" }),
 
@@ -73,6 +78,8 @@ export function createContext(manifest: PluginManifest, deps: ContextDeps): Scop
     subtree: (expressID) => viewer.getSubtreeElementIds(expressID),
     bounds: (expressID) => viewer.getElementBounds(expressID),
     clash: (a, b, options) => detectClashes(viewer, a, b, options),
+    distance: (a, b, options) => measureDistance(viewer, a, b, options),
+    laser: (origin, options) => measureLaser(viewer, origin, options),
 
     select: (ids) => {
       if (ids === null) viewer.clearSelection();
@@ -80,6 +87,8 @@ export function createContext(manifest: PluginManifest, deps: ContextDeps): Scop
       else viewer.selectMany(ids);
     },
     selection: () => viewer.getSelectedIds(),
+    lastPick: () => viewer.getLastPick(),
+    isVisible: (id) => viewer.isElementVisible(id),
     isolate: (ids, label) => viewer.isolate(ids, label),
     hide: (ids) => viewer.setHidden(ids, true),
     showAll: () => viewer.showAll(),
@@ -89,6 +98,8 @@ export function createContext(manifest: PluginManifest, deps: ContextDeps): Scop
     },
     frameAt: (point, radius) => viewer.fitToPoint(point, radius),
     viewFrom: (view) => viewer.viewFrom(view),
+    camera: () => viewer.getCamera(),
+    setCamera: (pose) => viewer.setCamera(pose),
     sections: () => viewer.getSections(),
     setSections: (states) => viewer.setSections(states),
     sectionBox: () => viewer.getSectionBox(),
@@ -103,7 +114,22 @@ export function createContext(manifest: PluginManifest, deps: ContextDeps): Scop
       else viewer.clearColorOverride();
     },
 
-    on: (event, handler) => void bag.push(subscribe(event, handler)),
+    on: (event, handler) => {
+      const unsubscribe = subscribe(event, handler);
+      let live = true;
+      const off = (): void => {
+        if (!live) return;
+        live = false;
+        const index = bag.indexOf(off);
+        if (index >= 0) bag.splice(index, 1);
+        unsubscribe();
+      };
+      bag.push(off);
+      return off;
+    },
+    measurements: () => viewer.getMeasurements(),
+    addMeasurement: (a, b) => viewer.addMeasurement(a, b),
+    removeMeasurement: (id) => viewer.removeMeasurement(id),
     // Findings are keyed by plugin id, so a re-run replaces the last set
     // rather than stacking a second copy into the report.
     publishFindings: (summary, findings) =>

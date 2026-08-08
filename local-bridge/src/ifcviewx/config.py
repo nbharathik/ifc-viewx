@@ -64,6 +64,10 @@ class Settings:
     store_quota_bytes: int
     result_ttl_s: float
     max_output_chars: int
+    provider_timeout_s: float
+    job_ttl_s: float
+    job_concurrency: int
+    max_queued_jobs: int
     # Paths
     store_dir: Path
     state_dir: Path
@@ -107,6 +111,10 @@ def load() -> Settings:
         store_quota_bytes=int(_num("STORE_GB", 20) * 1024**3),
         result_ttl_s=_num("RESULT_TTL_S", 3600),
         max_output_chars=int(_num("MAX_OUTPUT_CHARS", 200_000)),
+        provider_timeout_s=_num("PROVIDER_TIMEOUT", 900),
+        job_ttl_s=_num("JOB_TTL_S", 86_400),
+        job_concurrency=max(1, min(int(_num("JOB_CONCURRENCY", 4)), 32)),
+        max_queued_jobs=max(1, min(int(_num("JOB_QUEUE", 64)), 1024)),
         store_dir=store,
         state_dir=_dir("STATE", store.parent),
         extra_origins=_origins(),

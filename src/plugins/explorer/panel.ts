@@ -5,7 +5,7 @@
 // the viewport actions and the CSV all work on the whole match set.
 import {
   bar, button, copyTable, emptyState, grid, h, iconButton, note, page, progress, saveCsv, select,
-  type ElementRow, type GridRow, type PluginContext, type Value,
+  type ElementRow, type ExtensionContextV2, type GridRow, type Value,
 } from "@ifcviewx/sdk";
 
 const PAGE = 400;
@@ -24,9 +24,9 @@ const BASE: Column[] = [
   { key: "globalId", label: "GlobalId", read: (row) => row.globalId },
 ];
 
-export function mount(host: HTMLElement, ctx: PluginContext): void {
+export function mount(host: HTMLElement, ctx: ExtensionContextV2): void {
   let rows: ElementRow[] = [];
-  let extra: string[] = ctx.read<string[]>("columns", []);
+  let extra: string[] = ctx.storage.read<string[]>("columns", []);
   let query = "";
   let typeFilter = "";
   let sortBy = 0;
@@ -48,7 +48,7 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
       search,
       button("Isolate", () => act("isolate")),
       button("Hide", () => act("hide")),
-      button("Show all", () => ctx.showAll()),
+      button("Show all", () => ctx.view.showAll()),
       button("CSV", () => exportCsv()),
       button("Copy", () => {
         const cols = columns();
@@ -94,32 +94,32 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
       for (const key of Object.keys(row.props)) counts.set(key, (counts.get(key) ?? 0) + 1);
     }
     const found = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([key]) => key);
-    if (found.length === 0) return void ctx.log(`${typeFilter} carries no property sets`, "error");
+    if (found.length === 0) return void ctx.feedback.log(`${typeFilter} carries no property sets`, "error");
     extra = [...new Set([...extra, ...found.slice(0, 30)])];
-    ctx.write("columns", extra);
+    ctx.storage.write("columns", extra);
     paint();
-    ctx.log(`Added ${Math.min(found.length, 30)} column(s) from ${typeFilter}`);
+    ctx.feedback.log(`Added ${Math.min(found.length, 30)} column(s) from ${typeFilter}`);
   };
 
   const act = (mode: "isolate" | "hide"): void => {
     const ids = filtered().map((row) => row.id);
-    if (ids.length === 0) return void ctx.log("Nothing matches the filter", "error");
-    if (mode === "isolate") ctx.isolate(ids);
-    else ctx.hide(ids);
-    ctx.log(`${mode === "isolate" ? "Isolated" : "Hid"} ${ids.length.toLocaleString()} element(s)`);
+    if (ids.length === 0) return void ctx.feedback.log("Nothing matches the filter", "error");
+    if (mode === "isolate") ctx.view.isolate(ids);
+    else ctx.view.hide(ids);
+    ctx.feedback.log(`${mode === "isolate" ? "Isolated" : "Hid"} ${ids.length.toLocaleString()} element(s)`);
   };
 
   const load = async (): Promise<void> => {
     if (busy) return;
-    if (!ctx.model().loaded) {
+    if (!ctx.session.model().loaded) {
       table.replaceChildren(emptyState("cube", "No model loaded", "Open an IFC file to explore its data."));
       return;
     }
     busy = true;
     status.set(0, 1, "Indexing properties");
-    const key = ctx.model().key;
-    rows = await ctx.index().build((done, total) => status.set(done, total, `Indexing ${done.toLocaleString()} of ${total.toLocaleString()} elements`));
-    if (key !== ctx.model().key) {
+    const key = ctx.session.model().key;
+    rows = await ctx.model.index().build((done, total) => status.set(done, total, `Indexing ${done.toLocaleString()} of ${total.toLocaleString()} elements`));
+    if (key !== ctx.session.model().key) {
       busy = false;
       return void load();
     }
@@ -136,7 +136,7 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
       return;
     }
     const types = [...new Set(rows.map((row) => row.type))].sort();
-    const keys = ctx.index().propertyKeys();
+    const keys = ctx.model.index().propertyKeys();
     controls.replaceChildren(
       bar(
         select([["", `All classes  ${rows.length.toLocaleString()}`], ...types.map((type) => [type, type] as [string, string])], typeFilter, (value) => {
@@ -149,7 +149,7 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
           (value) => {
             if (!value) return;
             extra = [...extra, value];
-            ctx.write("columns", extra);
+            ctx.storage.write("columns", extra);
             paint();
           },
         ),
@@ -158,7 +158,7 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
         ...(typeFilter ? [button("All its columns", () => addClassColumns())] : []),
         ...(extra.length ? [button("Clear columns", () => {
           extra = [];
-          ctx.write("columns", extra);
+          ctx.storage.write("columns", extra);
           paint();
         })] : []),
       ),
@@ -169,7 +169,7 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
         h("span", { text: key }),
         iconButton("x", `Remove ${key}`, () => {
           extra = extra.filter((other) => other !== key);
-          ctx.write("columns", extra);
+          ctx.storage.write("columns", extra);
           paint();
         }, "icon-btn sm"),
       ]);
@@ -182,8 +182,8 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
     const gridRows: GridRow[] = shown.map((row) => ({
       cells: cols.map((column) => column.read(row)),
       pick: () => {
-        ctx.select(row.id);
-        ctx.frame(row.id);
+        ctx.view.select(row.id);
+        ctx.view.frame(row.id);
       },
     }));
     table.replaceChildren(
@@ -199,15 +199,15 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
   const exportCsv = (): void => {
     const cols = columns();
     const found = filtered();
-    if (found.length === 0) return void ctx.log("Nothing to export", "error");
+    if (found.length === 0) return void ctx.feedback.log("Nothing to export", "error");
     saveCsv(
-      `elements-${ctx.model().name || "model"}.csv`,
+      `elements-${ctx.session.model().name || "model"}.csv`,
       cols.map((column) => column.label),
       found.map((row) => cols.map((column) => column.read(row))),
     );
   };
 
-  ctx.on("model", () => {
+  ctx.events.on("model", () => {
     rows = [];
     paint();
     void load();

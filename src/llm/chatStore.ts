@@ -46,7 +46,7 @@ function write(model: string, chats: Conversation[]): boolean {
 
 /** First user line, shortened. What a chat is about is what was asked first. */
 export function titleOf(messages: ChatMessage[]): string {
-  const first = messages.find((message) => message.role === "user");
+  const first = messages.find((message) => message.role === "user" && !message.context);
   const text = (first?.content ?? "").replace(/\s+/g, " ").trim();
   if (!text) return "New chat";
   return text.length > TITLE_CHARS ? `${text.slice(0, TITLE_CHARS - 3)}...` : text;

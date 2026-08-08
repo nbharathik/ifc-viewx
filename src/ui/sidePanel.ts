@@ -12,7 +12,8 @@ import { markdown, codeBlock } from "./markdown.js";
 import { emptyState } from "./shell.js";
 import { loadSettings, saveSettings, type AssistantMode } from "../llm/llmClient.js";
 import { describeCall, prettyJson, summarizeReport, type ToolAvailability } from "../llm/tools.js";
-import { AssistantSettings, connectionFields } from "./aiSettings.js";
+import { AssistantSettings, connectionFields, type AssistantExtensionToolView } from "./aiSettings.js";
+import type { EvidenceReference } from "../assistant/types.js";
 
 export interface PendingEditView {
   summary: string;
@@ -73,6 +74,14 @@ export interface AssistantCallbacks extends EscalationActions {
   onHistory?(anchor: HTMLElement): void;
   /** The selection chip was switched on or off. */
   onAttachmentChange?(): void;
+  /** The current viewport image is explicitly attached or removed. */
+  onViewAttachmentChange?(): void;
+  /** Follow one local evidence reference back into the model or result. */
+  onEvidence?(reference: EvidenceReference): void;
+  /** Accept a staged issue payload after inspecting its evidence. */
+  onIssueProposal?(payload: Record<string, unknown>): void;
+  extensionTools?(): AssistantExtensionToolView[];
+  onExtensionToolChange?(owner: string, id: string, enabled: boolean): void;
 }
 
 export class AssistantPanel {
@@ -106,8 +115,17 @@ export class AssistantPanel {
   private readonly usage = h("span", { class: "tier usage" });
   private readonly historyBtn = h("button", { class: "icon-btn sm", type: "button", title: "Chat history", "aria-label": "Chat history" }, [icon("clock")]);
   private readonly attach = h("div", { class: "attach-row hidden" });
+  private readonly viewAttach = h("button", {
+    class: "icon-btn sm",
+    type: "button",
+    title: "Attach the current view to this turn. Remote providers receive it only when this is on.",
+    "aria-label": "Attach current view",
+    "aria-pressed": "false",
+  }, [icon("camera", 13)]);
   /** The user switched the selection off for this turn. */
   private attachOff = false;
+  private viewAttached = false;
+  private selectionCount = 0;
   private lastSent = "";
   private suggested: string[] = [];
 
@@ -133,6 +151,16 @@ export class AssistantPanel {
     });
 
     this.historyBtn.addEventListener("click", () => callbacks.onHistory?.(this.historyBtn));
+    this.viewAttach.addEventListener("click", () => {
+      if (this.busy) return;
+      this.viewAttached = !this.viewAttached;
+      this.viewAttach.setAttribute("aria-pressed", String(this.viewAttached));
+      this.viewAttach.title = this.viewAttached
+        ? "Current view attached. Click to keep the image on this device."
+        : "Attach the current view to this turn. Remote providers receive it only when this is on.";
+      this.paintAttachments();
+      callbacks.onViewAttachmentChange?.();
+    });
 
     this.settings = new AssistantSettings({
       onChange: () => callbacks.onSettingsChange(),
@@ -141,6 +169,8 @@ export class AssistantPanel {
       onOpen: () => this.closeSetup(),
       openConsole: () => callbacks.openConsole(""),
       openLocal: () => callbacks.openLocal(),
+      extensionTools: () => callbacks.extensionTools?.() ?? [],
+      setExtensionTool: (owner, id, enabled) => callbacks.onExtensionToolChange?.(owner, id, enabled),
     });
 
     const modes = h("div", { class: "seg" });
@@ -178,7 +208,7 @@ export class AssistantPanel {
         this.typing,
         h("div", { class: "row between" }, [this.status, this.engine]),
         this.attach,
-        h("div", { class: "chat-row" }, [this.input, this.send]),
+        h("div", { class: "chat-row" }, [this.viewAttach, this.input, this.send]),
       ]),
     );
     this.setMode(this.mode, false);
@@ -360,23 +390,39 @@ export class AssistantPanel {
 
   /** What the next turn will carry as context, or nothing when nothing is selected. */
   setAttachment(count: number, label: string): void {
+    this.selectionCount = count;
     this.attach.replaceChildren();
-    this.attach.classList.toggle("hidden", count === 0);
-    if (count === 0) return;
-    const clear = iconButton("x", "Do not send the selection", () => {
-      this.attachOff = true;
-      this.callbacks.onAttachmentChange?.();
-    }, "icon-btn sm ghost");
-    const chip = h("button", { class: "chip attach-chip", type: "button", title: label }, [
-      icon("focus", 12),
-      h("span", { text: `${count} selected as context` }),
-    ]);
-    chip.addEventListener("click", () => {
-      this.attachOff = !this.attachOff;
-      this.callbacks.onAttachmentChange?.();
-    });
-    chip.setAttribute("aria-pressed", String(!this.attachOff));
-    this.attach.append(chip, clear);
+    if (count > 0) {
+      const clear = iconButton("x", "Do not send the selection", () => {
+        this.attachOff = true;
+        this.callbacks.onAttachmentChange?.();
+      }, "icon-btn sm ghost");
+      const chip = h("button", { class: "chip attach-chip", type: "button", title: label }, [
+        icon("focus", 12),
+        h("span", { text: `${count} selected as context` }),
+      ]);
+      chip.addEventListener("click", () => {
+        this.attachOff = !this.attachOff;
+        this.callbacks.onAttachmentChange?.();
+      });
+      chip.setAttribute("aria-pressed", String(!this.attachOff));
+      this.attach.append(chip, clear);
+    }
+    this.paintAttachments();
+  }
+
+  private paintAttachments(): void {
+    this.attach.querySelector(".view-attach-chip")?.remove();
+    if (this.viewAttached) {
+      const chip = h("button", {
+        class: "chip view-attach-chip",
+        type: "button",
+        title: "This viewport image will be sent to the configured provider for this turn only.",
+      }, [icon("camera", 12), h("span", { text: "Current view attached" })]);
+      chip.addEventListener("click", () => this.viewAttach.click());
+      this.attach.appendChild(chip);
+    }
+    this.attach.classList.toggle("hidden", this.selectionCount === 0 && !this.viewAttached);
   }
 
   /** False once the user switches the selection chip off for this turn. */
@@ -384,9 +430,16 @@ export class AssistantPanel {
     return !this.attachOff;
   }
 
+  viewAttachmentEnabled(): boolean {
+    return this.viewAttached;
+  }
+
   /** A new turn starts with the selection attached again. */
   resetAttachment(): void {
     this.attachOff = false;
+    this.viewAttached = false;
+    this.viewAttach.setAttribute("aria-pressed", "false");
+    this.paintAttachments();
   }
 
   /** The last thing the user asked, so it can be sent again. */
@@ -413,6 +466,53 @@ export class AssistantPanel {
     const node = h("div", { class: "msg assistant" }, [h("div", { class: "md" }, [markdown(text)])]);
     node.appendChild(copyButton(() => text));
     this.push(node);
+  }
+
+  addEvidence(references: EvidenceReference[]): void {
+    if (references.length === 0) return;
+    const unique = new Map(references.map((reference) => [reference.id, reference]));
+    const rail = h("div", { class: "evidence-rail", "aria-label": "Evidence used in this answer" }, [
+      h("div", { class: "evidence-title" }, [icon("link", 12), h("span", { text: "Model evidence" })]),
+      h("div", { class: "evidence-list" }, [...unique.values()].slice(0, 24).map((reference) => {
+        const button = h("button", {
+          class: "evidence-chip",
+          type: "button",
+          title: `${reference.kind}: ${reference.label}`,
+        }, [
+          h("span", { class: "evidence-id", text: reference.id }),
+          h("span", { class: "evidence-label", text: reference.label }),
+        ]);
+        button.addEventListener("click", () => this.callbacks.onEvidence?.(reference));
+        return button;
+      })),
+    ]);
+    this.push(rail);
+  }
+
+  addRestoreView(label: string, restore: () => void): void {
+    const button = h("button", { class: "btn sm view-restore", type: "button" }, [
+      icon("undo", 13),
+      h("span", { text: "Restore previous view" }),
+    ]);
+    button.addEventListener("click", () => {
+      restore();
+      button.disabled = true;
+      button.replaceChildren(icon("check", 13), h("span", { text: "View restored" }));
+    });
+    this.push(h("div", { class: "view-transaction" }, [h("span", { text: label }), button]));
+  }
+
+  addIssueProposal(payload: Record<string, unknown>, references: EvidenceReference[]): void {
+    const button = h("button", { class: "btn accent sm", type: "button" }, [icon("flag", 13), h("span", { text: "Create issue" })]);
+    button.addEventListener("click", () => this.callbacks.onIssueProposal?.(payload));
+    this.push(h("div", { class: "issue-proposal" }, [
+      h("div", { class: "issue-kicker", text: "Staged issue" }),
+      h("div", { class: "grow" }, [
+        h("div", { class: "issue-title", text: String(payload.title ?? "Untitled issue") }),
+        h("div", { class: "note", text: `${references.length} source reference(s). Nothing has been added yet.` }),
+      ]),
+      button,
+    ]));
   }
 
   /**

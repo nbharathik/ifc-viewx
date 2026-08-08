@@ -25,6 +25,8 @@ export interface Provider {
   note: string;
   /** Known models, best first. Refresh replaces this with the endpoint's own list. */
   models: string[];
+  /** Images may be sent only when this transport and the chosen model support them. */
+  multimodal: boolean;
 }
 
 export const PROVIDERS: Provider[] = [
@@ -38,6 +40,7 @@ export const PROVIDERS: Provider[] = [
     needsKey: true,
     note: "Called straight from this tab with the direct-browser-access header. The key stays in this browser.",
     models: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+    multimodal: true,
   },
   {
     id: "openai",
@@ -49,6 +52,7 @@ export const PROVIDERS: Provider[] = [
     needsKey: true,
     note: "Any OpenAI chat model. Refresh the list to read the models your key can actually use.",
     models: [],
+    multimodal: true,
   },
   {
     id: "openrouter",
@@ -60,6 +64,7 @@ export const PROVIDERS: Provider[] = [
     needsKey: true,
     note: "One key, many vendors. Refresh the list to see everything your account can route to.",
     models: [],
+    multimodal: true,
   },
   {
     id: "local",
@@ -71,6 +76,7 @@ export const PROVIDERS: Provider[] = [
     needsKey: false,
     note: "Fully offline. Start the server with CORS enabled, then refresh the list to see what is installed.",
     models: [],
+    multimodal: false,
   },
   {
     id: "custom",
@@ -82,6 +88,7 @@ export const PROVIDERS: Provider[] = [
     needsKey: false,
     note: "Any endpoint that speaks /chat/completions: vLLM, an org gateway, a proxy.",
     models: [],
+    multimodal: false,
   },
 ];
 
@@ -117,6 +124,12 @@ export interface ChatMessage {
   callId?: string;
   /** On a `tool` message: the tool that produced it. */
   name?: string;
+  /** Present only after the user explicitly attaches the current viewport. */
+  image?: { mimeType: "image/jpeg" | "image/png"; dataUrl: string };
+  /** Structured host context is not rendered as if the user typed it. */
+  context?: boolean;
+  /** Durable audit bit after the one-turn image payload has been discarded. */
+  imageSent?: boolean;
 }
 
 /** What one turn produced: prose, tool calls, or both. */
@@ -321,10 +334,8 @@ export async function chat(
  * local servers vary wildly in tool support and an answer must never be lost to
  * a provider that simply does not implement it.
  *
- * Streaming and tools are deliberately not combined. Streamed tool arguments
- * arrive as JSON fragments that cannot be shown to anyone mid-flight, so a turn
- * that may call a tool is a single request, and the streaming path stays for
- * the prose turns where it is worth something.
+ * Provider streams are normalized here. Prose deltas can paint immediately;
+ * tool arguments are buffered until their JSON is complete.
  */
 export async function converse(
   settings: LlmSettings,
@@ -356,6 +367,14 @@ function anthropicContent(message: ChatMessage): unknown {
     }
     return blocks;
   }
+  if (message.image) {
+    const comma = message.image.dataUrl.indexOf(",");
+    const data = comma >= 0 ? message.image.dataUrl.slice(comma + 1) : message.image.dataUrl;
+    return [
+      { type: "image", source: { type: "base64", media_type: message.image.mimeType, data } },
+      { type: "text", text: message.content },
+    ];
+  }
   return message.content;
 }
 
@@ -370,19 +389,24 @@ async function converseAnthropic(
   const turns = messages
     .filter((m) => m.role !== "system")
     .map((m) => ({ role: m.role === "tool" ? "user" : m.role, content: anthropicContent(m) }));
-  const response = await fetch(`${endpointOf(settings)}/v1/messages`, {
+  const url = `${endpointOf(settings)}/v1/messages`;
+  const headers = { "Content-Type": "application/json", ...authHeaders(findProvider(settings.provider), settings) };
+  const body = {
+    model: settings.model,
+    max_tokens: MAX_TOKENS,
+    ...(system ? { system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }] } : {}),
+    tools: tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.schema })),
+    messages: turns,
+  };
+  if (options.onDelta) {
+    const streamed = await streamConverseAnthropic(url, headers, body, signal, options);
+    if (streamed) return streamed;
+  }
+  const response = await fetch(url, {
     method: "POST",
     signal,
-    headers: { "Content-Type": "application/json", ...authHeaders(findProvider(settings.provider), settings) },
-    body: JSON.stringify({
-      model: settings.model,
-      max_tokens: MAX_TOKENS,
-      // The system prompt and the tool table are identical every turn, so
-      // marking the tail of the system block cacheable is the whole win.
-      ...(system ? { system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }] } : {}),
-      tools: tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.schema })),
-      messages: turns,
-    }),
+    headers,
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
     const detail = await errorDetail(response);
@@ -419,6 +443,15 @@ function openAiMessage(message: ChatMessage): Record<string, unknown> {
       })),
     };
   }
+  if (message.image) {
+    return {
+      role: message.role,
+      content: [
+        { type: "text", text: message.content },
+        { type: "image_url", image_url: { url: message.image.dataUrl, detail: "low" } },
+      ],
+    };
+  }
   return { role: message.role, content: message.content };
 }
 
@@ -429,20 +462,22 @@ async function converseOpenAi(
   signal: AbortSignal | undefined,
   options: ChatOptions,
 ): Promise<TurnResult> {
-  const response = await postOpenAi(
-    `${endpointOf(settings)}/chat/completions`,
-    { "Content-Type": "application/json", ...authHeaders(findProvider(settings.provider), settings) },
-    {
-      model: settings.model,
-      messages: messages.map(openAiMessage),
-      max_tokens: MAX_TOKENS,
-      tools: tools.map((tool) => ({
-        type: "function",
-        function: { name: tool.name, description: tool.description, parameters: tool.schema },
-      })),
-    },
-    signal,
-  );
+  const url = `${endpointOf(settings)}/chat/completions`;
+  const headers = { "Content-Type": "application/json", ...authHeaders(findProvider(settings.provider), settings) };
+  const body = {
+    model: settings.model,
+    messages: messages.map(openAiMessage),
+    max_tokens: MAX_TOKENS,
+    tools: tools.map((tool) => ({
+      type: "function",
+      function: { name: tool.name, description: tool.description, parameters: tool.schema },
+    })),
+  };
+  if (options.onDelta) {
+    const streamed = await streamConverseOpenAi(url, headers, body, signal, options);
+    if (streamed) return streamed;
+  }
+  const response = await postOpenAi(url, headers, body, signal);
   if (!response.ok) {
     const detail = await errorDetail(response);
     // A server without tool support says so at 400 or 404; that is a fallback,
@@ -482,6 +517,153 @@ async function converseOpenAi(
   return { text: message?.content ?? "", calls, toolsUsed: true };
 }
 
+async function streamConverseOpenAi(
+  url: string,
+  headers: Record<string, string>,
+  body: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  options: ChatOptions,
+): Promise<TurnResult | null> {
+  const response = await postOpenAi(url, headers, {
+    ...body,
+    stream: true,
+    stream_options: { include_usage: true },
+  }, signal);
+  if (!response.ok) {
+    const detail = await errorDetail(response);
+    if ((response.status === 400 || response.status === 404) && /tool|function/i.test(detail)) {
+      return { text: "", calls: [], toolsUsed: false };
+    }
+    if ((response.status === 400 || response.status === 404) && /stream/i.test(detail)) return null;
+    throw new Error(`LLM request failed (HTTP ${response.status}): ${detail}`);
+  }
+  if (!/text\/event-stream/i.test(response.headers.get("content-type") ?? "")) return null;
+  const partial = new Map<number, { id: string; name: string; arguments: string }>();
+  let text = "";
+  let usage: ChatUsage | null = null;
+  for await (const payload of sseData(response)) {
+    if (payload === "[DONE]") break;
+    let event: {
+      choices?: Array<{
+        delta?: {
+          content?: string;
+          tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }>;
+        };
+      }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
+    try {
+      event = JSON.parse(payload) as typeof event;
+    } catch {
+      continue;
+    }
+    if (event.usage) usage = { input: asNumber(event.usage.prompt_tokens), output: asNumber(event.usage.completion_tokens) };
+    for (const choice of event.choices ?? []) {
+      const delta = choice.delta ?? {};
+      if (delta.content) {
+        text += delta.content;
+        options.onDelta?.(delta.content);
+      }
+      for (const fragment of delta.tool_calls ?? []) {
+        const index = fragment.index ?? 0;
+        const call = partial.get(index) ?? { id: "", name: "", arguments: "" };
+        if (fragment.id) call.id = fragment.id;
+        if (fragment.function?.name) call.name += fragment.function.name;
+        if (fragment.function?.arguments) call.arguments += fragment.function.arguments;
+        partial.set(index, call);
+      }
+    }
+  }
+  if (usage) options.onUsage?.(usage);
+  const calls = [...partial.entries()].sort((a, b) => a[0] - b[0]).flatMap(([, call]) => {
+    if (!call.name) return [];
+    let input: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(call.arguments || "{}") as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) input = parsed as Record<string, unknown>;
+    } catch {
+      input = {};
+    }
+    return [{ id: call.id, name: call.name, input }];
+  });
+  return { text, calls, toolsUsed: true };
+}
+
+async function streamConverseAnthropic(
+  url: string,
+  headers: Record<string, string>,
+  body: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  options: ChatOptions,
+): Promise<TurnResult | null> {
+  const response = await fetch(url, {
+    method: "POST",
+    signal,
+    headers,
+    body: JSON.stringify({ ...body, stream: true }),
+  });
+  if (!response.ok) {
+    const detail = await errorDetail(response);
+    if (response.status === 400 && /tool/i.test(detail)) return { text: "", calls: [], toolsUsed: false };
+    if ((response.status === 400 || response.status === 404) && /stream/i.test(detail)) return null;
+    throw new Error(`LLM request failed (HTTP ${response.status}): ${detail}`);
+  }
+  if (!/text\/event-stream/i.test(response.headers.get("content-type") ?? "")) return null;
+  const partial = new Map<number, { id: string; name: string; initial: Record<string, unknown>; arguments: string }>();
+  let text = "";
+  let inputTokens = 0;
+  let outputTokens = 0;
+  for await (const payload of sseData(response)) {
+    let event: {
+      type?: string;
+      index?: number;
+      content_block?: { type?: string; id?: string; name?: string; input?: Record<string, unknown> };
+      delta?: { type?: string; text?: string; partial_json?: string };
+      message?: { usage?: { input_tokens?: number } };
+      usage?: { output_tokens?: number };
+      error?: { message?: string };
+    };
+    try {
+      event = JSON.parse(payload) as typeof event;
+    } catch {
+      continue;
+    }
+    if (event.type === "error") throw new Error(event.error?.message ?? "The assistant stream failed");
+    if (event.type === "message_start") inputTokens = asNumber(event.message?.usage?.input_tokens);
+    if (event.type === "message_delta") outputTokens = asNumber(event.usage?.output_tokens);
+    if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
+      partial.set(event.index ?? 0, {
+        id: event.content_block.id ?? "",
+        name: event.content_block.name ?? "",
+        initial: event.content_block.input ?? {},
+        arguments: "",
+      });
+    }
+    if (event.type === "content_block_delta" && event.delta?.type === "text_delta" && event.delta.text) {
+      text += event.delta.text;
+      options.onDelta?.(event.delta.text);
+    }
+    if (event.type === "content_block_delta" && event.delta?.type === "input_json_delta") {
+      const call = partial.get(event.index ?? 0);
+      if (call) call.arguments += event.delta.partial_json ?? "";
+    }
+  }
+  if (inputTokens || outputTokens) options.onUsage?.({ input: inputTokens, output: outputTokens });
+  const calls = [...partial.entries()].sort((a, b) => a[0] - b[0]).map(([, call]) => {
+    let input = call.initial;
+    if (call.arguments) {
+      try {
+        const parsed = JSON.parse(call.arguments) as unknown;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) input = parsed as Record<string, unknown>;
+      } catch {
+        input = {};
+      }
+    }
+    return { id: call.id, name: call.name, input };
+  });
+  return { text, calls, toolsUsed: true };
+}
+
 /**
  * SSE `data:` payloads in order. Servers split events across chunks and some
  * send comment lines as keep-alives, so the buffer is drained by blank line
@@ -498,14 +680,14 @@ async function* sseData(response: Response): AsyncGenerator<string> {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      let split = buffer.indexOf("\n\n");
-      while (split !== -1) {
-        const event = buffer.slice(0, split);
-        buffer = buffer.slice(split + 2);
-        for (const line of event.split("\n")) {
+      let split = /\r?\n\r?\n/.exec(buffer);
+      while (split) {
+        const event = buffer.slice(0, split.index);
+        buffer = buffer.slice(split.index + split[0].length);
+        for (const line of event.split(/\r?\n/)) {
           if (line.startsWith("data:")) yield line.slice(5).trim();
         }
-        split = buffer.indexOf("\n\n");
+        split = /\r?\n\r?\n/.exec(buffer);
       }
     }
   } finally {
@@ -552,7 +734,7 @@ async function chatOpenAi(
   const url = `${endpointOf(settings)}/chat/completions`;
   // Without a cap a self-hosted server allows the whole context window, and
   // a reasoning model will spend it: one tool choice ran past 15k tokens.
-  const body = { model: settings.model, messages, max_tokens: MAX_TOKENS };
+  const body = { model: settings.model, messages: messages.map(openAiMessage), max_tokens: MAX_TOKENS };
   if (options.onDelta) {
     const streamed = await streamOpenAi(url, headers, body, signal, options);
     if (streamed !== null) return streamed;
@@ -697,7 +879,7 @@ async function chatAnthropic(
   const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
   const turns = messages
     .filter((m) => m.role !== "system")
-    .map((m) => ({ role: m.role, content: m.content }));
+    .map((m) => ({ role: m.role, content: anthropicContent(m) }));
   const url = `${endpointOf(settings)}/v1/messages`;
   const headers = {
     "Content-Type": "application/json",

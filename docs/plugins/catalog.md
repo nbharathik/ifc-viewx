@@ -7,33 +7,6 @@ Yours belongs here too: see [writing a plugin](index.md).
 
 These run in the tab. Nothing to install, nothing uploaded.
 
-### Clash Detection
-
-*Find elements that fight for the same space*
-
-Sweeps two sets of IFC classes against each other and reports every pair whose meshes actually intersect. Boxes and BVH nodes only narrow the search; the answer comes from triangle-level intersection of the geometry the viewer already loaded, so a hit is a real collision rather than two boxes overlapping. Set a clearance and it also reports pairs that pass closer than they should. The work runs in a worker, so the viewport keeps drawing while a full discipline is swept, and no geometry leaves the tab.
-
-- Any class against any class, with structure and MEP presets
-- Triangle-level mesh intersection, with penetration depth per hit
-- Clearance checking against the true minimum distance between surfaces
-- Click a hit to isolate the pair and zoom to the collision itself
-- Full report as CSV, with GlobalId and the clash position
-
-<small>Category: Coordination</small>
-
-### Element Explorer
-
-*A spreadsheet over every element and property in the model*
-
-Indexes every placed element with its class, name, storey and GlobalId, then lets you add any property set value as a column. Search across the whole table, sort on any column, and push what is left of the filter straight into the viewport.
-
-- Add any Pset property as a column, ranked by how common it is
-- Search and per-class filtering across the whole model
-- Isolate or hide everything the filter matched
-- CSV export of the filtered rows, not just the visible page
-
-<small>Category: Data</small>
-
 ### Model Compare
 
 *Diff the open model against an earlier IFC*
@@ -98,19 +71,6 @@ Lists every IfcSpace with the areas and volumes the file authored, rolled up by 
 - Click a room to isolate it; CSV export of the whole book
 
 <small>Category: Data</small>
-
-### Storey Navigator
-
-*Walk the building one level at a time*
-
-Lists every storey with its elevation and how much sits on it, and isolates one with a click. The camera stays put as you step up and down, which is what makes comparing levels readable, and the ceiling cut drops a section under the level above so you look into the storey instead of at its slab.
-
-- Every storey with elevation and element count
-- Isolate a level without moving the camera
-- Ceiling cut for a plan style look into the level
-- Step up and down through the building
-
-<small>Category: Navigation</small>
 
 ## Local Studio
 

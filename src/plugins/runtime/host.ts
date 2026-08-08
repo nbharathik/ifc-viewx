@@ -7,15 +7,21 @@
 // second copy of themselves.
 import { h, icon, iconButton, toast } from "../../ui/kit.js";
 import { emptyState } from "../../ui/shell.js";
-import { PropertyIndex } from "../../sdk/data.js";
+import { download, PropertyIndex } from "../../sdk/data.js";
 import { createContext, type ContextDeps } from "./context.js";
 import { CATALOG, findPlugin, isBuiltIn, isLive } from "../registry.js";
-import type { PluginInstance, PluginManifest, PluginPython } from "../../sdk/types.js";
+import type { CatalogPlugin } from "../registry.js";
+import type { PluginCapabilities, PluginInstance, PluginModule, PluginPython } from "../../sdk/types.js";
+import type { ExtensionModuleV2 } from "../../sdk/v2/types.js";
+import type { CommandContribution } from "../../sdk/v2/contributions.js";
+import { ExtensionContributionRegistry, ExtensionScope } from "../../extensions/contributions.js";
+import { createExtensionContextV2 } from "../../extensions/context.js";
+import { ExtensionResultStore } from "../../extensions/results.js";
 import type { Viewer } from "../../viewer-core/viewer.js";
 import type { ServiceClient } from "../../bridge/serviceClient.js";
 
 /** About paragraph and does-list, shared by the panel entry and the browser card. */
-export function pluginDetails(plugin: PluginManifest): HTMLElement {
+export function pluginDetails(plugin: CatalogPlugin): HTMLElement {
   const body = h("div", { class: "plug-inline" }, [
     h("p", { class: "plug-about", text: plugin.about }),
     h("ul", { class: "plug-does" }, plugin.does.map((line) => h("li", { text: line }))),
@@ -37,6 +43,7 @@ export interface HostActions {
   setPanelVisible(visible: boolean): void;
   log(text: string, kind?: "info" | "success" | "error"): void;
   runCommand(id: string): void;
+  registerCommand(contribution: CommandContribution, run: () => void): () => void;
   modelKey(): string;
   modelName(): string;
   python: PluginPython;
@@ -45,7 +52,7 @@ export interface HostActions {
 }
 
 interface Running {
-  manifest: PluginManifest;
+  manifest: CatalogPlugin;
   host: HTMLElement;
   instance: PluginInstance | null;
   release: () => void;
@@ -61,16 +68,27 @@ export class PluginHost {
   private readonly blank: HTMLElement;
   private readonly running = new Map<string, Running>();
   private readonly propertyIndex: PropertyIndex;
+  private readonly contributions = new ExtensionContributionRegistry();
+  private readonly results = new ExtensionResultStore();
   private readonly watchers: Record<"model" | "service", Set<() => void>> = {
     model: new Set(),
     service: new Set(),
   };
   private active = "";
 
+  activeId(): string {
+    return this.active;
+  }
+
+  assistantToolContributions() {
+    return this.contributions.list("assistantTools");
+  }
+
   constructor(
     container: HTMLElement,
     private readonly viewer: Viewer,
     private readonly service: ServiceClient,
+    private readonly capabilities: PluginCapabilities,
     private readonly actions: HostActions,
     private readonly browse: (id?: string) => void,
   ) {
@@ -111,7 +129,7 @@ export class PluginHost {
   }
 
   /** One click runs it; the info toggle explains it without leaving the list. */
-  private entry(plugin: PluginManifest): HTMLElement {
+  private entry(plugin: CatalogPlugin): HTMLElement {
     const live = isLive(plugin, this.service);
     const off = plugin.soon || !live;
     const row = h("button", {
@@ -148,10 +166,10 @@ export class PluginHost {
   }
 
   /** Every surface launches the same way: mount it, run it, or say what it needs. */
-  private launch(plugin: PluginManifest, live: boolean): void {
+  private launch(plugin: CatalogPlugin, live: boolean): void {
     if (plugin.soon) return void toast(`${plugin.name} is not built yet`, "info");
-    if (plugin.load) return void this.open(plugin.id);
     if (!live) return this.browse(plugin.id);
+    if (plugin.load) return void this.open(plugin.id);
     if (plugin.command) this.actions.runCommand(plugin.command);
   }
 
@@ -183,6 +201,12 @@ export class PluginHost {
   async open(id: string, reveal = true, payload?: unknown): Promise<void> {
     const manifest = findPlugin(id);
     if (!manifest?.load) return;
+    const companion = manifest.extension?.localCompanion;
+    if (companion?.required && this.service.matchCompanion(companion.id, companion.version).status !== "available") {
+      this.actions.log(`${manifest.name} requires Local Studio companion ${companion.id} ${companion.version}`, "error");
+      if (reveal) this.browse(id);
+      return;
+    }
     const live = this.running.get(id);
     if (live) {
       this.select(id);
@@ -195,7 +219,16 @@ export class PluginHost {
     }
     const host = h("div", { class: "plug-host" });
     const scoped = createContext(manifest, this.deps());
-    const entry: Running = { manifest, host, instance: null, release: scoped.release };
+    const extensionScope = manifest.extension
+      ? new ExtensionScope(manifest.id, this.contributions)
+      : null;
+    extensionScope?.registerManifest(manifest.extension!.contributes);
+    const release = (): void => {
+      extensionScope?.dispose();
+      if (manifest.extension) this.results.disposeOwner(manifest.id);
+      scoped.release();
+    };
+    const entry: Running = { manifest, host, instance: null, release };
     this.running.set(id, entry);
     this.body.appendChild(host);
     this.select(id);
@@ -205,11 +238,23 @@ export class PluginHost {
       const module = await manifest.load();
       // Closed and reopened while the module was importing: this entry is the
       // old one, and mounting into its detached host would be invisible.
-      if (this.running.get(id) !== entry) return void scoped.release();
-      entry.instance = module.mount(host, scoped.ctx, entry.pending ?? payload) ?? null;
+      if (this.running.get(id) !== entry) return void entry.release();
+      if (manifest.extension && extensionScope) {
+        const context = createExtensionContextV2(manifest.extension, scoped.ctx, extensionScope, {
+          registerCommand: (contribution, run) => this.actions.registerCommand(contribution, run),
+          results: this.results,
+          addOverlayLine: (a, b) => this.viewer.addMeasurement(a, b).id,
+          removeOverlayLine: (measurementId) => this.viewer.removeMeasurement(measurementId),
+          exportFile: (name, data, mimeType) => download(name, data, mimeType),
+        });
+        entry.instance = (module as ExtensionModuleV2).mount(host, context, entry.pending ?? payload) ?? null;
+      } else {
+        entry.instance = (module as PluginModule).mount(host, scoped.ctx, entry.pending ?? payload) ?? null;
+      }
       entry.pending = undefined;
     } catch (err) {
-      if (this.running.get(id) !== entry) return void scoped.release();
+      if (this.running.get(id) !== entry) return void entry.release();
+      entry.release();
       host.replaceChildren(
         emptyState("alert", `${manifest.name} failed to start`, err instanceof Error ? err.message : String(err)),
       );
@@ -219,17 +264,21 @@ export class PluginHost {
   close(id: string): void {
     const entry = this.running.get(id);
     if (!entry) return;
+    entry.release();
     try {
       entry.instance?.dispose?.();
     } catch {
       // a plugin that throws on the way out must not keep its panel alive
     }
-    entry.release();
     entry.host.remove();
     this.running.delete(id);
     if (this.active === id) this.active = [...this.running.keys()][0] ?? "";
     this.select(this.active);
     this.persist();
+  }
+
+  contributionCount(owner?: string): number {
+    return this.contributions.count(owner);
   }
 
   select(id: string): void {
@@ -243,12 +292,23 @@ export class PluginHost {
   modelChanged(): void {
     this.propertyIndex.invalidate();
     this.emit("model");
+    for (const plugin of CATALOG) {
+      if (!plugin.installation || !isLive(plugin, this.service) || this.running.has(plugin.id)) continue;
+      if (plugin.extension?.activationEvents.includes("onModel")) {
+        void this.open(plugin.id, false, { type: "event", name: "model" });
+      }
+    }
   }
 
   /** Repaint what the service can offer; called after every connection probe. */
   refresh(): void {
     if (this.running.size === 0) this.buildCatalog();
     this.emit("service");
+  }
+
+  catalogChanged(): void {
+    if (this.running.size === 0) this.buildCatalog();
+    this.paint();
   }
 
   private emit(event: "model" | "service"): void {
@@ -266,6 +326,7 @@ export class PluginHost {
       viewer: this.viewer,
       service: this.service,
       python: this.actions.python,
+      capabilities: this.capabilities,
       index: () => this.propertyIndex,
       modelKey: () => this.actions.modelKey(),
       modelName: () => this.actions.modelName(),

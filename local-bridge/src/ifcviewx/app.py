@@ -28,9 +28,6 @@ import asyncio
 import hashlib
 import json
 import secrets
-import subprocess
-import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -40,12 +37,13 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from . import audit, llm, store
 from .config import settings
 from .guard import guard_code
-from .sandbox import child_env
+from .provider_jobs import JobRequestError, ProviderJobManager
+from .providers import PROTOCOL_MAX, PROTOCOL_MIN, ProviderRegistry
 from .sandbox import run as run_job
 from .ws import BrowserHub
 
@@ -57,7 +55,7 @@ UPLOAD_CHUNK = 4 * 1024 * 1024
 #: describes this machine. Matched exactly or by prefix so /models (public,
 #: content-addressed reads) is never caught by /model.
 GUARDED_EXACT = {"/model", "/convert", "/python", "/guard", "/validate", "/schedule", "/store", "/audit"}
-GUARDED_PREFIX = ("/python/", "/jobs/", "/store/", "/llm/")
+GUARDED_PREFIX = ("/python/", "/jobs/", "/store/", "/llm/", "/api/")
 AUTH_FAIL_LIMIT = 5
 AUTH_LOCK_S = 30.0
 #: The token is 128 bits, so the throttle only has to be a speed bump. Capping
@@ -66,20 +64,11 @@ AUTH_LOCK_MAX_S = 60.0
 AUTH_CLIENTS_MAX = 256
 #: Marks a response the middleware must not make cross-origin readable.
 NO_CORS_MARK = "x-ifc-no-cors"
-JOB_TTL_S = 3600.0
-TERMINAL_STATUS = {"done", "error", "cancelled"}
-
-_jobs: dict[str, dict] = {}
-_procs: dict[str, subprocess.Popen] = {}
-_jobs_lock = threading.Lock()
 _results: dict[str, Path] = {}
 
 
 def reset_state() -> None:
-    """Drop conversion jobs and edit results. Used between tests."""
-    with _jobs_lock:
-        _jobs.clear()
-    _procs.clear()
+    """Drop process-local edit result references between tests."""
     _results.clear()
 
 
@@ -151,134 +140,52 @@ def _app_root() -> Path | None:
     return None
 
 
-def _set_job(job_id: str, **fields) -> None:
-    with _jobs_lock:
-        job = _jobs.setdefault(job_id, {})
-        job.update(fields)
-        if fields.get("status") in TERMINAL_STATUS:
-            job["finishedAt"] = time.time()
-
-
-def _get_job(job_id: str) -> dict | None:
-    with _jobs_lock:
-        job = _jobs.get(job_id)
-        return dict(job) if job else None
-
-
-def _job_for_sha(sha: str) -> str | None:
-    """The conversion already running for this model, if there is one."""
-    with _jobs_lock:
-        for job_id, job in _jobs.items():
-            if job.get("sha") == sha and job.get("status") not in TERMINAL_STATUS:
-                return job_id
-    return None
-
-
 def _prune() -> None:
-    """Drop long-finished jobs and results whose file the store already swept.
-
-    A job is kept until well after it finishes so the browser can still read
-    its final status; nothing running is ever removed.
-    """
-    cutoff = time.time() - JOB_TTL_S
-    with _jobs_lock:
-        for job_id in [j for j, job in _jobs.items() if 0 < job.get("finishedAt", 0) < cutoff]:
-            del _jobs[job_id]
+    """Drop edit result references whose files have expired."""
     for result_id, path in list(_results.items()):
         if not path.is_file():
             _results.pop(result_id, None)
 
 
-def _convert_worker(job_id: str, source: Path, sha: str) -> None:
-    """Convert in a subprocess so a hostile file cannot wedge the service."""
-    config = settings()
-    target = store.converted_path(sha)
-    staging = target.with_suffix(".ifcx.part")
-    started = time.time()
-    _set_job(job_id, status="running", startedAt=started, percent=0)
-    # stderr goes to a file rather than a pipe: nothing drains a second pipe
-    # while the loop below reads progress from stdout, and a chatty geometry
-    # kernel filling that pipe would stop the child dead.
-    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errors:
-        try:
-            process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-                [
-                    sys.executable,
-                    "-B",
-                    "-m",
-                    "ifcviewx.convert",
-                    str(source),
-                    "-o",
-                    str(staging),
-                    "--progress",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=errors,
-                text=True,
-                env=child_env(),
-            )
-        except OSError as exc:
-            _set_job(job_id, status="error", error=str(exc))
-            return
+def _legacy_job(manager: ProviderJobManager, job: dict) -> dict:
+    status = job.get("status")
+    progress = job.get("progress") or {}
+    total = float(progress.get("total") or 0)
+    percent = round(float(progress.get("done") or 0) * 100 / total) if total > 0 else 0
+    body = {
+        "jobId": job["id"],
+        "status": {
+            "succeeded": "done",
+            "failed": "error",
+        }.get(status, status),
+        "percent": percent,
+        "phase": progress.get("phase"),
+        "message": progress.get("message"),
+    }
+    if status == "succeeded":
+        state, result = manager.result(job["id"])
+        if state == "ok" and isinstance(result, dict) and isinstance(result.get("value"), dict):
+            body.update(result["value"])
+    elif status in {"failed", "cancelled"}:
+        error = job.get("error") or {}
+        body["error"] = error.get("message") or error.get("code") or "job failed"
+        body["errorCode"] = error.get("code")
+    return body
 
-        _procs[job_id] = process
-        expired = threading.Event()
 
-        def _expire() -> None:
-            expired.set()
-            process.kill()
-
-        # Armed here instead of waited on below: the drain only ends when the
-        # child exits, so a converter that hangs mid-geometry would never reach
-        # a wait(timeout=...) and the deadline would never be enforced.
-        watchdog = threading.Timer(config.convert_timeout_s, _expire)
-        watchdog.daemon = True
-        watchdog.start()
-        try:
-            assert process.stdout is not None
-            for line in process.stdout:
-                try:
-                    update = json.loads(line)
-                except ValueError:
-                    continue
-                _set_job(job_id, percent=update.get("percent", 0), meshes=update.get("meshes", 0))
-            process.wait()
-        finally:
-            watchdog.cancel()
-            _procs.pop(job_id, None)
-
-        if expired.is_set():
-            staging.unlink(missing_ok=True)
-            _set_job(
-                job_id,
-                status="error",
-                error=f"conversion exceeded {config.convert_timeout_s:.0f}s",
-            )
-            audit.record("convert.failed", sha=sha[:12], reason="timeout")
-            return
-        if (_get_job(job_id) or {}).get("status") == "cancelled":
-            staging.unlink(missing_ok=True)
-            return
-        if process.returncode != 0 or not staging.is_file():
-            staging.unlink(missing_ok=True)
-            errors.seek(0)
-            detail = errors.read().strip().splitlines()
-            _set_job(job_id, status="error", error=detail[-1] if detail else "conversion failed")
-            audit.record("convert.failed", sha=sha[:12])
-            return
-
-    staging.replace(target)
-    elapsed = round((time.time() - started) * 1000)
-    _set_job(
-        job_id,
-        status="done",
-        percent=100,
-        url=f"/models/{sha}.ifcx",
-        bytes=target.stat().st_size,
-        elapsedMs=elapsed,
-    )
-    audit.record("convert.done", sha=sha[:12], bytes=target.stat().st_size, elapsedMs=elapsed)
-    store.sweep(keep={sha})
+def _legacy_outcome(manager: ProviderJobManager, job: dict) -> dict:
+    if job.get("status") == "succeeded":
+        state, result = manager.result(job["id"])
+        if state == "ok" and isinstance(result, dict) and isinstance(result.get("value"), dict):
+            return result["value"]
+        return {"error": "result_expired", "message": "the provider result expired"}
+    error = job.get("error") or {}
+    details = error.get("details") if isinstance(error.get("details"), dict) else {}
+    return {
+        **details,
+        "error": error.get("code") or job.get("status") or "provider_failed",
+        "message": error.get("message") or "provider job failed",
+    }
 
 
 def create_app(hub: BrowserHub) -> FastAPI:
@@ -286,6 +193,10 @@ def create_app(hub: BrowserHub) -> FastAPI:
     app = FastAPI(title="ifcviewx", docs_url=None, redoc_url=None, openapi_url=None)
     app_root = _app_root()
     app.state.app_root = app_root
+    providers = ProviderRegistry.discover()
+    provider_jobs = ProviderJobManager(providers)
+    app.state.providers = providers
+    app.state.provider_jobs = provider_jobs
 
     # Per-service, so a wrong token slows that client down without leaking
     # state between services in the same process.
@@ -377,6 +288,7 @@ def create_app(hub: BrowserHub) -> FastAPI:
             "version": _version(),
             "app": app_root is not None,
             "capabilities": _capabilities(),
+            "providerApi": {"min": PROTOCOL_MIN, "max": PROTOCOL_MAX},
             "pythonTimeoutS": config.python_timeout_s,
             "readonly": config.readonly,
             "pythonEnabled": config.allow_python,
@@ -386,6 +298,73 @@ def create_app(hub: BrowserHub) -> FastAPI:
             body["llm"] = llm.describe()
             body["browserConnected"] = hub.connected()
         return JSONResponse(body, headers={"Cache-Control": "no-store"})
+
+    # -- native provider protocol ------------------------------------------
+    @app.get("/api/v1/providers")
+    async def provider_listing() -> JSONResponse:
+        return JSONResponse(providers.listing(), headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/v1/jobs")
+    async def provider_job_start(request: Request) -> JSONResponse:
+        body = await _json(request)
+        allowed = {"providerId", "providerVersion", "capabilityId", "modelSha", "input"}
+        extra = sorted(set(body) - allowed)
+        if extra:
+            return JSONResponse(
+                {"error": "bad_request", "message": f"unknown fields: {', '.join(extra)}"},
+                status_code=400,
+            )
+        required = ("providerId", "providerVersion", "capabilityId")
+        if any(not isinstance(body.get(name), str) or not body[name].strip() for name in required):
+            return JSONResponse(
+                {"error": "bad_request", "message": "providerId, providerVersion and capabilityId are required"},
+                status_code=400,
+            )
+        try:
+            job = provider_jobs.submit(
+                body["providerId"],
+                body["providerVersion"],
+                body["capabilityId"],
+                body.get("input", {}),
+                body.get("modelSha"),
+            )
+        except JobRequestError as exc:
+            return JSONResponse(
+                {"error": exc.code, "message": exc.message},
+                status_code=exc.status_code,
+            )
+        return JSONResponse(job, status_code=202, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/jobs/{job_id}")
+    async def provider_job_status(job_id: str) -> JSONResponse:
+        job = provider_jobs.get(job_id)
+        if job is None:
+            return JSONResponse({"error": "unknown_job"}, status_code=404)
+        return JSONResponse(job, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/v1/jobs/{job_id}/cancel")
+    async def provider_job_cancel(job_id: str) -> JSONResponse:
+        job = provider_jobs.cancel(job_id)
+        if job is None:
+            return JSONResponse({"error": "unknown_job"}, status_code=404)
+        return JSONResponse(job, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/jobs/{job_id}/result")
+    async def provider_job_result(job_id: str) -> JSONResponse:
+        state, result = provider_jobs.result(job_id)
+        if state == "unknown":
+            return JSONResponse({"error": "unknown_job"}, status_code=404)
+        if state == "expired":
+            return JSONResponse(
+                {"error": "result_expired", "message": "the provider result has expired"},
+                status_code=410,
+            )
+        if state == "not_ready":
+            return JSONResponse(
+                {"error": "result_not_ready", "status": result.get("status") if result else "unknown"},
+                status_code=409,
+            )
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
     # -- model store --------------------------------------------------------
     @app.post("/model")
@@ -481,47 +460,33 @@ def create_app(hub: BrowserHub) -> FastAPI:
             return JSONResponse({"error": "no_ifcopenshell"}, status_code=501)
         body = await _json(request)
         sha = str(body.get("sha", ""))
-        if not store.is_sha(sha):
-            return JSONResponse({"error": "bad_sha"}, status_code=400)
-        source = store.source_path(sha)
-        if not source.is_file():
-            return JSONResponse({"error": "unknown_model"}, status_code=404)
-        if store.converted_path(sha).is_file():
+        if store.is_sha(sha) and store.converted_path(sha).is_file():
             return JSONResponse({"status": "done", "percent": 100, "url": f"/models/{sha}.ifcx"})
-        _prune()
-        # Two conversions of one model would write the same .ifcx.part, and the
-        # loser's half-written file would be published under a cache key that is
-        # never checked again. The second caller joins the first job instead.
-        running = _job_for_sha(sha)
-        if running:
-            return JSONResponse({"jobId": running, "status": _get_job(running)["status"]})
-        job_id = uuid.uuid4().hex
-        _set_job(job_id, status="queued", sha=sha, percent=0)
-        threading.Thread(
-            target=_convert_worker, args=(job_id, source, sha), daemon=True, name=f"convert-{sha[:8]}"
-        ).start()
-        audit.record("convert.start", sha=sha[:12], jobId=job_id)
-        return JSONResponse({"jobId": job_id, "status": "queued"})
+        try:
+            job = provider_jobs.submit(
+                "org.ifcviewx.core",
+                "*",
+                "ifc.convert",
+                {},
+                sha,
+            )
+        except JobRequestError as exc:
+            return JSONResponse({"error": exc.code, "message": exc.message}, status_code=exc.status_code)
+        return JSONResponse(_legacy_job(provider_jobs, job))
 
     @app.get("/jobs/{job_id}")
     async def job_status(job_id: str) -> JSONResponse:
-        job = _get_job(job_id)
+        job = provider_jobs.get(job_id)
         if job is None:
             return JSONResponse({"error": "unknown_job"}, status_code=404)
-        return JSONResponse(job, headers={"Cache-Control": "no-store"})
+        return JSONResponse(_legacy_job(provider_jobs, job), headers={"Cache-Control": "no-store"})
 
     @app.post("/jobs/{job_id}/cancel")
     async def job_cancel(job_id: str) -> JSONResponse:
-        job = _get_job(job_id)
+        job = provider_jobs.cancel(job_id)
         if job is None:
             return JSONResponse({"error": "unknown_job"}, status_code=404)
-        process = _procs.get(job_id)
-        if process is not None and process.poll() is None:
-            _set_job(job_id, status="cancelled")
-            process.kill()
-            audit.record("convert.cancelled", jobId=job_id)
-            return JSONResponse({"status": "cancelled"})
-        return JSONResponse({"status": job.get("status", "unknown")})
+        return JSONResponse(_legacy_job(provider_jobs, job))
 
     # -- native execution ---------------------------------------------------
     @app.post("/python")
@@ -533,24 +498,38 @@ def create_app(hub: BrowserHub) -> FastAPI:
                 status_code=403,
             )
         body = await _json(request)
-        sha = str(body.get("sha", ""))
         code = str(body.get("code", ""))
         mode = "edit" if body.get("mode") == "edit" else "query"
-        if mode == "edit" and config.readonly:
-            return JSONResponse({"error": "readonly"}, status_code=403)
-        if not store.is_sha(sha):
-            return JSONResponse({"error": "bad_sha"}, status_code=400)
-        source = store.source_path(sha)
-        if not source.is_file():
-            return JSONResponse({"error": "unknown_model"}, status_code=404)
-
-        outcome = await asyncio.to_thread(execute_python, sha, code, mode)
+        try:
+            job = provider_jobs.submit(
+                "org.ifcviewx.core",
+                "*",
+                f"ifc.python.{mode}",
+                {"code": code},
+                body.get("sha"),
+            )
+        except JobRequestError as exc:
+            return JSONResponse({"error": exc.code, "message": exc.message}, status_code=exc.status_code)
+        finished = await asyncio.to_thread(provider_jobs.wait, job["id"], config.provider_timeout_s + 5)
+        outcome = _legacy_outcome(provider_jobs, finished or job)
+        audit.record(
+            "python.run",
+            sha=str(body.get("sha", ""))[:12],
+            mode=mode,
+            outcome=outcome.get("error", "ok"),
+            elapsedMs=(finished or job).get("elapsedMs"),
+            changed=outcome.get("diff", {}).get("modified") if isinstance(outcome.get("diff"), dict) else None,
+            code=audit.code_fingerprint(code),
+        )
         return JSONResponse(outcome)
 
     @app.get("/python/result/{result_id}")
     async def python_result(result_id: str) -> Response:
-        target = _results.get(result_id)
-        if target is None or not target.is_file():
+        try:
+            target = store.result_path(result_id)
+        except store.StoreError:
+            return JSONResponse({"error": "unknown_result"}, status_code=404)
+        if not target.is_file() or time.time() - target.stat().st_mtime > config.result_ttl_s:
             return JSONResponse({"error": "unknown_result"}, status_code=404)
         return FileResponse(target, media_type="application/octet-stream")
 
@@ -564,23 +543,35 @@ def create_app(hub: BrowserHub) -> FastAPI:
     @app.post("/validate")
     async def validate_endpoint(request: Request) -> JSONResponse:
         body = await _json(request)
-        outcome = await asyncio.to_thread(analyze, "validate", str(body.get("sha", "")))
-        status = 404 if outcome.get("error") == "unknown_model" else 200
-        return JSONResponse(outcome, status_code=status)
+        try:
+            job = provider_jobs.submit(
+                "org.ifcviewx.core", "*", "ifc.validate", {}, body.get("sha")
+            )
+        except JobRequestError as exc:
+            return JSONResponse({"error": exc.code, "message": exc.message}, status_code=exc.status_code)
+        finished = await asyncio.to_thread(provider_jobs.wait, job["id"], config.provider_timeout_s + 5)
+        return JSONResponse(_legacy_outcome(provider_jobs, finished or job))
 
     @app.post("/schedule")
     async def schedule_endpoint(request: Request) -> JSONResponse:
         body = await _json(request)
-        outcome = await asyncio.to_thread(
-            analyze,
-            "schedule",
-            str(body.get("sha", "")),
-            type=body.get("type"),
-            properties=body.get("properties") or [],
-            limit=body.get("limit"),
-        )
-        status = 404 if outcome.get("error") == "unknown_model" else 200
-        return JSONResponse(outcome, status_code=status)
+        inputs = {
+            key: value
+            for key, value in {
+                "type": body.get("type"),
+                "properties": body.get("properties") or [],
+                "limit": body.get("limit"),
+            }.items()
+            if value is not None
+        }
+        try:
+            job = provider_jobs.submit(
+                "org.ifcviewx.core", "*", "ifc.schedule", inputs, body.get("sha")
+            )
+        except JobRequestError as exc:
+            return JSONResponse({"error": exc.code, "message": exc.message}, status_code=exc.status_code)
+        finished = await asyncio.to_thread(provider_jobs.wait, job["id"], config.provider_timeout_s + 5)
+        return JSONResponse(_legacy_outcome(provider_jobs, finished or job))
 
     # -- assistant proxy ----------------------------------------------------
     @app.post("/llm/chat")
@@ -589,9 +580,46 @@ def create_app(hub: BrowserHub) -> FastAPI:
         messages = body.get("messages")
         if not isinstance(messages, list) or not messages:
             return JSONResponse({"error": "bad_request", "message": "messages required"}, status_code=400)
-        outcome = await asyncio.to_thread(llm.chat, messages, body.get("model"))
-        audit.record("llm.chat", turns=len(messages), outcome=outcome.get("error", "ok"))
+        tools = body.get("tools")
+        if isinstance(tools, list):
+            outcome = await asyncio.to_thread(llm.chat_turn, messages, tools, body.get("model"))
+        else:
+            outcome = await asyncio.to_thread(llm.chat, messages, body.get("model"))
+        audit.record(
+            "llm.chat",
+            turns=len(messages),
+            tools=len(tools) if isinstance(tools, list) else 0,
+            imageAttached=any(isinstance(message, dict) and "image" in message for message in messages),
+            outcome=outcome.get("error", "ok"),
+        )
         return JSONResponse(outcome)
+
+    @app.post("/llm/stream")
+    async def llm_stream(request: Request) -> Response:
+        body = await _json(request)
+        messages = body.get("messages")
+        tools = body.get("tools") or []
+        if not isinstance(messages, list) or not messages:
+            return JSONResponse({"error": "bad_request", "message": "messages required"}, status_code=400)
+        if not isinstance(tools, list):
+            return JSONResponse({"error": "bad_request", "message": "tools must be an array"}, status_code=400)
+        image_attached = any(isinstance(message, dict) and "image" in message for message in messages)
+        audit.record(
+            "llm.stream",
+            turns=len(messages),
+            tools=len(tools),
+            imageAttached=image_attached,
+        )
+
+        def events():
+            for event in llm.stream_chat(messages, tools, body.get("model")):
+                yield f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/audit")
     async def audit_tail(limit: int = 50) -> JSONResponse:

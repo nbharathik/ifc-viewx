@@ -7,7 +7,9 @@ import { attachPopover, busyRow, h, icon, iconButton, toast } from "./kit.js";
 import { applyColors, colorableKeys, computeColors, cssColor, type ColorResult, type ColorRule } from "./colorBy.js";
 import { formatAngle, formatArea, formatLength } from "../viewer-core/viewer.js";
 import type { PropertyIndex } from "../sdk/data.js";
-import type { CameraPose, LazyCategory, MeasureMode, SectionBox, SectionState, SnapMode, Viewer, ViewPreset } from "../viewer-core/viewer.js";
+import type {
+  CameraPose, LazyCategory, MeasurementState, MeasureMode, SectionBox, SectionState, SnapMode, Viewer, ViewPreset,
+} from "../viewer-core/viewer.js";
 
 interface Viewpoint {
   name: string;
@@ -17,6 +19,7 @@ interface Viewpoint {
   sections?: SectionState[];
   /** Absent on viewpoints saved before the box existed, which is not a box. */
   box?: SectionBox | null;
+  measurements?: MeasurementState[];
 }
 
 const AXES: Array<SectionState["axis"]> = ["x", "y", "z"];
@@ -107,6 +110,7 @@ export function saveViewpoint(viewer: Viewer, name?: string): string | null {
     section: viewer.getSection(),
     sections: viewer.getSections(),
     box: viewer.getSectionBox(),
+    measurements: viewer.getMeasurementStates(),
   });
   localStorage.setItem(key, JSON.stringify(views));
   return label;
@@ -931,6 +935,7 @@ export class Dock {
           if (view.box) this.viewer.setSectionBox(view.box);
           else if (planes.length) this.viewer.setSections(planes);
           else this.viewer.clearSection();
+          if (view.measurements) this.viewer.setMeasurementStates(view.measurements);
           this.sync();
         });
         const remove = iconButton("x", "Delete", () => {

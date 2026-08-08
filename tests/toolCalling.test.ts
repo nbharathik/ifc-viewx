@@ -39,6 +39,18 @@ function capture(reply: unknown, status = 200) {
   return sent;
 }
 
+function eventStream(events: unknown[], newline = "\n"): Response {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const event of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}${newline}${newline}`));
+      controller.enqueue(encoder.encode(`data: [DONE]${newline}${newline}`));
+      controller.close();
+    },
+  });
+  return new Response(body, { headers: { "content-type": "text/event-stream" } });
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -227,6 +239,54 @@ describe("openai wire", () => {
   it("does not mistake an unrelated 400 for a missing tool feature", async () => {
     capture({ error: { message: "context length exceeded" } }, 400);
     await expect(converse(OPENAI, ASK, nativeTools("query"))).rejects.toThrow("context length");
+  });
+});
+
+describe("streamed native tool calls", () => {
+  it("reassembles OpenAI argument fragments while painting prose deltas", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => eventStream([
+      { choices: [{ delta: { content: "Checking " } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "find", arguments: "{\"type\":" } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "\"IfcWall\"}" } }] } }] },
+      { choices: [], usage: { prompt_tokens: 23, completion_tokens: 7 } },
+    ], "\r\n")));
+    const deltas: string[] = [];
+    let usage = { input: 0, output: 0 };
+
+    const turn = await converse(OPENAI, ASK, nativeTools("query"), undefined, {
+      onDelta: (delta) => deltas.push(delta),
+      onUsage: (value) => (usage = value),
+    });
+
+    expect(deltas).toEqual(["Checking "]);
+    expect(turn).toEqual({
+      text: "Checking ",
+      calls: [{ id: "c1", name: "find", input: { type: "IfcWall" } }],
+      toolsUsed: true,
+    });
+    expect(usage).toEqual({ input: 23, output: 7 });
+  });
+
+  it("reassembles Anthropic input JSON deltas and usage", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => eventStream([
+      { type: "message_start", message: { usage: { input_tokens: 31 } } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Looking." } },
+      { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "t1", name: "result__group", input: {} } },
+      { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"handle\":\"result_1\"," } },
+      { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "\"field\":\"storey\"}" } },
+      { type: "message_delta", usage: { output_tokens: 8 } },
+    ])));
+    const deltas: string[] = [];
+    let usage = { input: 0, output: 0 };
+
+    const turn = await converse(ANTHROPIC, ASK, nativeTools("query"), undefined, {
+      onDelta: (delta) => deltas.push(delta),
+      onUsage: (value) => (usage = value),
+    });
+
+    expect(deltas).toEqual(["Looking."]);
+    expect(turn.calls).toEqual([{ id: "t1", name: "result__group", input: { handle: "result_1", field: "storey" } }]);
+    expect(usage).toEqual({ input: 31, output: 8 });
   });
 });
 

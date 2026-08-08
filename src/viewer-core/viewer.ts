@@ -29,7 +29,7 @@ import type {
 
 export * from './engine/types.js';
 export type { CameraPose, SceneInfo, SnapHit, SnapKind } from './scene/scene.js';
-export type { ViewPreset } from './scene/controls.js';
+export type { PickResult, ViewPreset } from './scene/controls.js';
 
 export interface SectionState {
   axis: 'x' | 'y' | 'z';
@@ -138,6 +138,12 @@ export interface Measurement {
   complete: boolean;
   /** What each end caught; the far end is null until it is placed. */
   ends: [SnapKind, SnapKind | null];
+}
+
+export interface MeasurementState {
+  a: [number, number, number];
+  b: [number, number, number];
+  ends: [SnapKind, SnapKind];
 }
 
 /** What the measure tool is collecting: two points, three, or a ring of them. */
@@ -453,6 +459,16 @@ export interface Viewer {
   getMeasurement(): Measurement | null;
   /** Every placed span, oldest first. Spans stack until reset or removed. */
   getMeasurements(): Measurement[];
+  /** Serializable span geometry for viewpoints and extension-owned workflows. */
+  getMeasurementStates(): MeasurementState[];
+  /** Replace placed distance spans from a saved view. */
+  setMeasurementStates(states: MeasurementState[]): void;
+  /** Add a host-generated span, such as a geometry-query witness line. */
+  addMeasurement(
+    a: [number, number, number],
+    b: [number, number, number],
+    ends?: [SnapKind, SnapKind],
+  ): Measurement;
   /** Remove one placed span by its id. */
   removeMeasurement(id: number): void;
   /** Drop every span and the point in hand without leaving measure mode. */
@@ -471,6 +487,8 @@ export interface Viewer {
   /** Fires after every render pass; for status readouts. */
   onRenderTick(listener: () => void): () => void;
   pickAt(clientX: number, clientY: number): PickResult | null;
+  /** Last surface selected by a real viewport click, not a scripted selection. */
+  getLastPick(): PickResult | null;
   getCamera(): CameraPose;
   getViewport(): { width: number; height: number; aspect: number };
   /** Drawing-buffer scale; below 1 only transiently during slow interaction. */
@@ -522,6 +540,7 @@ class ViewerImpl implements Viewer {
   private loadToken = 0;
   private readonly selection = new Set<number>();
   private primary: number | null = null;
+  private lastPick: PickResult | null = null;
   /** Visibility layers: named rules plus elements hidden one at a time. */
   private rules: VisibilityRule[] = [];
   private readonly hiddenIds = new Set<number>();
@@ -611,6 +630,7 @@ class ViewerImpl implements Viewer {
       onToolMove: (clientX, clientY) => this.queueMeasureHover(clientX, clientY),
       onToolUp: (clientX, clientY, moved) => this.measureUp(clientX, clientY, moved),
       onPick: (pick, additive) => {
+        this.lastPick = pick ? { expressID: pick.expressID, point: [...pick.point] } : null;
         if (!pick) return additive ? undefined : this.clearSelection();
         this.selectMany([pick.expressID], additive ? 'toggle' : 'replace');
       },
@@ -781,6 +801,7 @@ class ViewerImpl implements Viewer {
     for (const entry of this.models.values()) engine.dispose(entry.modelID);
     this.models.clear();
     this.nextModelIndex = 0;
+    this.lastPick = null;
     if (this.selection.size) {
       this.selection.clear();
       this.primary = null;
@@ -1096,6 +1117,7 @@ class ViewerImpl implements Viewer {
     for (const entry of this.models.values()) this.engine?.dispose(entry.modelID);
     this.models.clear();
     this.nextModelIndex = 0;
+    this.lastPick = null;
     if (this.selection.size) {
       this.selection.clear();
       this.primary = null;
@@ -1861,6 +1883,46 @@ class ViewerImpl implements Viewer {
       .map((span) => this.spanMetrics(span.a, span.b, span.ends, span.id, true));
   }
 
+  getMeasurementStates(): MeasurementState[] {
+    return this.spans
+      .filter((span) => span.shape === undefined)
+      .map((span) => ({ a: [...span.a], b: [...span.b], ends: [...span.ends] }));
+  }
+
+  setMeasurementStates(states: MeasurementState[]): void {
+    this.spans = [];
+    this.shapes = [];
+    this.chain = [];
+    for (const state of states) {
+      if (!state || !Array.isArray(state.a) || !Array.isArray(state.b)) continue;
+      if (state.a.length !== 3 || state.b.length !== 3) continue;
+      if ([...state.a, ...state.b].some((value) => !Number.isFinite(value))) continue;
+      const ends: [SnapKind, SnapKind] = Array.isArray(state.ends)
+        && state.ends.length === 2
+        && state.ends.every((kind) => typeof kind === 'string' && kind in SNAP_LABEL)
+        ? [...state.ends]
+        : ['surface', 'surface'];
+      this.spans.push({
+        id: ++this.spanSeq,
+        a: [...state.a],
+        b: [...state.b],
+        ends,
+      });
+    }
+    this.cancelPending();
+  }
+
+  addMeasurement(
+    a: [number, number, number],
+    b: [number, number, number],
+    ends: [SnapKind, SnapKind] = ['surface', 'surface'],
+  ): Measurement {
+    const id = ++this.spanSeq;
+    this.spans.push({ id, a: [...a], b: [...b], ends });
+    this.pushMeasure();
+    return this.spanMetrics(a, b, ends, id, true);
+  }
+
   removeMeasurement(id: number): void {
     const before = this.spans.length;
     this.spans = this.spans.filter((span) => span.id !== id);
@@ -2243,6 +2305,10 @@ class ViewerImpl implements Viewer {
     return this.controls.pickAt(clientX, clientY);
   }
 
+  getLastPick(): PickResult | null {
+    return this.lastPick ? { expressID: this.lastPick.expressID, point: [...this.lastPick.point] } : null;
+  }
+
   getCamera(): CameraPose {
     return this.controls.getPose();
   }
@@ -2295,7 +2361,7 @@ class ViewerImpl implements Viewer {
     this.engine?.terminate();
     this.engine = null;
     this.initialized = null;
-    // Takes the clash worker with it, if one was ever started.
+    // Takes the geometry worker with it, if one was ever started.
     this.triangles.dispose();
     this.propertiesPanel?.dispose();
     this.treePanel?.dispose();

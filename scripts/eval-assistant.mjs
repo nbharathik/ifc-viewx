@@ -38,6 +38,10 @@ export const CASES = [
   { ask: "What is the floor area of each room?", expect: ["categories", "schedule", "find"] },
   { ask: "Bring back the walls I hid earlier, but leave the rest hidden", expect: ["unhide", "visibility"] },
   { ask: "Turn off the services model so I can see the structure", expect: ["models"] },
+  { ask: "A prior search returned result_7. Group those rows by storey without searching again.", expect: ["result__group"] },
+  { ask: "Open row 12 from the prior result_7 in the viewer.", expect: ["result__open"] },
+  { ask: "Isolate rows 2, 4 and 8 from result_7.", expect: ["result__isolate"] },
+  { ask: "From the point I just clicked, measure to the next surfaces on all three axes.", expect: ["laser"] },
 ];
 
 /**
@@ -60,6 +64,8 @@ export const TOOLS = [
   ["schedule", "table of a class; omit properties to list what is available", { type: { type: "string" }, properties: { type: "array", items: { type: "string" } } }, ["type"]],
   ["ids", "validate against the IDS the user loaded; pass/fail per specification", {}, []],
   ["clash", "triangle-level clash sweep between two class sets", { a: { type: "array", items: { type: "string" } }, b: { type: "array", items: { type: "string" } }, tolerance: { type: "number" }, clearance: { type: "number" } }, []],
+  ["distance", "exact shortest mesh distance between two elements, with witness points in the viewer", { a: { type: "integer" }, b: { type: "integer" }, maxDistance: { type: "number" } }, ["a", "b"]],
+  ["laser", "cast a three-axis laser from a surface point to the next visible meshes", { origin: { type: "array", items: { type: "number" }, minItems: 3, maxItems: 3 }, source: { type: "integer" }, maxDistance: { type: "number" }, includeHidden: { type: "boolean" } }, []],
   ["search", "ranked full-text search over names, classes, storeys and property values; use this before find when the wording is loose", { query: { type: "string" }, limit: { type: "integer" } }, ["query"]],
   ["selection", "what the user has selected right now, with class and name", {}, []],
   ["visibility", "what is hidden and why: counts, named rules, section state, lazy categories", {}, []],
@@ -70,13 +76,18 @@ export const TOOLS = [
   ["sectionBox", "clip to a box around these elements; pass clear to remove it", { ids: { type: "array", items: { type: "integer" } }, clear: { type: "boolean" } }, []],
   ["camera", "move to a preset viewpoint, or read where the camera is", { view: { type: "string" } }, []],
   ["models", "the federated models with their element counts; pass show/hide to switch a discipline on or off", { show: { type: "array", items: { type: "integer" } }, hide: { type: "array", items: { type: "integer" } } }, []],
+  ["result__page", "read a bounded page from a prior result without rerunning its analysis", { handle: { type: "string" }, offset: { type: "integer" }, limit: { type: "integer" } }, ["handle"]],
+  ["result__group", "group prior result rows by a field without rerunning the source capability", { handle: { type: "string" }, field: { type: "string" } }, ["handle", "field"]],
+  ["result__open", "make a prior result active and return its first page", { handle: { type: "string" }, row: { type: "integer" } }, ["handle"]],
+  ["result__select", "select elements referenced by prior result rows", { handle: { type: "string" }, rows: { type: "array", items: { type: "integer" } } }, ["handle"]],
+  ["result__isolate", "isolate elements referenced by prior result rows", { handle: { type: "string" }, rows: { type: "array", items: { type: "integer" } } }, ["handle"]],
 ];
 
-const SYSTEM = `You are the assistant inside IFCViewX, a fast local IFC viewer. Everything runs on the user's machine.
+const SYSTEM = `You are the assistant inside IFCViewX, a fast IFC viewer. The IFC file and geometry stay on this device. Compact viewer context and tool reports go to the configured provider.
 A model is loaded: 217 entities, classes IfcWall (8), IfcColumn (4), IfcSlab (2), IfcDoor (2), IfcWindow (2), on two storeys.
 An IDS document is loaded.
 MODE: QUERY (read-only). You may inspect anything and change what is shown in 3D, but you may not change the model.
-TOOLS: call them directly through the tool interface. Prefer them to guessing, and never describe a result you did not get back from one.
+TOOLS: call them directly through the tool interface. Prefer them to guessing. Reuse result handles through result tools instead of rerunning the source analysis.
 Ground every numeric claim in a tool report.`;
 
 async function askAnthropic(ask) {
@@ -94,7 +105,7 @@ async function askAnthropic(ask) {
       tools: TOOLS.map(([name, description, properties, required]) => ({
         name,
         description,
-        input_schema: { type: "object", properties, required },
+        input_schema: { type: "object", properties, required, additionalProperties: false },
       })),
       messages: [{ role: "user", content: ask }],
     }),
@@ -117,7 +128,7 @@ async function askOpenAi(ask) {
       ],
       tools: TOOLS.map(([name, description, properties, required]) => ({
         type: "function",
-        function: { name, description, parameters: { type: "object", properties, required } },
+        function: { name, description, parameters: { type: "object", properties, required, additionalProperties: false } },
       })),
     }),
   });

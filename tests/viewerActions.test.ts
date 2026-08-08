@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { runViewerAction } from "../src/llm/actions.js";
+import { createViewerCapabilityRegistry } from "../src/capabilities/viewer.js";
+import { VIEWER_POLICY } from "../src/capabilities/policy.js";
 import type { SectionBox, SectionState, SpatialNode, Viewer } from "../src/viewer-core/viewer.js";
 
 /**
@@ -325,5 +327,18 @@ describe("camera", () => {
 describe("unknown actions", () => {
   it("still names the action it could not run", async () => {
     await expect(run({ action: "teleport" })).rejects.toThrow(/teleport/);
+  });
+});
+
+describe("capability adapter", () => {
+  it("runs the same viewer action through the shared registry", async () => {
+    const viewer = stub();
+    const registry = createViewerCapabilityRegistry();
+    const report = await registry.execute<string>("select", { ids: [10, 11] }, { viewer }, {
+      policy: VIEWER_POLICY,
+    });
+    expect(report).toBe("selected 2 element(s)");
+    expect(rec.calls).toContain("selectMany:10,11");
+    expect(registry.get("select")?.exposure).toMatchObject({ assistant: true, sdk: true });
   });
 });

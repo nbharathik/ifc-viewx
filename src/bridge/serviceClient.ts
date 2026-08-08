@@ -9,6 +9,9 @@
 // token, and there is nothing to paste. Not served by the service means Web
 // Studio, and every call below is inert.
 
+import type { ChatMessage, ChatOptions, TurnResult } from "../llm/llmClient.js";
+import type { NativeTool } from "../llm/tools.js";
+
 export interface StoreStats {
   dir: string;
   files: number;
@@ -21,13 +24,14 @@ export interface StoreStats {
 export interface ServiceHealth {
   version: string;
   capabilities: string[];
+  providerApi?: { min: number; max: number };
   pythonTimeoutS: number;
   readonly: boolean;
   pythonEnabled: boolean;
   app?: boolean;
   /** Present only when the request carried a valid token. */
   store?: StoreStats;
-  llm?: { configured: boolean; provider: string; model: string };
+  llm?: { configured: boolean; provider: string; model: string; multimodal?: boolean };
   browserConnected?: boolean;
 }
 
@@ -53,6 +57,112 @@ export interface EditDiff {
   modifiedSample?: Array<{ globalId: string; type?: string; name?: string }>;
 }
 
+export interface LocalProviderCapability {
+  id: string;
+  title: string;
+  description: string;
+  effect: "read" | "compute" | "staged-write";
+  modelRequirement: "none" | "ifc-source";
+  available: boolean;
+  unavailableReason?: string;
+  inputSchema: Record<string, unknown>;
+  resultSchema: Record<string, unknown>;
+  timeoutSeconds?: number;
+}
+
+export interface LocalProvider {
+  schemaVersion: 1;
+  id: string;
+  version: string;
+  name: string;
+  description: string;
+  source: string;
+  trust: "trusted-native";
+  limits: {
+    maxConcurrency: number;
+    timeoutSeconds: number;
+    memoryBytes: number;
+    resultTtlSeconds: number;
+  };
+  capabilities: LocalProviderCapability[];
+}
+
+export interface LocalJobProgress {
+  phase: string;
+  done: number;
+  total: number;
+  message: string;
+  partialResultHandle?: string;
+}
+
+export interface LocalJob {
+  schemaVersion: 1;
+  id: string;
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  providerId: string;
+  providerVersion: string;
+  capabilityId: string;
+  modelSha?: string | null;
+  progress: LocalJobProgress;
+  resultAvailable: boolean;
+  error?: { code: string; message: string; details?: Record<string, unknown> };
+}
+
+export type LocalCompanionMatch =
+  | { status: "available"; provider: LocalProvider }
+  | { status: "offline" | "missing" | "incompatible"; provider?: LocalProvider };
+
+type Version = [number, number, number];
+
+function parseVersion(value: string): Version | null {
+  const match = /^(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec(value);
+  return match ? [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)] : null;
+}
+
+function compareVersion(a: Version, b: Version): number {
+  return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+}
+
+export function satisfiesVersionRange(version: string, range: string): boolean | null {
+  const current = parseVersion(version);
+  if (!current || !range.trim() || range.includes("||")) return null;
+  for (const token of range.replaceAll(",", " ").trim().split(/\s+/)) {
+    if (token === "*" || token.toLowerCase() === "x") continue;
+    const wildcard = /^(\d+)\.(?:x|\*)$/i.exec(token);
+    if (wildcard) {
+      if (current[0] !== Number(wildcard[1])) return false;
+      continue;
+    }
+    const ranged = /^(\^|~)(\d+(?:\.\d+){0,2})$/.exec(token);
+    if (ranged) {
+      const base = parseVersion(ranged[2]);
+      if (!base) return null;
+      const upper: Version = ranged[1] === "^" ? [base[0] + 1, 0, 0] : [base[0], base[1] + 1, 0];
+      if (compareVersion(current, base) < 0 || compareVersion(current, upper) >= 0) return false;
+      continue;
+    }
+    const compared = /^(>=|<=|>|<|=)?(\d+(?:\.\d+){0,2})$/.exec(token);
+    if (!compared) return null;
+    const target = parseVersion(compared[2]);
+    if (!target) return null;
+    const relation = compareVersion(current, target);
+    const operator = compared[1];
+    const matches = !operator && compared[2].split(".").length === 1
+      ? current[0] === target[0]
+      : !operator || operator === "="
+        ? relation === 0
+        : operator === ">="
+          ? relation >= 0
+          : operator === "<="
+            ? relation <= 0
+            : operator === ">"
+              ? relation > 0
+              : relation < 0;
+    if (!matches) return false;
+  }
+  return true;
+}
+
 /** web: this tab alone. local: this page came from the service. */
 export type ServiceMode = "web" | "local";
 
@@ -65,6 +175,7 @@ export class ServiceClient {
   readonly origin = this.served ? location.origin : "";
   private readonly token = this.served ? (injected?.token ?? "") : "";
   private health: ServiceHealth | null = null;
+  private providers: LocalProvider[] = [];
   /** sha of the model this service holds for the current session. */
   private sha: string | null = null;
 
@@ -83,6 +194,19 @@ export class ServiceClient {
 
   getHealth(): ServiceHealth | null {
     return this.health;
+  }
+
+  getProviders(): readonly LocalProvider[] {
+    return this.providers;
+  }
+
+  matchCompanion(id: string, versionRange: string): LocalCompanionMatch {
+    if (this.mode() !== "local") return { status: "offline" };
+    const provider = this.providers.find((entry) => entry.id === id);
+    if (!provider) return { status: "missing" };
+    return satisfiesVersionRange(provider.version, versionRange) === true
+      ? { status: "available", provider }
+      : { status: "incompatible", provider };
   }
 
   can(capability: string): boolean {
@@ -136,8 +260,24 @@ export class ServiceClient {
       // `store` only comes back when the injected token was accepted.
       const health = res.ok ? ((await res.json()) as ServiceHealth) : null;
       this.health = health?.store ? health : null;
+      this.providers = [];
+      if (this.health?.providerApi && this.health.providerApi.min <= 1 && this.health.providerApi.max >= 1) {
+        try {
+          const providers = await fetch(`${this.origin}/api/v1/providers`, {
+            headers: this.headers(),
+            signal: AbortSignal.timeout(1500),
+          });
+          if (providers.ok) {
+            const listing = await providers.json() as { providers?: LocalProvider[] };
+            this.providers = Array.isArray(listing.providers) ? listing.providers : [];
+          }
+        } catch {
+          this.providers = [];
+        }
+      }
     } catch {
       this.health = null;
+      this.providers = [];
     }
     return this.health;
   }
@@ -149,11 +289,12 @@ export class ServiceClient {
     };
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
+  private async post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
     const res = await fetch(`${this.origin}${path}`, {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify(body),
+      signal,
     });
     if (res.status === 401) throw new Error("This tab's session token is stale; reload the page.");
     if (res.status === 429) throw new Error("Too many failed attempts; wait a moment and retry.");
@@ -171,6 +312,95 @@ export class ServiceClient {
       throw new Error(detail ?? `${path} failed (HTTP ${res.status}).`);
     }
     return data as T;
+  }
+
+  private async get<T>(path: string): Promise<T> {
+    const res = await fetch(`${this.origin}${path}`, { headers: this.headers() });
+    let data: unknown;
+    try {
+      data = await res.json();
+    } catch {
+      throw new Error(`${path} answered HTTP ${res.status} with a body that is not JSON.`);
+    }
+    if (!res.ok) {
+      const detail = (data as { message?: string; error?: string } | null)?.message
+        ?? (data as { error?: string } | null)?.error;
+      throw new Error(detail ?? `${path} failed (HTTP ${res.status}).`);
+    }
+    return data as T;
+  }
+
+  async startLocalJob(
+    providerId: string,
+    providerVersion: string,
+    capabilityId: string,
+    input: Record<string, unknown> = {},
+  ): Promise<LocalJob> {
+    if (this.mode() !== "local") throw new Error("Local Studio is not available.");
+    return this.post<LocalJob>("/api/v1/jobs", {
+      providerId,
+      providerVersion,
+      capabilityId,
+      input,
+      ...(this.sha ? { modelSha: this.sha } : {}),
+    });
+  }
+
+  async getLocalJob(jobId: string): Promise<LocalJob> {
+    return this.get<LocalJob>(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  async cancelLocalJob(jobId: string): Promise<LocalJob> {
+    return this.post<LocalJob>(`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`, {});
+  }
+
+  async getLocalJobResult<T>(jobId: string): Promise<T> {
+    const result = await this.get<{ schemaVersion: 1; value: T }>(
+      `/api/v1/jobs/${encodeURIComponent(jobId)}/result`,
+    );
+    return result.value;
+  }
+
+  async invokeLocal<T>(
+    providerId: string,
+    providerVersion: string,
+    capabilityId: string,
+    input: Record<string, unknown> = {},
+    signal?: AbortSignal,
+    onProgress?: (progress: LocalJobProgress) => void,
+  ): Promise<T> {
+    const match = this.matchCompanion(providerId, providerVersion);
+    if (match.status !== "available") {
+      if (match.status === "incompatible") {
+        throw new Error(`Installed ${providerId} ${match.provider?.version ?? "unknown"} does not match ${providerVersion}.`);
+      }
+      throw new Error(match.status === "missing" ? `Local provider ${providerId} is not installed.` : "Local Studio is not available.");
+    }
+    let job = await this.startLocalJob(providerId, providerVersion, capabilityId, input);
+    const abort = async (): Promise<never> => {
+      await this.cancelLocalJob(job.id).catch(() => undefined);
+      throw new DOMException("Local provider job cancelled", "AbortError");
+    };
+    for (;;) {
+      if (signal?.aborted) return abort();
+      onProgress?.(job.progress);
+      if (job.status === "succeeded") return this.getLocalJobResult<T>(job.id);
+      if (job.status === "failed") throw new Error(job.error?.message ?? "Local provider job failed.");
+      if (job.status === "cancelled") throw new DOMException("Local provider job cancelled", "AbortError");
+      await new Promise<void>((resolve) => {
+        const aborted = (): void => {
+          window.clearTimeout(timer);
+          resolve();
+        };
+        const timer = window.setTimeout(() => {
+          signal?.removeEventListener("abort", aborted);
+          resolve();
+        }, 350);
+        signal?.addEventListener("abort", aborted, { once: true });
+      });
+      if (signal?.aborted) return abort();
+      job = await this.getLocalJob(job.id);
+    }
   }
 
   /** Upload once per model; the service stores it by content hash. */
@@ -261,6 +491,80 @@ export class ServiceClient {
     if (outcome.error) throw new Error(outcome.message ?? outcome.error);
     if (!outcome.content) throw new Error("The assistant returned an empty response.");
     return outcome.content;
+  }
+
+  /** Native assistant turn through Local Studio, normalized from its SSE stream. */
+  async converse(
+    messages: ChatMessage[],
+    tools: NativeTool[],
+    signal?: AbortSignal,
+    options: ChatOptions = {},
+  ): Promise<TurnResult> {
+    const response = await fetch(`${this.origin}/llm/stream`, {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify({ messages, tools }),
+      signal,
+    });
+    if (response.status === 401) throw new Error("This tab's session token is stale; reload the page.");
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(detail || `Local assistant failed (HTTP ${response.status})`);
+    }
+    if (!response.body) throw new Error("Local Studio sent no assistant stream");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let text = "";
+    let calls: TurnResult["calls"] = [];
+    let toolsUsed = tools.length === 0;
+    const consume = (payload: string): void => {
+      let event: {
+        type?: string;
+        delta?: string;
+        call?: TurnResult["calls"][number];
+        usage?: { input?: number; output?: number };
+        text?: string;
+        calls?: TurnResult["calls"];
+        toolsUsed?: boolean;
+        message?: string;
+      };
+      try {
+        event = JSON.parse(payload) as typeof event;
+      } catch {
+        return;
+      }
+      if (event.type === "text_delta" && event.delta) {
+        text += event.delta;
+        options.onDelta?.(event.delta);
+      } else if (event.type === "tool_call" && event.call) calls.push(event.call);
+      else if (event.type === "usage" && event.usage) {
+        options.onUsage?.({ input: Number(event.usage.input) || 0, output: Number(event.usage.output) || 0 });
+      } else if (event.type === "done") {
+        if (!text && event.text) text = event.text;
+        if (calls.length === 0 && event.calls) calls = event.calls;
+        if (typeof event.toolsUsed === "boolean") toolsUsed = event.toolsUsed;
+      } else if (event.type === "error") throw new Error(event.message ?? "The local assistant stream failed");
+    };
+    try {
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        let split = /\r?\n\r?\n/.exec(buffer);
+        while (split) {
+          const raw = buffer.slice(0, split.index);
+          buffer = buffer.slice(split.index + split[0].length);
+          for (const line of raw.split(/\r?\n/)) {
+            if (line.startsWith("data:")) consume(line.slice(5).trim());
+          }
+          split = /\r?\n\r?\n/.exec(buffer);
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return { text, calls, toolsUsed };
   }
 
   async fetchEditResult(resultUrl: string): Promise<Uint8Array> {

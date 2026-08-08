@@ -1,0 +1,61 @@
+{
+  "manifestVersion": 2,
+  "id": "smart-measure",
+  "name": "Smart Measure",
+  "version": "1.0.0",
+  "sdk": ">=2.0.0 <3",
+  "description": "Measure object gaps and cast a three-axis surface laser without leaving the browser.",
+  "runtime": {
+    "kind": "bundled",
+    "entry": "panel.ts"
+  },
+  "activationEvents": ["onPanel:smart-measure", "onCommand:smart-measure.open"],
+  "permissions": [
+    "model.summary.read",
+    "model.structure.read",
+    "geometry.query",
+    "view.read",
+    "view.control",
+    "view.overlay",
+    "storage.extension",
+    "local.invoke"
+  ],
+  "contributes": {
+    "panels": [
+      { "id": "smart-measure", "title": "Smart Measure", "icon": "ruler" }
+    ],
+    "commands": [
+      { "id": "smart-measure.open", "title": "Open Smart Measure", "icon": "ruler" }
+    ],
+    "analyses": [
+      { "id": "smart-measure.distance", "title": "Shortest object distance", "capability": "distance", "resultView": "smart-measure.results" },
+      { "id": "smart-measure.laser", "title": "Three-axis surface laser", "capability": "laser", "resultView": "smart-measure.results" }
+    ],
+    "resultViews": [
+      { "id": "smart-measure.results", "title": "Measurement results" }
+    ],
+    "overlays": [
+      { "id": "smart-measure.laser", "title": "Live laser axes", "quota": 6 }
+    ]
+  },
+  "localCompanion": {
+    "id": "org.ifcviewx.core",
+    "version": ">=0.2 <1",
+    "required": false
+  },
+  "catalog": {
+    "tagline": "Put object gaps and room axes on the model",
+    "about": "Measures the shortest gap between two selected meshes and casts six rays from a picked surface to the next visible geometry. The live laser stays lightweight and reversible; chosen spans become ordinary viewer measurements that travel with saved viewpoints. Loaded geometry remains in the browser unless the optional local precise route is explicitly selected.",
+    "icon": "ruler",
+    "category": "Coordination",
+    "keywords": "measure distance gap clearance laser axis room witness surface precise",
+    "does": [
+      "Shortest surface distance with witness points between two selected elements",
+      "Configurable clearance threshold with a clear pass or fail result",
+      "Six-direction X, Y and Z laser from the last clicked surface",
+      "Perpendicular camera alignment using the picked face normal",
+      "Persistent measurement spans stored with saved viewpoints",
+      "Optional higher-precision IFC routing through a trusted Local Studio provider"
+    ]
+  }
+}

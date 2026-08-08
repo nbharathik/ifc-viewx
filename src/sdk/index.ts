@@ -5,6 +5,7 @@
 // A plugin that imports only from here keeps working across app releases.
 // Anything reached around it is internal and may move without notice.
 export { definePlugin } from "./define.js";
+export * from "./v2/index.js";
 export * from "./ui.js";
 export * from "./data.js";
 export * from "./parse.js";
@@ -31,6 +32,10 @@ export type {
   SweepProgress,
   SweepResult,
 } from "../ifc/clash.js";
+export { measureDistance } from "../geometry/distance.js";
+export type { DistanceOptions, DistanceResult } from "../geometry/distance.js";
+export { measureLaser } from "../geometry/laser.js";
+export type { LaserOptions, LaserResult, LaserAxis, LaserAxisResult, LaserHit } from "../geometry/laser.js";
 
 // The ranked search the assistant uses, so a panel searches the same way.
 export { buildIndex, tokenize } from "../llm/retrieval.js";
@@ -47,6 +52,8 @@ export type {
   ModelElement,
   ModelInfo,
   PluginContext,
+  PluginCapabilities,
+  PluginCapabilitySummary,
   PluginEvent,
   PluginInstance,
   PluginManifest,
@@ -75,4 +82,5 @@ export type {
   ViewPreset,
   VisibilityRule,
 } from "../viewer-core/viewer.js";
+export { formatLength } from "../viewer-core/viewer.js";
 export type { ServiceClient } from "../bridge/serviceClient.js";

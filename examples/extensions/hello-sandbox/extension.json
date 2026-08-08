@@ -1,0 +1,43 @@
+{
+  "manifestVersion": 2,
+  "id": "org.ifcviewx.hello",
+  "name": "Sandbox Hello",
+  "version": "1.0.0",
+  "sdk": ">=2.0.0 <3",
+  "description": "A minimal installed extension that reads class counts and the current selection.",
+  "publisher": {
+    "name": "IFCViewX examples"
+  },
+  "runtime": {
+    "kind": "sandboxed",
+    "entry": "panel.html"
+  },
+  "activationEvents": [
+    "onPanel:hello"
+  ],
+  "permissions": [
+    "model.structure.read",
+    "view.read"
+  ],
+  "contributes": {
+    "panels": [
+      {
+        "id": "hello",
+        "title": "Sandbox Hello",
+        "icon": "shield"
+      }
+    ]
+  },
+  "catalog": {
+    "tagline": "A minimal isolated extension",
+    "about": "Demonstrates the installed extension handshake, permission-checked model reads, host events, and the injected UI tokens without access to the viewer page.",
+    "icon": "shield",
+    "category": "Examples",
+    "keywords": "sandbox example extension classes selection",
+    "does": [
+      "Reads IFC class counts through host RPC",
+      "Reads selection changes without touching the parent page",
+      "Uses the sandbox UI tokens supplied by the viewer"
+    ]
+  }
+}

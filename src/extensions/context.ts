@@ -1,0 +1,463 @@
+import type { PluginCapabilities, PluginContext } from "../sdk/types.js";
+import type { ExtensionContextV2 } from "../sdk/v2/types.js";
+import type {
+  CommandContribution,
+  ContributionFor,
+  ContributionKind,
+  ExtensionManifestV2,
+  ExtensionPermission,
+} from "../sdk/v2/contributions.js";
+import type { ExtensionScope } from "./contributions.js";
+import type { ExtensionResultStore } from "./results.js";
+
+const EXTENSION_STORAGE_VALUE_BYTES = 64 * 1024;
+const EXTENSION_STORAGE_TOTAL_BYTES = 256 * 1024;
+const EXTENSION_STORAGE_KEYS = 64;
+
+export interface ExtensionRuntimeBindings {
+  registerCommand?(contribution: CommandContribution, handler: () => void): () => void;
+  results?: ExtensionResultStore;
+  addOverlayLine?(a: [number, number, number], b: [number, number, number]): number;
+  removeOverlayLine?(id: number): void;
+  exportFile?(name: string, data: string, mimeType: string): void;
+}
+
+const capabilityPermissions: Readonly<Record<string, readonly ExtensionPermission[]>> = {
+  find: ["model.structure.read"],
+  counts: ["model.structure.read"],
+  storeys: ["model.structure.read"],
+  properties: ["model.properties.read"],
+  check: ["model.structure.read", "model.properties.read"],
+  schedule: ["model.structure.read", "model.properties.read"],
+  ids: ["model.structure.read", "model.properties.read"],
+  clash: ["geometry.query"],
+  distance: ["geometry.query", "view.control"],
+  laser: ["geometry.query", "view.control"],
+  search: ["model.structure.read", "model.properties.read"],
+  selection: ["view.read"],
+  visibility: ["view.read"],
+  select: ["view.control"],
+  fit: ["view.control"],
+  isolate: ["view.control"],
+  hide: ["view.control"],
+  unhide: ["view.control"],
+  show: ["view.control"],
+  categories: ["view.control"],
+  color: ["view.control"],
+  section: ["view.control"],
+  sectionBox: ["geometry.query", "view.control"],
+  models: ["view.control"],
+  camera: ["view.control"],
+};
+
+const contributionPermission: Partial<Record<ContributionKind, ExtensionPermission>> = {
+  assistantTools: "assistant.contribute",
+  overlays: "view.overlay",
+  importers: "file.open",
+  exporters: "file.export",
+  settings: "storage.extension",
+};
+
+function linkedSignal(primary: AbortSignal, secondary?: AbortSignal): {
+  signal: AbortSignal;
+  dispose(): void;
+} {
+  if (!secondary) return { signal: primary, dispose: () => undefined };
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  primary.addEventListener("abort", abort, { once: true });
+  secondary.addEventListener("abort", abort, { once: true });
+  if (primary.aborted || secondary.aborted) controller.abort();
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      primary.removeEventListener("abort", abort);
+      secondary.removeEventListener("abort", abort);
+    },
+  };
+}
+
+export function createExtensionContextV2(
+  manifest: ExtensionManifestV2,
+  legacy: PluginContext,
+  scope: ExtensionScope,
+  bindings: ExtensionRuntimeBindings = {},
+): ExtensionContextV2 {
+  const permissions = new Set<ExtensionPermission>(manifest.permissions);
+  const resultBindings = new Map<string, () => void>();
+  const overlayBindings = new Map<string, () => void>();
+  const storagePrefix = `ifcviewx.plug.${manifest.id}.`;
+  let overlaySequence = 0;
+  const requirePermission = (permission: ExtensionPermission): void => {
+    if (!permissions.has(permission)) {
+      throw new Error(`${manifest.name} requires permission ${permission}`);
+    }
+  };
+  const capabilityAllowed = (id: string, effect: string): boolean => {
+    if (effect !== "read" && effect !== "view") return false;
+    const required = capabilityPermissions[id];
+    return required !== undefined && required.every((permission) => permissions.has(permission));
+  };
+  const capabilities: PluginCapabilities = {
+    list: () => legacy.capabilities.list().filter((capability) => capabilityAllowed(capability.id, capability.effect)),
+    execute: async <T,>(id: string, input: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> => {
+      const capability = legacy.capabilities.list().find((entry) => entry.id === id);
+      if (!capability || !capabilityAllowed(capability.id, capability.effect)) {
+        throw new Error(`${manifest.name} is not allowed to invoke capability ${id}`);
+      }
+      const linked = linkedSignal(scope.signal, signal);
+      try {
+        return await legacy.capabilities.execute<T>(id, input, linked.signal);
+      } finally {
+        linked.dispose();
+      }
+    },
+  };
+
+  return {
+    manifest,
+    signal: scope.signal,
+    session: {
+      model: () => {
+        requirePermission("model.summary.read");
+        return legacy.model();
+      },
+    },
+    model: {
+      elements: () => {
+        requirePermission("model.structure.read");
+        return legacy.elements();
+      },
+      classes: () => {
+        requirePermission("model.structure.read");
+        return legacy.classes();
+      },
+      properties: (id) => {
+        requirePermission("model.properties.read");
+        return legacy.properties(id);
+      },
+      tree: () => {
+        requirePermission("model.structure.read");
+        return legacy.tree();
+      },
+      subtree: (id) => {
+        requirePermission("model.structure.read");
+        return legacy.subtree(id);
+      },
+      bounds: (id) => {
+        requirePermission("geometry.query");
+        return legacy.bounds(id);
+      },
+      index: () => {
+        requirePermission("model.index.build");
+        return legacy.index();
+      },
+      modelOf: (id) => {
+        requirePermission("model.structure.read");
+        return legacy.modelOf(id);
+      },
+      expressOf: (id) => {
+        requirePermission("model.structure.read");
+        return legacy.expressOf(id);
+      },
+    },
+    geometry: {
+      clash: async (a, b, options = {}) => {
+        requirePermission("geometry.query");
+        const linked = linkedSignal(scope.signal, options.signal);
+        try {
+          return await legacy.clash(a, b, { ...options, signal: linked.signal });
+        } finally {
+          linked.dispose();
+        }
+      },
+      distance: async (a, b, options = {}) => {
+        requirePermission("geometry.query");
+        const linked = linkedSignal(scope.signal, options.signal);
+        try {
+          return await legacy.distance(a, b, { ...options, signal: linked.signal });
+        } finally {
+          linked.dispose();
+        }
+      },
+      laser: async (origin, options = {}) => {
+        requirePermission("geometry.query");
+        const linked = linkedSignal(scope.signal, options.signal);
+        try {
+          return await legacy.laser(origin, { ...options, signal: linked.signal });
+        } finally {
+          linked.dispose();
+        }
+      },
+    },
+    view: {
+      select: (ids) => {
+        requirePermission("view.control");
+        legacy.select(ids);
+      },
+      selection: () => {
+        requirePermission("view.read");
+        return legacy.selection();
+      },
+      lastPick: () => {
+        requirePermission("view.read");
+        return legacy.lastPick();
+      },
+      isVisible: (id) => {
+        requirePermission("view.read");
+        return legacy.isVisible(id);
+      },
+      isolate: (ids, label) => {
+        requirePermission("view.control");
+        legacy.isolate(ids, label);
+      },
+      hide: (ids) => {
+        requirePermission("view.control");
+        legacy.hide(ids);
+      },
+      showAll: () => {
+        requirePermission("view.control");
+        legacy.showAll();
+      },
+      frame: (id) => {
+        requirePermission("view.control");
+        legacy.frame(id);
+      },
+      frameAt: (point, radius) => {
+        requirePermission("view.control");
+        legacy.frameAt(point, radius);
+      },
+      viewFrom: (view) => {
+        requirePermission("view.control");
+        legacy.viewFrom(view);
+      },
+      camera: () => {
+        requirePermission("view.read");
+        return legacy.camera();
+      },
+      setCamera: (pose) => {
+        requirePermission("view.control");
+        legacy.setCamera(pose);
+      },
+      sections: () => {
+        requirePermission("view.read");
+        return legacy.sections();
+      },
+      setSections: (states) => {
+        requirePermission("view.control");
+        legacy.setSections(states);
+      },
+      sectionBox: () => {
+        requirePermission("view.read");
+        return legacy.sectionBox();
+      },
+      setSectionBox: (box) => {
+        requirePermission("view.control");
+        legacy.setSectionBox(box);
+      },
+      boxAround: (ids, pad) => {
+        requirePermission("geometry.query");
+        return legacy.boxAround(ids, pad);
+      },
+      colorBy: (assignment, colors) => {
+        requirePermission("view.control");
+        legacy.colorBy(assignment, colors);
+      },
+      measurements: () => {
+        requirePermission("view.read");
+        return legacy.measurements();
+      },
+      addMeasurement: (a, b) => {
+        requirePermission("view.control");
+        return legacy.addMeasurement(a, b);
+      },
+      removeMeasurement: (id) => {
+        requirePermission("view.control");
+        legacy.removeMeasurement(id);
+      },
+    },
+    events: {
+      on: (event, handler) => {
+        const off = legacy.on(event, handler);
+        scope.onDispose(off);
+        return off;
+      },
+    },
+    storage: {
+      read: <T,>(key: string, fallback: T): T => {
+        requirePermission("storage.extension");
+        try {
+          const raw = localStorage.getItem(`${storagePrefix}${key}`);
+          return raw === null ? fallback : JSON.parse(raw) as T;
+        } catch {
+          return fallback;
+        }
+      },
+      write: (key, value) => {
+        requirePermission("storage.extension");
+        const raw = JSON.stringify(value);
+        if (raw === undefined) throw new Error("Extension storage values must be JSON serializable");
+        const bytes = new TextEncoder().encode(raw).byteLength;
+        if (bytes > EXTENSION_STORAGE_VALUE_BYTES) throw new Error("Extension storage values are limited to 64 KB");
+        const target = `${storagePrefix}${key}`;
+        let count = 0;
+        let total = bytes;
+        for (let index = 0; index < localStorage.length; index++) {
+          const storedKey = localStorage.key(index);
+          if (!storedKey?.startsWith(storagePrefix)) continue;
+          count += 1;
+          if (storedKey !== target) total += new TextEncoder().encode(localStorage.getItem(storedKey) ?? "").byteLength;
+        }
+        if (localStorage.getItem(target) === null && count >= EXTENSION_STORAGE_KEYS) {
+          throw new Error(`Extension storage is limited to ${EXTENSION_STORAGE_KEYS} keys`);
+        }
+        if (total > EXTENSION_STORAGE_TOTAL_BYTES) throw new Error("Extension storage is limited to 256 KB");
+        localStorage.setItem(target, raw);
+      },
+    },
+    feedback: {
+      publishFindings: (summary, findings) => legacy.publishFindings(summary, findings),
+      log: (text, kind) => legacy.log(text, kind),
+      toast: (text, kind) => legacy.toast(text, kind),
+    },
+    commands: {
+      run: (id) => {
+        const declared = manifest.contributes.commands?.some((command) => command.id === id);
+        if (!declared) throw new Error(`${manifest.name} did not declare command ${id}`);
+        legacy.run(id);
+      },
+      register: (id, handler) => {
+        const contribution = manifest.contributes.commands?.find((command) => command.id === id);
+        if (!contribution) throw new Error(`${manifest.name} did not declare command ${id}`);
+        if (!bindings.registerCommand) throw new Error("This host cannot register extension commands");
+        const cleanup = bindings.registerCommand(contribution, handler);
+        return scope.bind("commands", id, cleanup);
+      },
+    },
+    capabilities,
+    contributions: {
+      register: <Kind extends ContributionKind>(
+        kind: Kind,
+        contribution: ContributionFor<Kind>,
+        cleanup?: () => void,
+      ): (() => void) => {
+        const needed = contributionPermission[kind];
+        if (needed) requirePermission(needed);
+        const declared = manifest.contributes[kind] as Array<{ id: string }> | undefined;
+        if (!declared?.some((entry) => entry.id === contribution.id)) {
+          throw new Error(`${manifest.name} did not declare ${kind}:${contribution.id}`);
+        }
+        return scope.bind(kind, contribution.id, cleanup ?? (() => undefined));
+      },
+    },
+    overlays: {
+      line: (overlay, a, b) => {
+        requirePermission("view.overlay");
+        const declared = manifest.contributes.overlays?.find((entry) => entry.id === overlay);
+        if (!declared) throw new Error(`${manifest.name} did not declare overlay ${overlay}`);
+        const quota = Math.min(500, Math.max(1, declared.quota ?? 200));
+        if (overlayBindings.size >= quota) throw new Error(`${manifest.name} reached its ${quota} overlay primitive limit`);
+        if (!bindings.addOverlayLine || !bindings.removeOverlayLine) throw new Error("This host cannot draw extension overlays");
+        const measurementId = bindings.addOverlayLine(a, b);
+        const handle = `overlay_${++overlaySequence}`;
+        const remove = scope.bind("overlays", overlay, () => {
+          bindings.removeOverlayLine?.(measurementId);
+          overlayBindings.delete(handle);
+        });
+        overlayBindings.set(handle, remove);
+        return handle;
+      },
+      remove: (id) => {
+        const remove = overlayBindings.get(id);
+        if (!remove) return false;
+        remove();
+        return true;
+      },
+      clear: () => {
+        for (const remove of [...overlayBindings.values()]) remove();
+      },
+    },
+    files: {
+      export: (exporter, name, data, mimeType) => {
+        requirePermission("file.export");
+        const declared = manifest.contributes.exporters?.find((entry) => entry.id === exporter);
+        if (!declared) throw new Error(`${manifest.name} did not declare exporter ${exporter}`);
+        if (!declared.mimeTypes.includes(mimeType)) throw new Error(`${manifest.name} did not declare MIME type ${mimeType}`);
+        if (!bindings.exportFile) throw new Error("This host cannot export extension files");
+        bindings.exportFile(name, data, mimeType);
+      },
+    },
+    results: {
+      create: (resultView, items, options = {}) => {
+        const declared = manifest.contributes.resultViews?.some((view) => view.id === resultView);
+        if (!declared) throw new Error(`${manifest.name} did not declare result view ${resultView}`);
+        if (!bindings.results) throw new Error("This host cannot store extension results");
+        const handle = bindings.results.create(manifest.id, resultView, items, {
+          ...options,
+          revision: options.revision ?? legacy.model().key,
+        });
+        const remove = scope.bind("resultViews", resultView, () => {
+          bindings.results?.dispose(manifest.id, handle.id);
+          resultBindings.delete(handle.id);
+        });
+        resultBindings.set(handle.id, remove);
+        return handle;
+      },
+      get: (id) => bindings.results?.get(manifest.id, id) ?? null,
+      page: <T,>(id: string, offset = 0, limit = 100) => {
+        if (!bindings.results) throw new Error("This host cannot read extension results");
+        return bindings.results.page<T>(manifest.id, id, offset, limit);
+      },
+      dispose: (id) => {
+        const remove = resultBindings.get(id);
+        if (remove) {
+          remove();
+          return true;
+        }
+        return bindings.results?.dispose(manifest.id, id) ?? false;
+      },
+    },
+    local: {
+      status: () => {
+        requirePermission("local.invoke");
+        const companion = manifest.localCompanion;
+        if (!companion) throw new Error(`${manifest.name} did not declare a Local Studio companion`);
+        const match = legacy.service.matchCompanion(companion.id, companion.version);
+        return {
+          state: match.status,
+          providerId: companion.id,
+          expectedVersion: companion.version,
+          ...(match.provider ? { installedVersion: match.provider.version } : {}),
+          trustedNative: true as const,
+        };
+      },
+      capabilities: () => {
+        requirePermission("local.invoke");
+        const companion = manifest.localCompanion;
+        if (!companion) throw new Error(`${manifest.name} did not declare a Local Studio companion`);
+        const match = legacy.service.matchCompanion(companion.id, companion.version);
+        return match.status === "available"
+          ? match.provider.capabilities.filter((entry) => entry.available).map((entry) => entry.id)
+          : [];
+      },
+      invoke: async <T,>(capability: string, input: Record<string, unknown> = {}, signal?: AbortSignal) => {
+        requirePermission("local.invoke");
+        const companion = manifest.localCompanion;
+        if (!companion) throw new Error(`${manifest.name} did not declare a Local Studio companion`);
+        const linked = linkedSignal(scope.signal, signal);
+        try {
+          return await legacy.service.invokeLocal<T>(
+            companion.id,
+            companion.version,
+            capability,
+            input,
+            linked.signal,
+          );
+        } finally {
+          linked.dispose();
+        }
+      },
+    },
+    close: () => legacy.close(),
+  };
+}

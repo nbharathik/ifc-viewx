@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from ifcviewx import store
@@ -14,9 +16,12 @@ GUARDED = [
     ("post", "/validate"),
     ("post", "/schedule"),
     ("post", "/llm/chat"),
+    ("post", "/llm/stream"),
     ("get", "/store"),
     ("get", "/audit"),
     ("get", "/jobs/abc"),
+    ("get", "/api/v1/providers"),
+    ("post", "/api/v1/jobs"),
 ]
 
 
@@ -179,3 +184,129 @@ def test_security_headers_are_always_present(client) -> None:
     headers = client.get("/health").headers
     assert headers["x-content-type-options"] == "nosniff"
     assert headers["referrer-policy"] == "no-referrer"
+
+
+def test_provider_listing_is_authenticated_and_versioned(client, auth) -> None:
+    body = client.get("/api/v1/providers", headers=auth).json()
+    assert body["protocol"] == {"min": 1, "max": 1, "current": 1}
+    core = next(provider for provider in body["providers"] if provider["id"] == "org.ifcviewx.core")
+    assert core["trust"] == "trusted-native"
+    assert {capability["id"] for capability in core["capabilities"]} >= {
+        "ifc.convert", "ifc.validate", "ifc.schedule", "ifc.python.query"
+    }
+
+
+def test_provider_mismatch_is_rejected_before_a_job_is_created(client, auth) -> None:
+    response = client.post(
+        "/api/v1/jobs",
+        headers=auth,
+        json={
+            "providerId": "org.ifcviewx.core",
+            "providerVersion": ">=99.0.0",
+            "capabilityId": "ifc.validate",
+            "modelSha": "0" * 64,
+            "input": {},
+        },
+    )
+    assert response.status_code == 409
+    assert response.json()["error"] == "provider_version_mismatch"
+
+
+def test_browser_provider_protocol_rejects_paths_at_every_level(client, auth) -> None:
+    response = client.post(
+        "/api/v1/jobs",
+        headers=auth,
+        json={
+            "providerId": "org.ifcviewx.core",
+            "providerVersion": "*",
+            "capabilityId": "ifc.validate",
+            "input": {"options": {"source_path": "C:/private/model.ifc"}},
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "path_input_forbidden"
+
+
+def test_generic_job_runs_the_same_validation_provider(client, auth, sample_ifc) -> None:
+    pytest.importorskip("ifcopenshell")
+    uploaded = client.post(
+        "/model",
+        headers=auth,
+        files={"file": ("sample.ifc", sample_ifc.read_bytes())},
+    ).json()
+    started = client.post(
+        "/api/v1/jobs",
+        headers=auth,
+        json={
+            "providerId": "org.ifcviewx.core",
+            "providerVersion": "*",
+            "capabilityId": "ifc.validate",
+            "modelSha": uploaded["sha"],
+            "input": {},
+        },
+    )
+    assert started.status_code == 202
+    job = started.json()
+    for _ in range(200):
+        job = client.get(f"/api/v1/jobs/{job['id']}", headers=auth).json()
+        if job["status"] not in {"queued", "running"}:
+            break
+        time.sleep(0.02)
+    assert job["status"] == "succeeded", job
+    result = client.get(f"/api/v1/jobs/{job['id']}/result", headers=auth).json()
+    assert result["schemaVersion"] == 1
+    assert result["value"]["schema"] == "IFC4"
+
+
+def test_compatibility_schedule_and_python_use_provider_jobs(client, auth, sample_ifc) -> None:
+    pytest.importorskip("ifcopenshell")
+    uploaded = client.post(
+        "/model",
+        headers=auth,
+        files={"file": ("sample.ifc", sample_ifc.read_bytes())},
+    ).json()
+    schedule = client.post(
+        "/schedule",
+        headers=auth,
+        json={"sha": uploaded["sha"], "type": "IfcWall"},
+    ).json()
+    query = client.post(
+        "/python",
+        headers=auth,
+        json={
+            "sha": uploaded["sha"],
+            "mode": "query",
+            "code": "result = len(model.by_type('IfcWall'))",
+        },
+    ).json()
+    assert schedule["total"] == 2
+    assert query["resultJson"] == "2"
+    events = client.get("/audit", headers=auth).json()["entries"]
+    capabilities = {
+        entry.get("capability")
+        for entry in events
+        if entry.get("event") == "provider.job.start"
+    }
+    assert {"ifc.schedule", "ifc.python.query"} <= capabilities
+
+
+def test_compatibility_conversion_uses_the_generic_job(client, auth, sample_ifc) -> None:
+    pytest.importorskip("ifcopenshell")
+    uploaded = client.post(
+        "/model",
+        headers=auth,
+        files={"file": ("sample.ifc", sample_ifc.read_bytes())},
+    ).json()
+    started = client.post("/convert", headers=auth, json={"sha": uploaded["sha"]}).json()
+    assert started["jobId"]
+    native = client.app.state.provider_jobs.get(started["jobId"])
+    assert native["providerId"] == "org.ifcviewx.core"
+    assert native["capabilityId"] == "ifc.convert"
+    status = started
+    for _ in range(300):
+        status = client.get(f"/jobs/{started['jobId']}", headers=auth).json()
+        if status["status"] not in {"queued", "running"}:
+            break
+        time.sleep(0.02)
+    assert status["status"] == "done", status
+    assert status["url"] == f"/models/{uploaded['sha']}.ifcx"

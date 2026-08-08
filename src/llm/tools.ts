@@ -97,6 +97,23 @@ export const TOOLS: ToolSpec[] = [
       tolerance: { type: "number", description: "millimetres of penetration to ignore" },
       clearance: { type: "number", description: "millimetres; above zero, also report pairs that pass closer than this" },
     } } },
+  { name: "distance", tier: "viewer", icon: "measure", syntax: '{"action":"distance","a":123,"b":456}',
+    summary: "exact shortest mesh distance between two elements, with witness points in the viewer",
+    plain: "Measure the shortest distance between elements",
+    params: { properties: {
+      a: { type: "integer", description: "first element id" },
+      b: { type: "integer", description: "second element id" },
+      maxDistance: { type: "number", description: "optional search limit in metres" },
+    }, required: ["a", "b"] } },
+  { name: "laser", tier: "viewer", icon: "ruler", syntax: '{"action":"laser","origin":[1.2,3.4,5.6],"source":123}',
+    summary: "cast a three-axis laser from a surface point to the next visible meshes; omit origin to reuse the last viewport click",
+    plain: "Measure six directions from a surface",
+    params: { properties: {
+      origin: { type: "array", items: { type: "number" }, minItems: 3, maxItems: 3, description: "surface point [x,y,z]; omit to use the last viewport click" },
+      source: { type: "integer", description: "element at the origin, excluded from axis hits" },
+      maxDistance: { type: "number", description: "axis search range in metres, default 30" },
+      includeHidden: { type: "boolean", description: "include hidden elements; false by default" },
+    } } },
   { name: "search", tier: "viewer", icon: "search", syntax: '{"action":"search","query":"external fire rated door level 2"}',
     summary: "ranked full-text search over names, classes, storeys and property values; use this before find when the wording is loose",
     plain: "Search the model in plain words",
@@ -266,7 +283,12 @@ export function toolBlocker(tool: ToolSpec, state: ToolAvailability): string {
 export interface NativeTool {
   name: string;
   description: string;
-  schema: { type: "object"; properties: Record<string, unknown>; required: string[] };
+  schema: {
+    type: "object";
+    properties: Record<string, unknown>;
+    required: string[];
+    additionalProperties?: false;
+  };
 }
 
 /**
@@ -283,6 +305,7 @@ export function nativeTools(mode: AssistantMode): NativeTool[] {
         type: "object" as const,
         properties: tool.params!.properties,
         required: tool.params!.required ?? [],
+        additionalProperties: false as const,
       },
     }),
   );
@@ -333,7 +356,7 @@ export function describeCall(kind: string, code: string): CallInfo {
   }
   try {
     const value = JSON.parse(code) as Record<string, unknown>;
-    const name = String(value.action ?? value.op ?? "");
+    const name = String(value.action ?? value.op ?? kind.replace(/__/g, "."));
     const tool = TOOLS.find((entry) => entry.name === name);
     const args = Object.entries(value)
       .filter(([key]) => key !== "action" && key !== "op")

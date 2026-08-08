@@ -1,4 +1,6 @@
-# SDK reference
+# SDK v1 compatibility reference
+
+This surface keeps existing bundled plugins working. New extensions should use the [SDK v2 reference](api-v2.md), which has serializable manifests, explicit permissions, scoped contributions, and no viewer or service escape hatches.
 
 Everything importable from `@ifcviewx/sdk`. If it is not here, it is internal
 and will move.
@@ -16,7 +18,7 @@ import { definePlugin, page, bar, grid, type PluginContext } from "@ifcviewx/sdk
 | `about` | A paragraph: what it reads, what it changes, anything surprising |
 | `does` | Bullets shown when the entry is expanded |
 | `icon`, `category`, `keywords` | Catalog display and search |
-| `tier` | `web`, `local` or `core`. See [tiers](index.md#tiers) |
+| `tier` | `web`, `local` or `core` in the v1 compatibility host |
 | `author`, `url` | Optional, shown on the card |
 | `capability` | `local` only: what the service must report |
 | `command` | `local` and `core` only: the command that opens it |
@@ -54,6 +56,7 @@ interface PluginInstance {
 | `ctx.properties(id)` | One element's attributes and property sets. Async |
 | `ctx.bounds(id)` | Axis aligned bounds, or `null` without geometry |
 | `ctx.clash(a, b, options?)` | Triangle-level clash detection between two id sets. Async |
+| `ctx.distance(a, b, options?)` | Exact shortest mesh distance with closest points. Async |
 | `ctx.index()` | The shared [property index](#the-property-index) |
 
 `ctx.clash` runs in a worker over the geometry the viewer already loaded, and
@@ -62,6 +65,19 @@ Options are `toleranceMm` (intersections thinner than this are grazes),
 `clearanceMm` (above zero, pairs that miss are also checked for a tight gap),
 `limit` and `onProgress`. Each result carries both element ids, the kind
 (`hard` or `clearance`), the distance in metres, and the point to zoom to.
+
+`ctx.distance` uses that same retained geometry and worker. Its result includes
+the closest point on each element, their midpoint, whether the solids
+intersect, and the browser geometry engine and fidelity that produced it.
+
+## Capabilities
+
+`ctx.capabilities.list()` describes the host operations available to a bundled
+plugin. `ctx.capabilities.execute(id, input, signal?)` invokes one through the
+same schema validation, policy checks, and cancellation path used by the
+assistant and browser MCP bridge. The v1 compatibility SDK grants only read
+and reversible view effects. SDK v2 also checks each call against the
+extension's manifest permissions.
 
 ## Driving the viewport
 
@@ -196,4 +212,5 @@ format themselves. `tone` is `ok`, `warn` or `err`.
 | `formatNumber(value)` | The app's number formatting |
 | `nextFrame()` | Await between slices of a long job to keep the panel responsive |
 | `detectClashes`, `clashReport`, `idsOfTypes` | The clash sweep the app itself runs |
+| `measureDistance` | The shortest-distance query the app and assistant use |
 | `STRUCTURE`, `MEP`, `OPENINGS` | The class sets behind the clash presets |

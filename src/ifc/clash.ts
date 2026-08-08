@@ -9,12 +9,12 @@
 // This file is the seam. The panel and the assistant both come through here,
 // so they can never disagree about a model, and neither one has to know that
 // there is a worker behind it. The pieces are in ./clash/.
-import { ClashEngine } from "./clash/engine.js";
 import { CLASH_LIMIT, MM } from "./clash/types.js";
 import type { ClashPair, SweepProgress, SweepResult, SweepSpec } from "./clash/types.js";
 import { elementsOf } from "../sdk/data.js";
 import type { ModelElement } from "../sdk/types.js";
 import type { Viewer } from "../viewer-core/viewer.js";
+import { geometryService } from "../geometry/service.js";
 
 export type { ClashKind, ClashPair, SweepProgress, SweepResult } from "./clash/types.js";
 export { CLASH_LIMIT } from "./clash/types.js";
@@ -34,18 +34,7 @@ export interface ClashOptions {
   clearanceMm?: number;
   limit?: number;
   onProgress?(progress: SweepProgress): void;
-}
-
-/** One engine per viewer: the first sweep starts the worker and feeds it. */
-const engines = new WeakMap<Viewer, ClashEngine>();
-
-function clashEngine(viewer: Viewer): ClashEngine {
-  let engine = engines.get(viewer);
-  if (!engine) {
-    engine = new ClashEngine(viewer.getTriangles());
-    engines.set(viewer, engine);
-  }
-  return engine;
+  signal?: AbortSignal;
 }
 
 /** Element ids of these classes that actually reached the scene as geometry. */
@@ -83,11 +72,11 @@ function sweepSpec(viewer: Viewer, a: number[], b: number[], options: ClashOptio
 }
 
 export function detectClashes(viewer: Viewer, a: number[], b: number[], options: ClashOptions = {}): Promise<SweepResult> {
-  return clashEngine(viewer).sweep(sweepSpec(viewer, a, b, options), options.onProgress);
+  return geometryService(viewer).clash(sweepSpec(viewer, a, b, options), options.onProgress, options.signal);
 }
 
 export function cancelClash(viewer: Viewer): void {
-  engines.get(viewer)?.cancel();
+  geometryService(viewer).cancelClash();
 }
 
 /** Deepest penetration in a set of results, in metres. */
@@ -104,6 +93,7 @@ export async function clashReport(
   bTypes: string[],
   toleranceMm: number,
   clearanceMm = 0,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   const a = aTypes.length ? aTypes : STRUCTURE;
   const b = bTypes.length ? bTypes : MEP;
@@ -119,7 +109,7 @@ export async function clashReport(
   }
 
   const names = new Map(elements.map((element) => [element.id, element.name]));
-  const result = await detectClashes(viewer, idsA, idsB, { toleranceMm, clearanceMm });
+  const result = await detectClashes(viewer, idsA, idsB, { toleranceMm, clearanceMm, signal });
   const hard = result.hits.filter((hit) => hit.kind === "hard");
   const near = result.hits.filter((hit) => hit.kind === "clearance");
   const worst = result.hits.slice(0, 20);

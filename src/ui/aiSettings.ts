@@ -50,6 +50,15 @@ export interface AiSettingsActions {
   openConsole(): void;
   /** Open the Studio dialog, which says what Local Studio adds. */
   openLocal(): void;
+  extensionTools?(): AssistantExtensionToolView[];
+  setExtensionTool?(owner: string, id: string, enabled: boolean): void;
+}
+
+export interface AssistantExtensionToolView {
+  owner: string;
+  id: string;
+  capability: string;
+  enabled: boolean;
 }
 
 export class AssistantSettings {
@@ -155,8 +164,33 @@ export class AssistantSettings {
         ]),
       );
     }
+    const extensions = this.extensionGroup();
+    if (extensions) blocks.push(extensions);
     blocks.push(this.extrasGroup(state.localCaps));
     this.toolsHost.replaceChildren(...blocks);
+  }
+
+  private extensionGroup(): HTMLElement | null {
+    const rows = this.actions.extensionTools?.() ?? [];
+    if (rows.length === 0) return null;
+    return h("div", { class: "tool-sec assistant-extension-tools" }, [
+      h("div", { class: "tool-title" }, [
+        h("span", { text: "Extension tools" }),
+        infoIcon("Disabled by default. Enabling one lets the assistant call that registered capability."),
+      ]),
+      ...rows.map((row) => {
+        const input = h("input", { type: "checkbox" }) as HTMLInputElement;
+        input.checked = row.enabled;
+        input.addEventListener("change", () => this.actions.setExtensionTool?.(row.owner, row.id, input.checked));
+        return h("label", { class: "assistant-extension-tool" }, [
+          input,
+          h("span", { class: "grow" }, [
+            h("span", { class: "tool-extension-name", text: row.capability }),
+            h("span", { class: "note", text: row.owner }),
+          ]),
+        ]);
+      }),
+    ]);
   }
 
   /**

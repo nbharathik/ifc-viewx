@@ -55,6 +55,11 @@ export interface Gap {
   point: [number, number, number];
 }
 
+export interface SurfaceDistance extends Gap {
+  pointA: [number, number, number];
+  pointB: [number, number, number];
+}
+
 /**
  * Triangle pairs recorded per clash. Reached only by two large elements deeply
  * inside one another, where the contact region is already well described.
@@ -246,6 +251,11 @@ function swallowed(outer: ElementMesh, inner: ElementMesh): Contact | null {
 
 /** The true minimum surface distance, when it falls under `limit`. */
 export function clearanceGap(a: ElementMesh, b: ElementMesh, limit: number): Gap | null {
+  const hit = surfaceDistance(a, b, limit);
+  return hit ? { distance: hit.distance, point: hit.point } : null;
+}
+
+export function surfaceDistance(a: ElementMesh, b: ElementMesh, limit = Infinity): SurfaceDistance | null {
   _matrix.makeTranslation(
     b.centre[0] - a.centre[0],
     b.centre[1] - a.centre[1],
@@ -253,14 +263,24 @@ export function clearanceGap(a: ElementMesh, b: ElementMesh, limit: number): Gap
   );
   const hit = a.bvh.closestPointToGeometry(b.geometry, _matrix, _target1, _target2, 0, limit);
   if (!hit || hit.distance > limit) return null;
-  // target1 sits in A's frame and target2 in B's own frame; the midpoint of
-  // the two, back in scene space, is the middle of the gap.
+  const pointA: [number, number, number] = [
+    _target1.point.x + a.centre[0],
+    _target1.point.y + a.centre[1],
+    _target1.point.z + a.centre[2],
+  ];
+  const pointB: [number, number, number] = [
+    _target2.point.x + b.centre[0],
+    _target2.point.y + b.centre[1],
+    _target2.point.z + b.centre[2],
+  ];
   return {
     distance: hit.distance,
+    pointA,
+    pointB,
     point: [
-      (_target1.point.x + a.centre[0] + _target2.point.x + b.centre[0]) / 2,
-      (_target1.point.y + a.centre[1] + _target2.point.y + b.centre[1]) / 2,
-      (_target1.point.z + a.centre[2] + _target2.point.z + b.centre[2]) / 2,
+      (pointA[0] + pointB[0]) / 2,
+      (pointA[1] + pointB[1]) / 2,
+      (pointA[2] + pointB[2]) / 2,
     ],
   };
 }
