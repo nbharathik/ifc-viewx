@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 
 import { ModelBatcher } from './batcher.js';
+import { createWebGlRenderer } from './webgl.js';
 import type { IfcMesh, ModelBounds } from '../engine/types.js';
 
 /**
@@ -14,6 +15,8 @@ export type SnapKind = 'vertex' | 'midpoint' | 'edge' | 'surface';
 export interface SnapHit {
   point: [number, number, number];
   kind: SnapKind;
+  /** Element that owns a snapped feature. Raw face picks use the center-pixel pick id. */
+  expressID?: number;
 }
 
 /** One placed measurement span, ready to draw. */
@@ -57,6 +60,11 @@ const _forward = new THREE.Vector3();
 const _raycaster = new THREE.Raycaster();
 const _pixel = new Uint8Array(4);
 const _viewProjection = new THREE.Matrix4();
+const remember = (state: Float64Array, index: number, value: number): boolean => {
+  if (state[index] === value) return false;
+  state[index] = value;
+  return true;
+};
 /** Measure markers keep this radius on screen whatever the zoom. */
 const MEASURE_MARKER_PX = 4;
 /** Half-thickness of the measure bar, in screen pixels. */
@@ -77,6 +85,15 @@ const SNAP_KINDS = ['vertex', 'midpoint', 'edge'] as const;
 const SNAP_RADIUS = [14, 11, 9];
 /** Compared against squared screen distances, so the scan skips the sqrt. */
 const SNAP_RADIUS_SQ = SNAP_RADIUS.map((r) => r * r);
+
+export function needsMeasureLayout(
+  spans: readonly MeasureSpan[],
+  live: { a: [number, number, number]; end: [number, number, number] | null } | null,
+  hover: [number, number, number] | null,
+  visible: boolean,
+): boolean {
+  return spans.length > 0 || live !== null || hover !== null || visible;
+}
 
 export class SceneController {
   readonly scene: THREE.Scene;
@@ -99,6 +116,9 @@ export class SceneController {
   private userScale = 1;
   private measure: THREE.Group | null = null;
   private measureSpans: MeasureSpan[] = [];
+  private laidOutMeasureSpans: MeasureSpan[] | null = null;
+  /** Camera/viewport values that affect the constant-pixel measure geometry. */
+  private readonly measureView = new Float64Array(11).fill(Number.NaN);
   private measureLive: { a: [number, number, number]; end: [number, number, number] | null } | null =
     null;
   private measureHover: [number, number, number] | null = null;
@@ -147,13 +167,7 @@ export class SceneController {
 
   constructor(canvas: HTMLCanvasElement, colors: SceneColors = DEFAULT_COLORS) {
     this.colors = colors;
-    this.renderer = new THREE.WebGLRenderer({
-      canvas,
-      antialias: colors.antialias ?? true,
-      preserveDrawingBuffer: true,
-      alpha: false,
-      powerPreference: 'high-performance',
-    });
+    this.renderer = createWebGlRenderer(canvas, colors.antialias ?? true).renderer;
     this.renderer.setPixelRatio(1); // pinned; user scale handled in applySize
     // render() reads the counters after every pass, so it owns the reset.
     this.renderer.info.autoReset = false;
@@ -482,6 +496,24 @@ export class SceneController {
     const along = depth / Math.max(ray.direction.dot(forward), 1e-6);
     const point = _v.copy(ray.origin).addScaledVector(ray.direction, along);
     return [point.x, point.y, point.z];
+  }
+
+  /** Estimate the picked face normal from neighbouring packed-depth samples. */
+  surfaceNormalAt(
+    canvasX: number,
+    canvasY: number,
+    point: [number, number, number],
+  ): [number, number, number] | null {
+    const xPoint = this.pickPoint(canvasX + 3, canvasY) ?? this.pickPoint(canvasX - 3, canvasY);
+    const yPoint = this.pickPoint(canvasX, canvasY + 3) ?? this.pickPoint(canvasX, canvasY - 3);
+    if (!xPoint || !yPoint) return null;
+    const center = new THREE.Vector3(...point);
+    const across = new THREE.Vector3(...xPoint).sub(center);
+    const down = new THREE.Vector3(...yPoint).sub(center);
+    const limit = this.worldPerPixel(point) * 50;
+    if (across.length() > limit || down.length() > limit) return null;
+    const normal = across.cross(down).normalize();
+    return normal.lengthSq() > 1e-12 ? [normal.x, normal.y, normal.z] : null;
   }
 
   /**
@@ -855,7 +887,8 @@ export class SceneController {
     // One running best per kind, so priority can be applied after the scan.
     const nearest = [Infinity, Infinity, Infinity];
     const found = new Float64Array(9);
-    const consider = (x: number, y: number, z: number, kind: number): void => {
+    const foundIds = new Float64Array(3);
+    const consider = (x: number, y: number, z: number, kind: number, id: number): void => {
       // Squared: tens of thousands of these run per hover frame and only the
       // ordering matters, so the square root is pure cost. `nearest` holds
       // squared distances to match, which the Infinity test below is fine with.
@@ -870,6 +903,7 @@ export class SceneController {
       found[kind * 3] = x;
       found[kind * 3 + 1] = y;
       found[kind * 3 + 2] = z;
+      foundIds[kind] = id;
     };
 
     for (const id of ids) {
@@ -886,16 +920,16 @@ export class SceneController {
         if (aw === 0) continue;
         const apx = sx;
         const apy = sy;
-        consider(ax, ay, az, 0);
+        consider(ax, ay, az, 0, id);
         const bw = project(bx, by, bz);
         if (bw === 0) continue;
         const bpx = sx;
         const bpy = sy;
-        consider(bx, by, bz, 0);
+        consider(bx, by, bz, 0, id);
         if (vertexOnly) continue;
 
         if (project((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2) !== 0) {
-          consider((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2, 1);
+          consider((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2, 1, id);
         }
         // Closest point along the drawn edge, then back to 3D. The screen
         // parameter is not the world one under perspective, hence the w mix.
@@ -907,7 +941,7 @@ export class SceneController {
         const s = (t * aw) / (bw + t * (aw - bw));
         sx = apx + dx * t;
         sy = apy + dy * t;
-        consider(ax + (bx - ax) * s, ay + (by - ay) * s, az + (bz - az) * s, 2);
+        consider(ax + (bx - ax) * s, ay + (by - ay) * s, az + (bz - az) * s, 2, id);
       }
     }
 
@@ -916,6 +950,7 @@ export class SceneController {
       return {
         point: [found[kind * 3], found[kind * 3 + 1], found[kind * 3 + 2]],
         kind: SNAP_KINDS[kind],
+        expressID: foundIds[kind],
       };
     }
     return null;
@@ -947,7 +982,6 @@ export class SceneController {
     this.measureSpans = spans;
     this.measureLive = live;
     this.measureHover = hover;
-    this.layoutMeasure();
   }
 
   private layoutMeasure(): void {
@@ -959,6 +993,21 @@ export class SceneController {
     }
     const parts = this.measureParts ?? this.buildMeasure();
     this.measure!.visible = true;
+    const camera = this.camera;
+    let viewChanged = false;
+    viewChanged = remember(this.measureView, 0, camera.position.x) || viewChanged;
+    viewChanged = remember(this.measureView, 1, camera.position.y) || viewChanged;
+    viewChanged = remember(this.measureView, 2, camera.position.z) || viewChanged;
+    viewChanged = remember(this.measureView, 3, camera.quaternion.x) || viewChanged;
+    viewChanged = remember(this.measureView, 4, camera.quaternion.y) || viewChanged;
+    viewChanged = remember(this.measureView, 5, camera.quaternion.z) || viewChanged;
+    viewChanged = remember(this.measureView, 6, camera.quaternion.w) || viewChanged;
+    viewChanged = remember(this.measureView, 7, camera.fov) || viewChanged;
+    viewChanged = remember(this.measureView, 8, camera.aspect) || viewChanged;
+    viewChanged = remember(this.measureView, 9, this.baseWidth) || viewChanged;
+    viewChanged = remember(this.measureView, 10, this.baseHeight) || viewChanged;
+    const placedChanged = viewChanged || spans !== this.laidOutMeasureSpans;
+    this.laidOutMeasureSpans = spans;
 
     const count = spans.length + (live ? 1 : 0);
     while (this.measurePool.length < count) {
@@ -995,6 +1044,9 @@ export class SceneController {
     };
 
     this.measurePool.forEach((nodes, index) => {
+      // Cursor hover changes at frame rate. Placed nodes keep their transforms
+      // until either their stable array reference or the camera changes.
+      if (index < spans.length && !placedChanged) return;
       const span =
         index < spans.length
           ? spans[index]
@@ -1098,7 +1150,9 @@ export class SceneController {
 
   render(): void {
     const t0 = performance.now();
-    if (this.measure?.visible) this.layoutMeasure();
+    if (needsMeasureLayout(this.measureSpans, this.measureLive, this.measureHover, this.measure?.visible ?? false)) {
+      this.layoutMeasure();
+    }
     // Counters are read after the whole frame, so three must not reset them at
     // the start of each pass: without this the gizmo pass is what the perf HUD
     // reports, which is a handful of arrows rather than the model.
@@ -1178,5 +1232,9 @@ export class SceneController {
     this.pickTarget.dispose();
     this.snapTarget?.dispose();
     this.renderer.dispose();
+    // renderer.dispose() frees objects but deliberately retains the context.
+    // Release it too so remounting the SDK cannot exhaust the browser's small
+    // per-process WebGL context allowance.
+    this.renderer.forceContextLoss();
   }
 }

@@ -89,14 +89,15 @@ The injected `IFCViewX` object provides:
 | --- | --- |
 | Session | `session.model()` |
 | Model | paged `model.elements()`, `classes()`, `properties(id)`, `bounds(id)` |
-| Geometry | `geometry.distance(a, b, options)`, `geometry.clash(aIds, bIds, options)` |
+| Geometry | distance, clash, axis laser, and bounded `sectionContours(axis, offset, options)` |
 | View | selection, select, isolate, hide, show all, frame, section reads and writes |
 | Storage | `storage.read(key, fallback)`, `storage.write(key, value)` |
 | Feedback | `feedback.log`, `feedback.toast` |
 | Commands | `commands.run(id)` for a declared command |
 | Overlays | declared line creation, removal, and clear |
 | Results | create, inspect, page, and dispose declared result views |
-| Files | export a string through a declared exporter and MIME type |
+| Files | open a user-selected text file through a declared importer; export through a declared exporter and MIME type |
+| Issues | create a BCF topic through `issues.create(input)` with issue and viewport permissions |
 
 `IFCViewX.on(name, listener)` receives `model`, `selection`, `visibility`, `section`, `activation`, and `ready` events when the corresponding data permission permits them. The small `IFCViewX.ui.element()` helper creates elements inside the isolated document. Host design tokens and basic `.ifcx-*` layout classes are injected for visual consistency.
 
@@ -119,6 +120,8 @@ Runtime limits include:
 - 1,000 result rows created per call, 10,000 live rows and 16 handles per owner;
 - 500 result rows per page;
 - declared overlay quotas, capped at 500 primitives;
+- user-selected text imports capped at 240 KB;
+- issue inputs capped at 16 KB, 200 element IDs, and 24 scalar metadata fields;
 - 64 KB per stored value, 64 keys, and 256 KB total per extension.
 
 Three malformed, oversized, replayed, or rate-limited protocol messages disable the extension for the session. Sensitive calls and failures are recorded in the local audit. Changing the model aborts pending geometry requests. Closing, disabling, crashing, updating, rolling back, or uninstalling disposes the extension owner scope.
@@ -150,6 +153,6 @@ Open the viewer with that query. The bridge is accepted only over HTTP on `127.0
 
 ## Browser and local split
 
-Installed browser extensions can perform model reads, host-owned mesh distance and clash queries, reversible view changes, declarative overlays, bounded result handling, storage, and user-initiated exports fully in the browser.
+Installed browser extensions can perform model reads, host-owned mesh distance, clash, laser, and section-contour queries, reversible view changes, declarative overlays, bounded result handling, storage, user-chosen file import, exports, and permission-gated BCF issue creation fully in the browser.
 
 `localCompanion` binds `ctx.local` to one separately installed Local Studio provider. The host checks the declared version range before invocation, shows missing and incompatible states, and cancels native jobs when the extension closes. The browser installer does not install native code. Native providers remain outside the browser sandbox and must be installed and trusted separately. See [Local Studio providers](../local-providers.md).

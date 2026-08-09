@@ -41,7 +41,9 @@ export const CASES = [
   { ask: "A prior search returned result_7. Group those rows by storey without searching again.", expect: ["result__group"] },
   { ask: "Open row 12 from the prior result_7 in the viewer.", expect: ["result__open"] },
   { ask: "Isolate rows 2, 4 and 8 from result_7.", expect: ["result__isolate"] },
+  { ask: "Group the prior clash result_9 by class pair so I can triage the biggest coordination groups.", expect: ["result__group"] },
   { ask: "From the point I just clicked, measure to the next surfaces on all three axes.", expect: ["laser"] },
+  { ask: "Turn the current horizontal cut into a section drawing and tell me which elements have open contours.", expect: ["sectionContours"] },
 ];
 
 /**
@@ -63,7 +65,7 @@ export const TOOLS = [
   ["check", "structural QA: identity, containment, placement, units, naming", {}, []],
   ["schedule", "table of a class; omit properties to list what is available", { type: { type: "string" }, properties: { type: "array", items: { type: "string" } } }, ["type"]],
   ["ids", "validate against the IDS the user loaded; pass/fail per specification", {}, []],
-  ["clash", "triangle-level clash sweep between two class sets", { a: { type: "array", items: { type: "string" } }, b: { type: "array", items: { type: "string" } }, tolerance: { type: "number" }, clearance: { type: "number" } }, []],
+  ["clash", "triangle-level clash sweep with rows ready to group by severity, classPair, level, primary or kind", { a: { type: "array", items: { type: "string" } }, b: { type: "array", items: { type: "string" } }, tolerance: { type: "number" }, clearance: { type: "number" } }, []],
   ["distance", "exact shortest mesh distance between two elements, with witness points in the viewer", { a: { type: "integer" }, b: { type: "integer" }, maxDistance: { type: "number" } }, ["a", "b"]],
   ["laser", "cast a three-axis laser from a surface point to the next visible meshes", { origin: { type: "array", items: { type: "number" }, minItems: 3, maxItems: 3 }, source: { type: "integer" }, maxDistance: { type: "number" }, includeHidden: { type: "boolean" } }, []],
   ["search", "ranked full-text search over names, classes, storeys and property values; use this before find when the wording is loose", { query: { type: "string" }, limit: { type: "integer" } }, ["query"]],
@@ -73,6 +75,7 @@ export const TOOLS = [
   ["categories", "spaces and openings are off by default and carry no geometry until switched on", { IfcSpace: { type: "boolean" }, IfcOpeningElement: { type: "boolean" } }, []],
   ["color", "paint groups of elements; omit groups to take the colouring off", { groups: { type: "array", items: { type: "object" } } }, []],
   ["section", "one axis-aligned cut; pass clear to remove", { axis: { type: "string" }, offset: { type: "number" }, flip: { type: "boolean" }, clear: { type: "boolean" } }, []],
+  ["sectionContours", "build element-owned 2D contour summaries at a cut and synchronize the 3D plane", { axis: { type: "string" }, offset: { type: "number" }, flip: { type: "boolean" }, includeHidden: { type: "boolean" }, maxSegments: { type: "integer" } }, []],
   ["sectionBox", "clip to a box around these elements; pass clear to remove it", { ids: { type: "array", items: { type: "integer" } }, clear: { type: "boolean" } }, []],
   ["camera", "move to a preset viewpoint, or read where the camera is", { view: { type: "string" } }, []],
   ["models", "the federated models with their element counts; pass show/hide to switch a discipline on or off", { show: { type: "array", items: { type: "integer" } }, hide: { type: "array", items: { type: "integer" } } }, []],

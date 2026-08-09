@@ -299,6 +299,7 @@ const CSS = `
 /* Measure + section handles. Scoped to the render surface: the axis gizmo is
    a sibling canvas in the same container and must keep its own cursor. */
 .ifc-measuring > canvas:first-of-type { cursor: crosshair; }
+.ifc-pick-guided > canvas:first-of-type { cursor: crosshair; }
 .ifc-over-handle > canvas:first-of-type { cursor: grab; }
 .ifc-dragging-section > canvas:first-of-type { cursor: grabbing; }
 /* One number over the middle of the span. Everything else about the
@@ -335,6 +336,17 @@ const CSS = `
   white-space: nowrap;
   pointer-events: none;
   z-index: 9;
+}
+.ifc-snap-tag[data-constraint="x"] { border-color: #ef6b73; color: #f28a90; }
+.ifc-snap-tag[data-constraint="y"] { border-color: #4fbd85; color: #78d4a1; }
+.ifc-snap-tag[data-constraint="z"] { border-color: #5591f5; color: #82aff8; }
+.ifc-snap-tag[data-constraint="perpendicular"] { border-color: #e7c84b; color: #f2de7b; }
+.ifc-snap-tag[data-constraint="parallel"] { border-color: #d279e8; color: #e5a3f3; }
+.ifc-pick-guided .ifc-snap-tag {
+  padding: 3px 8px 3px 7px;
+  border-color: color-mix(in srgb, var(--ifc-measure, #ff8c1a) 58%, var(--ifc-line, #23272f));
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.32);
+  font-weight: 600;
 }
 
 /* Plan inset: the pixels come from the WebGL pass, this is only its frame */

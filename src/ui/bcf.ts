@@ -5,14 +5,26 @@
 import { confirmAction, h, icon, iconButton, toast } from "./kit.js";
 import { emptyState } from "./shell.js";
 import type { ReportIssue } from "./report.js";
-import type { CameraPose, SectionState, Viewer } from "../viewer-core/viewer.js";
+import type { CameraPose, SectionBox, SectionState, Viewer } from "../viewer-core/viewer.js";
+
+interface ViewpointSelection {
+  id: number;
+  guid: string | null;
+}
 
 interface Viewpoint {
   camera: CameraPose;
   sections: SectionState[];
-  selection: number | null;
-  selectionGuid: string | null;
+  sectionBox?: SectionBox | null;
+  selections?: ViewpointSelection[];
+  selection?: number | null;
+  selectionGuid?: string | null;
   hidden: number[];
+}
+
+export interface BcfCaptureOptions {
+  elementIds?: number[];
+  priority?: string;
 }
 
 interface Topic {
@@ -190,12 +202,19 @@ function viewpointXml(topic: Topic): string {
   const up = upVector(d);
   const component = (id: number, guid: string | null): string =>
     `<Component${guid ? ` IfcGuid="${escape(guid)}"` : ""} OriginatingSystem="IFCViewX" AuthoringToolId="${id}"/>`;
-  const selection = view.selection === null ? "" : `<Selection>${component(view.selection, view.selectionGuid)}</Selection>`;
+  const selections = view.selections ?? (
+    view.selection === null || view.selection === undefined
+      ? []
+      : [{ id: view.selection, guid: view.selectionGuid ?? null }]
+  );
+  const selection = selections.length
+    ? `<Selection>${selections.map((item) => component(item.id, item.guid)).join("")}</Selection>`
+    : "";
   const exceptions =
     view.hidden.length && view.hidden.length <= 500
       ? `<Exceptions>${view.hidden.map((id) => component(id, null)).join("")}</Exceptions>`
       : "";
-  const planes = view.sections
+  const sections = view.sections
     .map((section) => {
       const index = section.axis === "x" ? 0 : section.axis === "y" ? 1 : 2;
       const location: [number, number, number] = [0, 0, 0];
@@ -205,6 +224,21 @@ function viewpointXml(topic: Topic): string {
       return `<ClippingPlane>${point("Location", location)}${point("Direction", normal)}</ClippingPlane>`;
     })
     .join("");
+  const box = view.sectionBox;
+  const boxPlanes = box
+    ? ([
+        [0, box.min[0], 1], [0, box.max[0], -1],
+        [1, box.min[1], 1], [1, box.max[1], -1],
+        [2, box.min[2], 1], [2, box.max[2], -1],
+      ] as Array<[number, number, number]>).map(([axis, offset, direction]) => {
+        const location: [number, number, number] = [0, 0, 0];
+        const normal: [number, number, number] = [0, 0, 0];
+        location[axis] = offset;
+        normal[axis] = direction;
+        return `<ClippingPlane>${point("Location", location)}${point("Direction", normal)}</ClippingPlane>`;
+      }).join("")
+    : "";
+  const planes = boxPlanes || sections;
   return (
     `<?xml version="1.0" encoding="UTF-8"?>\n<VisualizationInfo Guid="${topic.guid}">` +
     `<Components><Visibility DefaultVisibility="true">${exceptions}</Visibility>${selection}</Components>` +
@@ -255,22 +289,37 @@ function parseTopic(markup: string, viewpoint: string | null, snapshot: string |
   const heading = readVector(camera?.getElementsByTagName("CameraDirection")[0] ?? null);
   if (position && heading) {
     const span = 10;
+    const clipping = [...view.getElementsByTagName("ClippingPlane")].flatMap((plane) => {
+      const location = readVector(plane.getElementsByTagName("Location")[0] ?? null);
+      const normal = readVector(plane.getElementsByTagName("Direction")[0] ?? null);
+      if (!location || !normal) return [];
+      const axis = normal.map(Math.abs).indexOf(Math.max(...normal.map(Math.abs)));
+      return [{ axis, location, normal }];
+    });
+    const byAxis = [0, 1, 2].map((axis) => clipping.filter((plane) => plane.axis === axis));
+    const sectionBox = byAxis.every((planes) => planes.length === 2)
+      ? {
+          min: byAxis.map((planes, axis) => Math.min(...planes.map((plane) => plane.location[axis]))) as [number, number, number],
+          max: byAxis.map((planes, axis) => Math.max(...planes.map((plane) => plane.location[axis]))) as [number, number, number],
+        }
+      : null;
+    const selections = [...view.getElementsByTagName("Selection")[0]?.getElementsByTagName("Component") ?? []]
+      .flatMap((component) => {
+        const id = Number(component.getAttribute("AuthoringToolId") ?? NaN);
+        return Number.isFinite(id) && id > 0 ? [{ id, guid: component.getAttribute("IfcGuid") }] : [];
+      });
     topic.viewpoint = {
       camera: {
         position,
         target: [position[0] + heading[0] * span, position[1] + heading[1] * span, position[2] + heading[2] * span],
       },
-      sections: [...view.getElementsByTagName("ClippingPlane")].flatMap((plane) => {
-        const location = readVector(plane.getElementsByTagName("Location")[0] ?? null);
-        const normal = readVector(plane.getElementsByTagName("Direction")[0] ?? null);
-        if (!location || !normal) return [];
-        const index = normal.map(Math.abs).indexOf(Math.max(...normal.map(Math.abs)));
-        return [{ axis: (["x", "y", "z"] as const)[index], offset: location[index], flip: normal[index] > 0 }];
-      }),
-      selection: Number(
-        view.getElementsByTagName("Selection")[0]?.getElementsByTagName("Component")[0]?.getAttribute("AuthoringToolId") ?? NaN,
-      ) || null,
-      selectionGuid: null,
+      sections: sectionBox ? [] : clipping.map((plane) => ({
+        axis: (["x", "y", "z"] as const)[plane.axis],
+        offset: plane.location[plane.axis],
+        flip: plane.normal[plane.axis] > 0,
+      })),
+      sectionBox,
+      selections,
       hidden: [],
     };
   }
@@ -359,28 +408,33 @@ export class BcfPanel {
   }
 
   /** Raise an issue on what is on screen now. Empty title opens the editor. */
-  capture(title: string, description: string): void {
-    if (!this.key()) return void toast("Open a model first", "info");
+  capture(title: string, description: string, options: BcfCaptureOptions = {}): string | null {
+    if (!this.key()) {
+      toast("Open a model first", "info");
+      return null;
+    }
     const viewer = this.actions.viewer;
     const counts = viewer.getVisibilityCounts();
     const hidden =
       counts.hidden > 0 && counts.hidden <= HIDDEN_LIMIT
         ? [...viewer.getElementTypes().keys()].filter((id) => !viewer.isElementVisible(id))
         : [];
+    const selectedIds = [...new Set(options.elementIds ?? viewer.getSelectedIds())]
+      .filter((id) => Number.isFinite(id) && id > 0);
     const topic: Topic = {
       guid: uuid(),
       title: title || "New issue",
       description,
       status: "Open",
-      priority: "Normal",
+      priority: PRIORITY.includes(options.priority ?? "") ? options.priority! : "Normal",
       author: this.author,
       date: new Date().toISOString(),
       comments: [],
       viewpoint: {
         camera: viewer.getCamera(),
         sections: viewer.getSections(),
-        selection: viewer.getSelection(),
-        selectionGuid: null,
+        sectionBox: viewer.getSectionBox(),
+        selections: selectedIds.map((id) => ({ id, guid: null })),
         hidden,
       },
       snapshot: null,
@@ -390,21 +444,20 @@ export class BcfPanel {
       this.save();
       this.render();
     });
-    const selected = topic.viewpoint?.selection ?? null;
-    if (selected !== null) {
-      void viewer.getProperties(selected).then((props) => {
+    if (selectedIds.length) {
+      void Promise.all(selectedIds.map(async (id) => {
+        const props = await viewer.getProperties(id).catch(() => null);
         const guid = props?.attributes.find((item) => item.name === "GlobalId")?.value;
-        if (guid && topic.viewpoint) {
-          topic.viewpoint.selectionGuid = String(guid);
-          this.save();
-        }
-      });
+        const selection = topic.viewpoint?.selections?.find((item) => item.id === id);
+        if (guid && selection) selection.guid = String(guid);
+      })).then(() => this.save());
     }
     this.topics.unshift(topic);
     this.expanded = topic.guid;
     this.save();
     this.render();
     this.actions.log(`Issue raised: ${topic.title}`, "success");
+    return topic.guid;
   }
 
   // -- storage --------------------------------------------------------------
@@ -507,10 +560,14 @@ export class BcfPanel {
     } else {
       viewer.showAll();
     }
-    if (view.sections.length) viewer.setSections(view.sections);
+    if (view.sectionBox) viewer.setSectionBox(view.sectionBox);
+    else if (view.sections.length) viewer.setSections(view.sections);
     else viewer.clearSection();
     viewer.setCamera(view.camera);
-    if (view.selection !== null) viewer.select(view.selection);
+    const selected = view.selections?.map((item) => item.id) ?? (
+      view.selection === null || view.selection === undefined ? [] : [view.selection]
+    );
+    if (selected.length) viewer.selectMany(selected, "replace");
   }
 
   private render(): void {
@@ -589,8 +646,8 @@ export class BcfPanel {
       topic.viewpoint = {
         camera: viewer.getCamera(),
         sections: viewer.getSections(),
-        selection: viewer.getSelection(),
-        selectionGuid: null,
+        sectionBox: viewer.getSectionBox(),
+        selections: viewer.getSelectedIds().map((id) => ({ id, guid: null })),
         hidden: [],
       };
       void snapshot(viewer).then((shot) => {

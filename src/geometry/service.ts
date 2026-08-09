@@ -3,10 +3,11 @@ import { chunkTransfers, type TriangleStore } from "../viewer-core/scene/triangl
 import type { Viewer } from "../viewer-core/viewer.js";
 import type {
   DistanceResult, DistanceSpec, GeometryDiagnostics, GeometryRequest, GeometryResponse, LaserResult, LaserSpec,
+  SectionContourResult, SectionContourSpec, GeometrySignatureResult, GeometrySignatureSpec,
 } from "./types.js";
 
 interface Pending {
-  kind: "clash" | "distance" | "laser";
+  kind: "clash" | "distance" | "laser" | "sectionContours" | "signatures";
   resolve(value: unknown): void;
   reject(error: Error): void;
   onProgress?(progress: SweepProgress): void;
@@ -21,6 +22,8 @@ interface InlineRunner {
   ): Promise<SweepResult>;
   distance(spec: DistanceSpec): Promise<DistanceResult>;
   laser(spec: LaserSpec, cancelled?: () => boolean): Promise<LaserResult>;
+  sectionContours(spec: SectionContourSpec, cancelled?: () => boolean): Promise<SectionContourResult>;
+  signatures(spec: GeometrySignatureSpec, cancelled?: () => boolean): Promise<GeometrySignatureResult>;
 }
 
 export class GeometryService {
@@ -148,6 +151,73 @@ export class GeometryService {
     });
   }
 
+  async sectionContours(spec: SectionContourSpec, signal?: AbortSignal): Promise<SectionContourResult> {
+    if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
+    await this.start();
+    const id = ++this.sequence;
+    this.cancelled.delete(id);
+    if (this.inline) {
+      const abort = (): void => void this.cancelled.add(id);
+      signal?.addEventListener("abort", abort, { once: true });
+      try {
+        const result = await this.inline.sectionContours(spec, () => this.cancelled.has(id));
+        if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
+        return result;
+      } finally {
+        signal?.removeEventListener("abort", abort);
+        this.cancelled.delete(id);
+      }
+    }
+    return new Promise<SectionContourResult>((resolve, reject) => {
+      const abort = (): void => this.cancelRequest(id);
+      this.pending.set(id, {
+        kind: "sectionContours",
+        resolve,
+        reject,
+        cleanup: () => signal?.removeEventListener("abort", abort),
+      });
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) return abort();
+      this.worker?.postMessage({ type: "sectionContours", id, priority: 0, spec } satisfies GeometryRequest, [
+        spec.ids.buffer,
+        spec.offsets.buffer,
+      ] as Transferable[]);
+    });
+  }
+
+  async signatures(spec: GeometrySignatureSpec, signal?: AbortSignal): Promise<GeometrySignatureResult> {
+    if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
+    await this.start();
+    const id = ++this.sequence;
+    this.cancelled.delete(id);
+    if (this.inline) {
+      const abort = (): void => void this.cancelled.add(id);
+      signal?.addEventListener("abort", abort, { once: true });
+      try {
+        const result = await this.inline.signatures(spec, () => this.cancelled.has(id));
+        if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
+        return result;
+      } finally {
+        signal?.removeEventListener("abort", abort);
+        this.cancelled.delete(id);
+      }
+    }
+    return new Promise<GeometrySignatureResult>((resolve, reject) => {
+      const abort = (): void => this.cancelRequest(id);
+      this.pending.set(id, {
+        kind: "signatures",
+        resolve,
+        reject,
+        cleanup: () => signal?.removeEventListener("abort", abort),
+      });
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) return abort();
+      this.worker?.postMessage({ type: "signatures", id, priority: 1, spec } satisfies GeometryRequest, [
+        spec.ids.buffer,
+      ] as Transferable[]);
+    });
+  }
+
   cancelClash(): void {
     this.cancelKind("clash");
   }
@@ -160,12 +230,22 @@ export class GeometryService {
         import("../ifc/clash/sweep.js"),
         import("./distanceQuery.js"),
         import("./laserQuery.js"),
-      ]).then(([{ GeometryIndex }, { runSweep }, { runDistance }, { runLaser }]) => {
+        import("./sectionQuery.js"),
+        import("./signatureQuery.js"),
+      ]).then(([{ GeometryIndex }, { runSweep }, { runDistance }, { runLaser }, { runSectionContours }, { runGeometrySignatures }]) => {
         const index = new GeometryIndex();
         this.inline = {
           clash: (spec, onProgress, cancelled) => runSweep(index, spec, { onProgress, cancelled }),
           distance: (spec) => runDistance(index, spec),
           laser: (spec, cancelled) => runLaser(index, spec, { cancelled }),
+          sectionContours: (spec, cancelled) => runSectionContours(index, spec, {
+            cancelled,
+            yieldTurn: () => new Promise((resolve) => setTimeout(resolve, 0)),
+          }),
+          signatures: (spec, cancelled) => runGeometrySignatures(index, spec, {
+            cancelled,
+            yieldTurn: () => new Promise((resolve) => setTimeout(resolve, 0)),
+          }),
         };
         this.store.connect({
           chunk: (chunk) => index.addChunk(chunk),

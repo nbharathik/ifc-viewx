@@ -2,9 +2,8 @@
 // commands under it. Tabs are data; every button points at a command id, so
 // the ribbon holds no app state of its own.
 //
-// Collapsed, the strip takes no height and a tab click opens it as a flyout
-// that closes after one command (the PowerPoint behaviour, at a lighter
-// weight). The choice persists.
+// Collapsed, the strip takes no height. Selecting a tab expands it in place,
+// so the controls always stay attached to the header. The choice persists.
 import { buildMenu, closeLayer, h, icon, menuKeys, openLayer, type MenuItem } from "./kit.js";
 import type { CommandRegistry } from "./commands.js";
 
@@ -50,7 +49,6 @@ export class Ribbon {
   private readonly toggleBtn: HTMLButtonElement;
   private active: string;
   private collapsed = localStorage.getItem(COLLAPSE_KEY) === "1";
-  private flyout = false;
 
   constructor(
     tabHost: HTMLElement,
@@ -91,14 +89,14 @@ export class Ribbon {
     this.paintCollapsed();
   }
 
-  /** Show a tab; opens the flyout instead when the ribbon is collapsed. */
+  /** Show a tab. A collapsed ribbon expands in place when a tab is chosen. */
   select(id: string, viaTab = false): void {
     if (this.active !== id) {
       this.active = id;
       localStorage.setItem(TAB_KEY, id);
       this.render();
     }
-    if (this.collapsed && viaTab) this.openFlyout();
+    if (this.collapsed && viaTab) this.setCollapsed(false);
   }
 
   getTab(): string {
@@ -108,14 +106,7 @@ export class Ribbon {
   setCollapsed(collapsed: boolean): void {
     this.collapsed = collapsed;
     localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0");
-    if (collapsed) closeLayer();
-    this.flyout = false;
-    this.paintCollapsed();
-  }
-
-  /** Keep a collapsed ribbon open for the life of a dropdown, and no longer. */
-  private hold(on: boolean): void {
-    this.flyout = on;
+    closeLayer();
     this.paintCollapsed();
   }
 
@@ -136,27 +127,14 @@ export class Ribbon {
   }
 
   private onTabClick(id: string): void {
-    if (this.collapsed && this.active === id && this.flyout) return closeLayer();
     this.select(id, true);
   }
 
   private paintCollapsed(): void {
-    this.body.classList.toggle("collapsed", this.collapsed && !this.flyout);
-    this.body.classList.toggle("flyout", this.flyout);
+    this.body.classList.toggle("collapsed", this.collapsed);
     this.toggleBtn.classList.toggle("up", this.collapsed);
+    this.toggleBtn.setAttribute("aria-expanded", String(!this.collapsed));
     this.toggleBtn.title = this.collapsed ? "Pin the ribbon  Ctrl+F1" : "Collapse the ribbon  Ctrl+F1";
-  }
-
-  private openFlyout(): void {
-    // Drop any open layer first: openLayer would otherwise run the previous
-    // flyout's close handler *after* we set the new state and undo it.
-    closeLayer();
-    this.flyout = true;
-    this.paintCollapsed();
-    openLayer([this.body, ...this.tabButtons.values()], () => {
-      this.flyout = false;
-      this.paintCollapsed();
-    });
   }
 
   private render(): void {
@@ -207,11 +185,6 @@ export class Ribbon {
       const button = this.button(item.icon, item.label, size, true);
       button.addEventListener("click", () => {
         if (button.getAttribute("aria-expanded") === "true") return closeLayer();
-        // A dropdown claims the transient layer, which would dismiss the
-        // flyout it sits in; hold the ribbon open without touching the
-        // stored preference, which the user set deliberately.
-        const pinned = this.flyout;
-        if (pinned) this.hold(true);
         // The ribbon strip clips its overflow, so a drop parked inside the
         // anchor would be cut off after a few pixels. It lives on <body> and
         // is placed against the button instead.
@@ -226,7 +199,6 @@ export class Ribbon {
         openLayer([drop, button], () => {
           drop.remove();
           button.setAttribute("aria-expanded", "false");
-          if (pinned) this.hold(false);
         });
         menuKeys(drop);
       });
@@ -243,7 +215,6 @@ export class Ribbon {
     // handler explains. Greying them is the signal, not disabling them.
     if (command.tier === "local") button.classList.add("local");
     button.addEventListener("click", () => {
-      if (this.flyout) closeLayer();
       this.registry.run(item.id);
     });
     this.bound.push({ el: button, id: item.id });

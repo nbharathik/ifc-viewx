@@ -1,6 +1,41 @@
 import type { SweepProgress, SweepResult, SweepSpec } from "../ifc/clash/types.js";
 import type { TriangleChunk } from "../viewer-core/scene/triangleStore.js";
 
+export interface GeometryBounds {
+  min: [number, number, number];
+  max: [number, number, number];
+}
+
+export interface GeometryShapeFingerprint {
+  hash: string;
+  vertices: number;
+  triangles: number;
+}
+
+export interface GeometrySignature {
+  id: number;
+  shapeHash: string;
+  pieces: number;
+  vertices: number;
+  triangles: number;
+  bounds: GeometryBounds;
+  translation: [number, number, number];
+  rotation: [number, number, number, number];
+}
+
+export interface GeometrySignatureSpec {
+  ids: Float64Array;
+}
+
+export interface GeometrySignatureResult {
+  signatures: GeometrySignature[];
+  missing: number;
+  elapsedMs: number;
+  fidelity: "mesh";
+  engine: "browser-signature";
+  geometryRevision: number;
+}
+
 export interface DistanceSpec {
   a: number;
   b: number;
@@ -66,6 +101,43 @@ export interface LaserResult {
   geometryRevision: number;
 }
 
+export type SectionAxis = "x" | "y" | "z";
+
+export interface SectionPolyline {
+  elementId: number;
+  elementType: string;
+  closed: boolean;
+  points: Array<[number, number]>;
+  length: number;
+}
+
+export interface SectionContourSpec {
+  axis: SectionAxis;
+  offset: number;
+  ids: Float64Array;
+  modelOrigin: [number, number, number];
+  offsets: Float64Array;
+  tolerance?: number;
+  maxSegments?: number;
+}
+
+export interface SectionContourResult {
+  axis: SectionAxis;
+  offset: number;
+  polylines: SectionPolyline[];
+  bounds: { min: [number, number]; max: [number, number] } | null;
+  segmentCount: number;
+  closedCount: number;
+  openCount: number;
+  testedElements: number;
+  missing: number;
+  truncated: boolean;
+  elapsedMs: number;
+  fidelity: "mesh";
+  engine: "browser-section";
+  geometryRevision: number;
+}
+
 export interface GeometryDiagnostics {
   active: boolean;
   pending: number;
@@ -81,6 +153,8 @@ export type GeometryRequest =
   | { type: "clash"; id: number; priority: 2; spec: SweepSpec }
   | { type: "distance"; id: number; priority: 0; spec: DistanceSpec }
   | { type: "laser"; id: number; priority: 0; spec: LaserSpec }
+  | { type: "sectionContours"; id: number; priority: 0; spec: SectionContourSpec }
+  | { type: "signatures"; id: number; priority: 1; spec: GeometrySignatureSpec }
   | { type: "cancel"; id: number };
 
 export type GeometryResponse =
@@ -88,4 +162,6 @@ export type GeometryResponse =
   | { type: "clashResult"; id: number; result: SweepResult }
   | { type: "distanceResult"; id: number; result: DistanceResult }
   | { type: "laserResult"; id: number; result: LaserResult }
+  | { type: "sectionContourResult"; id: number; result: SectionContourResult }
+  | { type: "signatureResult"; id: number; result: GeometrySignatureResult }
   | { type: "fail"; id: number; message: string };

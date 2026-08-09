@@ -58,7 +58,12 @@ describe("installed extension sandbox", () => {
     expect(documentText).toContain("nonce-1");
     expect(documentText).not.toContain("allow-same-origin");
     expect(documentText).toContain("geometry.laser");
+    expect(documentText).toContain("geometry.sectionContours");
+    expect(documentText).toContain("geometry.signatures");
+    expect(documentText).toContain("view.pickGuide");
     expect(documentText).toContain("view.addMeasurement");
+    expect(documentText).toContain("issues.create");
+    expect(documentText).toContain("files.open");
   });
 
   it("cannot isolate through direct RPC without view.control", async () => {
@@ -72,7 +77,10 @@ describe("installed extension sandbox", () => {
     expect(() => runtime.dispatch("service.token", {}, new AbortController().signal)).toThrow(/Unknown extension method/);
     expect(() => runtime.dispatch("local.status", {}, new AbortController().signal)).toThrow(/local\.invoke/);
     expect(() => runtime.dispatch("model.mesh", { id: 1 }, new AbortController().signal)).toThrow(/Unknown extension method/);
+    await expect(runtime.dispatch("issues.create", { input: { title: "Clash" } }, new AbortController().signal)).rejects.toThrow(/review\.issue\.create/);
+    await expect(runtime.dispatch("files.open", { importer: "sample.rules" }, new AbortController().signal)).rejects.toThrow(/file\.open/);
     await expect(runtime.dispatch("geometry.laser", { origin: [0, 0, 0] }, new AbortController().signal)).rejects.toThrow(/geometry\.query/);
+    await expect(runtime.dispatch("geometry.sectionContours", { axis: "y", offset: 1 }, new AbortController().signal)).rejects.toThrow(/geometry\.query/);
     expect(state.isolate).not.toHaveBeenCalled();
     const frame = host.querySelector("iframe")!;
     expect(frame.getAttribute("sandbox")).toBe("allow-scripts");

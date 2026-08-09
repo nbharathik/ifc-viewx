@@ -15,9 +15,14 @@ export * from "./parse.js";
 // runs in a worker; a panel only has to hand it two sets of element ids.
 export {
   cancelClash,
+  clashClassPair,
+  clashFingerprint,
   clashReport,
   detectClashes,
+  groupClashes,
   idsOfTypes,
+  resolvedClashes,
+  reviewClashes,
   worstDepth,
   CLASH_LIMIT,
   DEFAULT_TOLERANCE_MM,
@@ -29,6 +34,14 @@ export type {
   ClashKind,
   ClashOptions,
   ClashPair,
+  ClashCurrentState,
+  ClashDecision,
+  ClashElementIdentity,
+  ClashGroupMode,
+  ClashIgnoreRule,
+  ClashReviewGroup,
+  ClashReviewRow,
+  ClashReviewState,
   SweepProgress,
   SweepResult,
 } from "../ifc/clash.js";
@@ -36,6 +49,16 @@ export { measureDistance } from "../geometry/distance.js";
 export type { DistanceOptions, DistanceResult } from "../geometry/distance.js";
 export { measureLaser } from "../geometry/laser.js";
 export type { LaserOptions, LaserResult, LaserAxis, LaserAxisResult, LaserHit } from "../geometry/laser.js";
+export { extractSectionContours } from "../geometry/section.js";
+export type {
+  SectionAxis, SectionContourOptions, SectionContourResult, SectionPolyline,
+} from "../geometry/section.js";
+export { geometrySignatures } from "../geometry/signatures.js";
+export type { GeometrySignature, GeometrySignatureOptions, GeometrySignatureResult } from "../geometry/signatures.js";
+export { compareSnapshots } from "../compare/modelCompare.js";
+export type {
+  CompareEntry, CompareKind, CompareResult, CompareSnapshot, GeometryDelta, PropertyChange,
+} from "../compare/modelCompare.js";
 
 // The ranked search the assistant uses, so a panel searches the same way.
 export { buildIndex, tokenize } from "../llm/retrieval.js";

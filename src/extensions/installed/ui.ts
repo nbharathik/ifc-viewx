@@ -18,6 +18,7 @@ const PERMISSIONS: Record<ExtensionPermission, PermissionPresentation> = {
   "view.read": { title: "View state", detail: "Read selection, visibility, and section planes", impact: "read" },
   "view.control": { title: "Control the view", detail: "Select, isolate, hide, frame, section, and color elements", impact: "control" },
   "view.overlay": { title: "Draw review marks", detail: "Add host-owned lines and markers with quotas", impact: "control" },
+  "review.issue.create": { title: "Create review issues", detail: "Add a BCF topic from the current view and chosen elements", impact: "sensitive" },
   "edit.propose": { title: "Propose model edits", detail: "Stage typed changes for your approval", impact: "sensitive" },
   "file.open": { title: "Open chosen files", detail: "Ask you to select declared file types", impact: "sensitive" },
   "file.export": { title: "Export files", detail: "Create a download through the viewer", impact: "control" },

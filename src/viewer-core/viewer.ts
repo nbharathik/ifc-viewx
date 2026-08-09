@@ -13,6 +13,19 @@ import { LoadingOverlay, ErrorCard } from './panels/overlays.js';
 import { CancelledError } from './engine/types.js';
 import { TriangleStore } from './scene/triangleStore.js';
 import { expressOf, modelOf, packId } from './ids.js';
+import {
+  DEFAULT_MEASUREMENT_FORMAT,
+  constrainMeasurementPoint,
+  formatArea,
+  formatCoordinate,
+  formatLength,
+  measurementSemantic,
+} from './measurements.js';
+import type {
+  MeasureConstraint,
+  MeasurementFormat,
+  MeasurementSemantic,
+} from './measurements.js';
 import type { CameraPose, SceneInfo, SnapHit, SnapKind } from './scene/scene.js';
 import type { PickResult, ViewPreset } from './scene/controls.js';
 import type {
@@ -30,6 +43,21 @@ import type {
 export * from './engine/types.js';
 export type { CameraPose, SceneInfo, SnapHit, SnapKind } from './scene/scene.js';
 export type { PickResult, ViewPreset } from './scene/controls.js';
+export {
+  DEFAULT_MEASUREMENT_FORMAT,
+  constrainMeasurementPoint,
+  formatArea,
+  formatCoordinate,
+  formatLength,
+  measurementSemantic,
+} from './measurements.js';
+export type {
+  MeasureConstraint,
+  MeasurementFormat,
+  MeasurementPrecision,
+  MeasurementSemantic,
+  MeasurementUnit,
+} from './measurements.js';
 
 export interface SectionState {
   axis: 'x' | 'y' | 'z';
@@ -126,33 +154,50 @@ export type SelectMode = 'replace' | 'add' | 'remove' | 'toggle';
  */
 export type SnapMode = 'auto' | 'vertex' | 'off';
 
-/** One measurement. Distances are in the viewer's units, i.e. metres. */
+/** One first-class distance measurement. Arithmetic stays in metres. */
 export interface Measurement {
+  kind: 'distance';
   /** Handle for removeMeasurement; 0 while the span still follows the cursor. */
   id: number;
+  label: string;
+  visible: boolean;
+  semantic: MeasurementSemantic;
+  a: [number, number, number];
+  b: [number, number, number] | null;
   distance: number;
   /** Split into the ground plane and the height, the way a builder reads it. */
   horizontal: number;
   vertical: number;
+  /** Rise over horizontal run. Null represents a vertical span. */
+  slopePercent: number | null;
+  /** Unsigned angle above the horizontal plane, in degrees. */
+  slopeAngle: number;
   /** False while the far end is still following the cursor. */
   complete: boolean;
   /** What each end caught; the far end is null until it is placed. */
   ends: [SnapKind, SnapKind | null];
 }
 
-export interface MeasurementState {
+export interface DistanceMeasurementState {
+  /** Absent in viewpoints written before measurements became first-class objects. */
+  kind?: 'distance';
+  id?: number;
+  label?: string;
+  visible?: boolean;
   a: [number, number, number];
   b: [number, number, number];
   ends: [SnapKind, SnapKind];
 }
 
 /** What the measure tool is collecting: two points, three, or a ring of them. */
-export type MeasureMode = 'distance' | 'angle' | 'area';
+export type MeasureMode = 'distance' | 'path' | 'angle' | 'area' | 'coordinate';
 
-/** A finished angle or area. Distances are metres, angles degrees. */
+/** A finished shape or coordinate. Distances are metres, angles degrees. */
 export interface ShapeMeasure {
   id: number;
-  kind: 'angle' | 'area';
+  kind: 'path' | 'angle' | 'area' | 'coordinate';
+  label: string;
+  visible: boolean;
   points: Array<[number, number, number]>;
   /** Angle at the middle point, degrees. Only for `angle`. */
   angle?: number;
@@ -160,6 +205,21 @@ export interface ShapeMeasure {
   area?: number;
   /** Total edge length, closing edge included for an area. */
   perimeter: number;
+}
+
+export interface ShapeMeasurementState {
+  kind: ShapeMeasure['kind'];
+  id?: number;
+  label?: string;
+  visible?: boolean;
+  points: Array<[number, number, number]>;
+}
+
+export type MeasurementState = DistanceMeasurementState | ShapeMeasurementState;
+export type MeasurementObject = Measurement | ShapeMeasure;
+export interface MeasurementUpdate {
+  label?: string;
+  visible?: boolean;
 }
 
 const sub = (a: [number, number, number], b: [number, number, number]): [number, number, number] => [
@@ -217,19 +277,6 @@ export function formatAngle(degrees: number): string {
   return `${degrees.toFixed(1)} deg`;
 }
 
-export function formatArea(squareMetres: number): string {
-  if (!Number.isFinite(squareMetres)) return '-';
-  if (squareMetres >= 1) return `${squareMetres.toFixed(squareMetres >= 100 ? 1 : 2)} m2`;
-  return `${Math.round(squareMetres * 10000)} cm2`;
-}
-
-/** Metres, dropping to millimetres below one, so short spans stay readable. */
-export function formatLength(metres: number): string {
-  if (!Number.isFinite(metres)) return '-';
-  if (metres >= 1) return `${metres.toFixed(metres >= 100 ? 1 : 2)} m`;
-  return `${Math.round(metres * 1000)} mm`;
-}
-
 /**
  * One named visibility rule. Keep rules union with each other, hide rules
  * subtract; both are removable, so a view can be built up and taken apart.
@@ -251,6 +298,16 @@ const VISIBILITY_HISTORY_LIMIT = 50;
 
 /** Shape id carried by the legs of the angle or ring still being placed. */
 const PENDING_SHAPE = -1;
+
+interface MeasureSpanRecord {
+  id: number;
+  a: [number, number, number];
+  b: [number, number, number];
+  ends: [SnapKind, SnapKind];
+  label?: string;
+  visible?: boolean;
+  shape?: number;
+}
 
 const sameIds = (a: number[], b: number[]): boolean =>
   a.length === b.length && a.every((id, i) => id === b[i]);
@@ -444,7 +501,19 @@ export interface Viewer {
   getPendingPoints(): Array<[number, number, number]>;
   /** Close the ring being drawn. False when there are not yet three points. */
   closeArea(): boolean;
+  /** Finish the open path being drawn. False before two points exist. */
+  finishPath(): boolean;
   removeShapeMeasure(id: number): void;
+  /** Every placed distance, path, angle, area and coordinate, oldest first. */
+  getMeasurementObjects(): MeasurementObject[];
+  /** Change first-class metadata without recreating witness geometry. */
+  updateMeasurement(id: number, patch: MeasurementUpdate): boolean;
+  /** One render for a bulk visibility change. */
+  setMeasurementsVisible(ids: Iterable<number>, visible: boolean): number;
+  /** Remove an object regardless of its geometry kind. */
+  removeMeasurementObject(id: number): void;
+  /** Frame an object's witness geometry while retaining the current view direction. */
+  focusMeasurement(id: number): boolean;
   /** Spans plus finished shapes, for anything that reports what is placed. */
   getMeasureCount(): number;
 
@@ -455,6 +524,12 @@ export interface Viewer {
   /** Which geometry features a measured point is pulled onto. */
   setSnapMode(mode: SnapMode): void;
   getSnapMode(): SnapMode;
+  /** Axis or picked-surface constraint applied after snapping and switchable mid-measure. */
+  setMeasureConstraint(constraint: MeasureConstraint): void;
+  getMeasureConstraint(): MeasureConstraint;
+  /** Display-only units and precision; geometry always remains metres. */
+  setMeasurementFormat(format: MeasurementFormat): void;
+  getMeasurementFormat(): MeasurementFormat;
   /** The span in hand, or the last placed one; null before the first point. */
   getMeasurement(): Measurement | null;
   /** Every placed span, oldest first. Spans stack until reset or removed. */
@@ -463,6 +538,8 @@ export interface Viewer {
   getMeasurementStates(): MeasurementState[];
   /** Replace placed distance spans from a saved view. */
   setMeasurementStates(states: MeasurementState[]): void;
+  /** Increments only when placed objects or their metadata change, not on hover. */
+  getMeasurementRevision(): number;
   /** Add a host-generated span, such as a geometry-query witness line. */
   addMeasurement(
     a: [number, number, number],
@@ -489,6 +566,8 @@ export interface Viewer {
   pickAt(clientX: number, clientY: number): PickResult | null;
   /** Last surface selected by a real viewport click, not a scripted selection. */
   getLastPick(): PickResult | null;
+  /** Precision hover feedback for extension-owned face, edge and vertex picks. */
+  setPickGuide(on: boolean): void;
   getCamera(): CameraPose;
   getViewport(): { width: number; height: number; aspect: number };
   /** Drawing-buffer scale; below 1 only transiently during slow interaction. */
@@ -510,10 +589,10 @@ const PROGRESSIVE_RENDER_INTERVAL = 150;
 const PROPS_CACHE_SIZE = 200;
 /** What the cursor tag calls each snap result. */
 const SNAP_LABEL: Record<SnapKind, string> = {
-  vertex: 'Corner',
-  midpoint: 'Midpoint',
+  vertex: 'Vertex',
+  midpoint: 'Edge midpoint',
   edge: 'Edge',
-  surface: 'Surface',
+  surface: 'Face',
 };
 
 class ViewerImpl implements Viewer {
@@ -541,6 +620,7 @@ class ViewerImpl implements Viewer {
   private readonly selection = new Set<number>();
   private primary: number | null = null;
   private lastPick: PickResult | null = null;
+  private pickGuide = false;
   /** Visibility layers: named rules plus elements hidden one at a time. */
   private rules: VisibilityRule[] = [];
   private readonly hiddenIds = new Set<number>();
@@ -557,27 +637,33 @@ class ViewerImpl implements Viewer {
    * shape's leg, so it is removed with the shape rather than on its own.
    * PENDING_SHAPE marks the legs of the shape still being placed.
    */
-  private spans: Array<{
-    id: number;
-    a: [number, number, number];
-    b: [number, number, number];
-    ends: [SnapKind, SnapKind];
-    shape?: number;
-  }> = [];
+  private spans: MeasureSpanRecord[] = [];
+  private visibleSpans: MeasureSpanRecord[] = [];
+  private spanVersion = 0;
+  private visibleSpanVersion = -1;
   private spanSeq = 0;
+  /** Public ids are shared by every measurement kind, so ledger actions are unambiguous. */
+  private measurementSeq = 0;
+  private measurementRevision = 0;
   /** First point of the span in hand, if one is being placed. */
   private measureA: [number, number, number] | null = null;
   private measureAKind: SnapKind | null = null;
+  private measureNormal: [number, number, number] | null = null;
   private measureMode: MeasureMode = 'distance';
   /** Points placed toward the angle or ring in hand. */
   private chain: Array<[number, number, number]> = [];
   private shapes: ShapeMeasure[] = [];
-  private shapeSeq = 0;
   private measureHover: SnapHit | null = null;
   /** True while the gesture that placed the first point is still running. */
   private measureOpening = false;
   private snapMode: SnapMode = 'auto';
+  private measureConstraint: MeasureConstraint = 'free';
+  private measurementFormat: MeasurementFormat = {
+    ...DEFAULT_MEASUREMENT_FORMAT,
+    precision: { ...DEFAULT_MEASUREMENT_FORMAT.precision },
+  };
   private hoverPending: [number, number] | null = null;
+  private hoverAt: [number, number] | null = null;
   private hoverFrame = 0;
   /** One distance label per drawn span, pooled like the scene's markers. */
   private readonly spanLabels: HTMLElement[] = [];
@@ -629,10 +715,36 @@ class ViewerImpl implements Viewer {
       },
       onToolMove: (clientX, clientY) => this.queueMeasureHover(clientX, clientY),
       onToolUp: (clientX, clientY, moved) => this.measureUp(clientX, clientY, moved),
-      onPick: (pick, additive) => {
-        this.lastPick = pick ? { expressID: pick.expressID, point: [...pick.point] } : null;
-        if (!pick) return additive ? undefined : this.clearSelection();
-        this.selectMany([pick.expressID], additive ? 'toggle' : 'replace');
+      onToolKey: (key) => {
+        if (!this.measuring) return false;
+        if (key === 'x' || key === 'y' || key === 'z') {
+          this.setMeasureConstraint(this.measureConstraint === key ? 'free' : key);
+          return true;
+        }
+        if (key === 'p' || key === 'l') {
+          const constraint: MeasureConstraint = key === 'p' ? 'perpendicular' : 'parallel';
+          this.setMeasureConstraint(this.measureConstraint === constraint ? 'free' : constraint);
+          return true;
+        }
+        if (key === '0') {
+          this.setMeasureConstraint('free');
+          return true;
+        }
+        if (key === 'enter' && this.measureMode === 'path') return this.finishPath();
+        return false;
+      },
+      onPick: (pick, additive, clientX, clientY) => {
+        const close = this.hoverAt
+          && Math.hypot(this.hoverAt[0] - clientX, this.hoverAt[1] - clientY) <= 3;
+        const guided = this.pickGuide ? (close ? this.measureHover : this.probe(clientX, clientY)) : null;
+        const selectedId = guided?.expressID ?? pick?.expressID;
+        this.lastPick = selectedId && (guided || pick) ? {
+          expressID: selectedId,
+          point: [...(guided?.point ?? pick?.point ?? [0, 0, 0])],
+          ...(guided ? { kind: guided.kind } : {}),
+        } : null;
+        if (!selectedId) return additive ? undefined : this.clearSelection();
+        this.selectMany([selectedId], additive ? 'toggle' : 'replace');
       },
       // Escape drops the span in hand first, and only then the tool itself.
       onEscape: () => {
@@ -682,7 +794,7 @@ class ViewerImpl implements Viewer {
           this.overHandle = over;
           this.container.classList.toggle('ifc-over-handle', over);
         }
-        if (this.measuring) this.queueMeasureHover(clientX, clientY);
+        if (this.measuring || this.pickGuide) this.queueMeasureHover(clientX, clientY);
       },
     });
     this.axisGizmo = new AxisGizmo(this.container, this.scene.camera, {
@@ -1827,10 +1939,57 @@ class ViewerImpl implements Viewer {
     return this.snapMode;
   }
 
+  setMeasureConstraint(constraint: MeasureConstraint): void {
+    if (constraint === this.measureConstraint) return;
+    this.measureConstraint = constraint;
+    // Re-apply the most recent raw cursor location immediately, so changing a
+    // lock mid-measure feels like a drafting constraint rather than a setting.
+    if (this.hoverAt && (this.measureA || this.chain.length)) {
+      const next = this.probe(this.hoverAt[0], this.hoverAt[1]);
+      this.measureHover = next ? this.constrainedHit(next) : null;
+    }
+    this.pushMeasure();
+  }
+
+  getMeasureConstraint(): MeasureConstraint {
+    return this.measureConstraint;
+  }
+
+  setMeasurementFormat(format: MeasurementFormat): void {
+    const next: MeasurementFormat = {
+      unit: format.unit,
+      precision: { ...format.precision },
+      zeroSuppression: format.zeroSuppression,
+    };
+    if (JSON.stringify(next) === JSON.stringify(this.measurementFormat)) return;
+    this.measurementFormat = next;
+    this.scene.render();
+    this.emitMeasure();
+  }
+
+  getMeasurementFormat(): MeasurementFormat {
+    return { ...this.measurementFormat, precision: { ...this.measurementFormat.precision } };
+  }
+
+  private spansChanged(): void {
+    this.spanVersion += 1;
+  }
+
+  private drawnMeasureSpans(): MeasureSpanRecord[] {
+    if (this.visibleSpanVersion !== this.spanVersion) {
+      this.visibleSpans = this.spans.filter((span) => span.visible !== false);
+      this.visibleSpanVersion = this.spanVersion;
+    }
+    return this.visibleSpans;
+  }
+
   resetMeasure(): void {
+    const changed = this.spans.length > 0 || this.shapes.length > 0;
     this.spans = [];
+    this.spansChanged();
     this.shapes = [];
     this.chain = [];
+    if (changed) this.measurementRevision += 1;
     this.cancelPending();
   }
 
@@ -1838,6 +1997,7 @@ class ViewerImpl implements Viewer {
   private cancelPending(): void {
     this.measureA = null;
     this.measureAKind = null;
+    this.measureNormal = null;
     this.measureHover = null;
     this.measureOpening = false;
     this.pushMeasure();
@@ -1849,14 +2009,33 @@ class ViewerImpl implements Viewer {
     ends: [SnapKind, SnapKind | null],
     id: number,
     complete: boolean,
+    label = 'Length',
+    visible = true,
   ): Measurement {
-    if (!end) return { id, distance: 0, horizontal: 0, vertical: 0, complete, ends };
+    const resolvedEnds: [SnapKind, SnapKind] = [ends[0], ends[1] ?? ends[0]];
+    if (!end) {
+      return {
+        kind: 'distance', id, label, visible, semantic: measurementSemantic(resolvedEnds),
+        a: [...a], b: null, distance: 0, horizontal: 0, vertical: 0,
+        slopePercent: 0, slopeAngle: 0, complete, ends,
+      };
+    }
     const [dx, dy, dz] = [end[0] - a[0], end[1] - a[1], end[2] - a[2]];
+    const horizontal = Math.hypot(dx, dz);
+    const vertical = Math.abs(dy);
     return {
+      kind: 'distance',
       id,
+      label,
+      visible,
+      semantic: measurementSemantic(resolvedEnds),
+      a: [...a],
+      b: [...end],
       distance: Math.hypot(dx, dy, dz),
-      horizontal: Math.hypot(dx, dz),
-      vertical: Math.abs(dy),
+      horizontal,
+      vertical,
+      slopePercent: horizontal > 1e-12 ? (vertical / horizontal) * 100 : null,
+      slopeAngle: (Math.atan2(vertical, horizontal) * 180) / Math.PI,
       complete,
       ends,
     };
@@ -1872,43 +2051,221 @@ class ViewerImpl implements Viewer {
         false,
       );
     }
-    const placed = this.spans.filter((span) => span.shape === undefined);
-    const last = placed[placed.length - 1];
-    return last ? this.spanMetrics(last.a, last.b, last.ends, last.id, true) : null;
+    for (let index = this.spans.length - 1; index >= 0; index--) {
+      const last = this.spans[index];
+      if (last.shape === undefined) {
+        return this.spanMetrics(last.a, last.b, last.ends, last.id, true, last.label, last.visible);
+      }
+    }
+    return null;
   }
 
   getMeasurements(): Measurement[] {
     return this.spans
       .filter((span) => span.shape === undefined)
-      .map((span) => this.spanMetrics(span.a, span.b, span.ends, span.id, true));
+      .map((span) => this.spanMetrics(span.a, span.b, span.ends, span.id, true, span.label, span.visible));
+  }
+
+  private measurementKindLabel(kind: MeasurementObject['kind']): string {
+    return kind === 'distance' ? 'Length'
+      : kind === 'path' ? 'Path'
+        : kind === 'angle' ? 'Angle'
+          : kind === 'area' ? 'Area'
+            : 'Coordinate';
+  }
+
+  private cleanMeasurementLabel(value: unknown, fallback: string, id: number): string {
+    const clean = typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').slice(0, 80) : '';
+    return clean || `${fallback} ${id}`;
+  }
+
+  private defaultMeasurementLabel(kind: MeasurementObject['kind']): string {
+    const base = this.measurementKindLabel(kind);
+    const count = this.getMeasurementObjects().filter((entry) => entry.kind === kind).length + 1;
+    return `${base} ${count}`;
+  }
+
+  getMeasurementObjects(): MeasurementObject[] {
+    const distances = this.getMeasurements();
+    const shapes = this.getShapeMeasures();
+    return [...distances, ...shapes].sort((a, b) => a.id - b.id);
+  }
+
+  updateMeasurement(id: number, patch: MeasurementUpdate): boolean {
+    const span = this.spans.find((entry) => entry.shape === undefined && entry.id === id);
+    const shape = this.shapes.find((entry) => entry.id === id);
+    const current = span ?? shape;
+    if (!current) return false;
+    let changed = false;
+    if (patch.label !== undefined) {
+      const fallback = this.measurementKindLabel(shape?.kind ?? 'distance');
+      const label = this.cleanMeasurementLabel(patch.label, fallback, id);
+      if (label !== current.label) {
+        current.label = label;
+        changed = true;
+      }
+    }
+    if (patch.visible !== undefined && patch.visible !== current.visible) {
+      current.visible = patch.visible;
+      if (shape) {
+        for (const leg of this.spans) if (leg.shape === shape.id) leg.visible = patch.visible;
+      }
+      this.spansChanged();
+      changed = true;
+    }
+    if (!changed) return false;
+    this.measurementRevision += 1;
+    this.pushMeasure();
+    return true;
+  }
+
+  setMeasurementsVisible(ids: Iterable<number>, visible: boolean): number {
+    const wanted = new Set(ids);
+    let changed = 0;
+    for (const span of this.spans) {
+      if (span.shape !== undefined || !wanted.has(span.id) || span.visible === visible) continue;
+      span.visible = visible;
+      changed += 1;
+    }
+    for (const shape of this.shapes) {
+      if (!wanted.has(shape.id) || shape.visible === visible) continue;
+      shape.visible = visible;
+      for (const leg of this.spans) if (leg.shape === shape.id) leg.visible = visible;
+      changed += 1;
+    }
+    if (changed) {
+      this.spansChanged();
+      this.measurementRevision += 1;
+      this.pushMeasure();
+    }
+    return changed;
+  }
+
+  removeMeasurementObject(id: number): void {
+    if (this.spans.some((span) => span.shape === undefined && span.id === id)) this.removeMeasurement(id);
+    else this.removeShapeMeasure(id);
+  }
+
+  focusMeasurement(id: number): boolean {
+    const item = this.getMeasurementObjects().find((entry) => entry.id === id);
+    if (!item) return false;
+    const points = item.kind === 'distance'
+      ? [item.a, ...(item.b ? [item.b] : [])]
+      : item.points;
+    if (points.length === 0) return false;
+    const center: [number, number, number] = [0, 0, 0];
+    for (const point of points) {
+      center[0] += point[0] / points.length;
+      center[1] += point[1] / points.length;
+      center[2] += point[2] / points.length;
+    }
+    let radius = 0;
+    for (const point of points) radius = Math.max(radius, length3(sub(point, center)));
+    this.fitToPoint(center, Math.max(0.25, radius * 1.15));
+    return true;
+  }
+
+  private buildShapeSpans(shape: ShapeMeasure): void {
+    if (shape.kind === 'coordinate') return;
+    const last = shape.kind === 'area' ? shape.points.length : shape.points.length - 1;
+    for (let index = 0; index < last; index++) {
+      this.spans.push({
+        id: ++this.spanSeq,
+        a: shape.points[index],
+        b: shape.points[(index + 1) % shape.points.length],
+        ends: ['surface', 'surface'],
+        visible: shape.visible,
+        shape: shape.id,
+      });
+    }
+    this.spansChanged();
+  }
+
+  setPickGuide(on: boolean): void {
+    if (on === this.pickGuide) return;
+    this.pickGuide = on;
+    this.container.classList.toggle('ifc-pick-guided', on);
+    if (!on && !this.measuring) {
+      this.measureHover = null;
+      this.hoverAt = null;
+    }
+    this.pushMeasure();
   }
 
   getMeasurementStates(): MeasurementState[] {
-    return this.spans
+    const distances: DistanceMeasurementState[] = this.spans
       .filter((span) => span.shape === undefined)
-      .map((span) => ({ a: [...span.a], b: [...span.b], ends: [...span.ends] }));
+      .map((span) => ({
+        kind: 'distance', id: span.id, label: span.label, visible: span.visible !== false,
+        a: [...span.a], b: [...span.b], ends: [...span.ends],
+      }));
+    const shapes: ShapeMeasurementState[] = this.shapes.map((shape) => ({
+      kind: shape.kind,
+      id: shape.id,
+      label: shape.label,
+      visible: shape.visible,
+      points: shape.points.map((point) => [...point]),
+    }));
+    return [...distances, ...shapes].sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
   }
 
   setMeasurementStates(states: MeasurementState[]): void {
     this.spans = [];
+    this.spansChanged();
     this.shapes = [];
     this.chain = [];
+    const used = new Set<number>();
+    const claimId = (preferred: number | undefined): number => {
+      if (Number.isInteger(preferred) && preferred! > 0 && !used.has(preferred!)) {
+        used.add(preferred!);
+        this.measurementSeq = Math.max(this.measurementSeq, preferred!);
+        return preferred!;
+      }
+      while (used.has(++this.measurementSeq));
+      used.add(this.measurementSeq);
+      return this.measurementSeq;
+    };
+    const point = (value: unknown): value is [number, number, number] =>
+      Array.isArray(value) && value.length === 3 && value.every(Number.isFinite);
     for (const state of states) {
-      if (!state || !Array.isArray(state.a) || !Array.isArray(state.b)) continue;
-      if (state.a.length !== 3 || state.b.length !== 3) continue;
-      if ([...state.a, ...state.b].some((value) => !Number.isFinite(value))) continue;
-      const ends: [SnapKind, SnapKind] = Array.isArray(state.ends)
-        && state.ends.length === 2
-        && state.ends.every((kind) => typeof kind === 'string' && kind in SNAP_LABEL)
-        ? [...state.ends]
-        : ['surface', 'surface'];
-      this.spans.push({
-        id: ++this.spanSeq,
-        a: [...state.a],
-        b: [...state.b],
-        ends,
-      });
+      if (!state || typeof state !== 'object') continue;
+      if ('a' in state && 'b' in state && point(state.a) && point(state.b)) {
+        const ends: [SnapKind, SnapKind] = Array.isArray(state.ends)
+          && state.ends.length === 2
+          && state.ends.every((kind) => typeof kind === 'string' && kind in SNAP_LABEL)
+          ? [...state.ends]
+          : ['surface', 'surface'];
+        const id = claimId(state.id);
+        this.spans.push({
+          id,
+          a: [...state.a],
+          b: [...state.b],
+          ends,
+          label: this.cleanMeasurementLabel(state.label, 'Length', id),
+          visible: state.visible !== false,
+        });
+        continue;
+      }
+      if (!('points' in state) || !Array.isArray(state.points) || !state.points.every(point)) continue;
+      if (!['path', 'angle', 'area', 'coordinate'].includes(state.kind)) continue;
+      const minimum = state.kind === 'coordinate' ? 1 : state.kind === 'path' ? 2 : 3;
+      if (state.points.length < minimum) continue;
+      const id = claimId(state.id);
+      const points = state.points.map((entry) => [...entry] as [number, number, number]);
+      const shape: ShapeMeasure = {
+        id,
+        kind: state.kind,
+        label: this.cleanMeasurementLabel(state.label, this.measurementKindLabel(state.kind), id),
+        visible: state.visible !== false,
+        points,
+        perimeter: state.kind === 'coordinate' ? 0 : ringPerimeter(points, state.kind === 'area'),
+        ...(state.kind === 'angle' ? { angle: angleAt(points[0], points[1], points[2]) } : {}),
+        ...(state.kind === 'area' ? { area: ringArea(points) } : {}),
+      };
+      this.shapes.push(shape);
+      this.buildShapeSpans(shape);
     }
+    this.measurementRevision += 1;
     this.cancelPending();
   }
 
@@ -1917,16 +2274,27 @@ class ViewerImpl implements Viewer {
     b: [number, number, number],
     ends: [SnapKind, SnapKind] = ['surface', 'surface'],
   ): Measurement {
-    const id = ++this.spanSeq;
-    this.spans.push({ id, a: [...a], b: [...b], ends });
+    const id = ++this.measurementSeq;
+    const label = this.defaultMeasurementLabel('distance');
+    this.spans.push({ id, a: [...a], b: [...b], ends, label, visible: true });
+    this.spansChanged();
+    this.measurementRevision += 1;
     this.pushMeasure();
-    return this.spanMetrics(a, b, ends, id, true);
+    return this.spanMetrics(a, b, ends, id, true, label, true);
   }
 
   removeMeasurement(id: number): void {
     const before = this.spans.length;
-    this.spans = this.spans.filter((span) => span.id !== id);
-    if (this.spans.length !== before) this.pushMeasure();
+    this.spans = this.spans.filter((span) => span.shape !== undefined || span.id !== id);
+    if (this.spans.length !== before) {
+      this.spansChanged();
+      this.measurementRevision += 1;
+      this.pushMeasure();
+    }
+  }
+
+  getMeasurementRevision(): number {
+    return this.measurementRevision;
   }
 
   onMeasureChange(listener: () => void): () => void {
@@ -1945,6 +2313,12 @@ class ViewerImpl implements Viewer {
    * measuring across a gap catches the corner on the far side of it and never
    * catches one hidden behind a wall.
    */
+  private constrainedHit(hit: SnapHit): SnapHit {
+    const origin = this.measureA ?? this.chain[this.chain.length - 1];
+    if (!origin || this.measureConstraint === 'free') return hit;
+    return { ...hit, point: constrainMeasurementPoint(origin, hit.point, this.measureConstraint, this.measureNormal) };
+  }
+
   private probe(clientX: number, clientY: number): SnapHit | null {
     const [x, y] = this.controls.toCanvas(clientX, clientY);
     return this.scene.probeAt(x, y, this.snapMode !== 'off', this.snapMode === 'vertex');
@@ -1967,6 +2341,8 @@ class ViewerImpl implements Viewer {
     if (!hit) return; // a press on nothing keeps what is already measured
     this.measureA = hit.point;
     this.measureAKind = hit.kind;
+    const [canvasX, canvasY] = this.controls.toCanvas(clientX, clientY);
+    this.measureNormal = this.scene.surfaceNormalAt(canvasX, canvasY, hit.point);
     this.measureHover = null;
     this.measureOpening = true;
     this.pushMeasure();
@@ -1982,8 +2358,9 @@ class ViewerImpl implements Viewer {
    * distance tool already uses, and no new drawing code exists for either.
    */
   private chainUp(clientX: number, clientY: number): void {
-    const hit = this.probe(clientX, clientY) ?? this.measureHover;
-    if (!hit) return;
+    const raw = this.probe(clientX, clientY) ?? this.measureHover;
+    if (!raw) return;
+    const hit = this.constrainedHit(raw);
     const point = hit.point;
     const last = this.chain[this.chain.length - 1];
     if (last && last[0] === point[0] && last[1] === point[1] && last[2] === point[2]) return;
@@ -1998,7 +2375,27 @@ class ViewerImpl implements Viewer {
       }
     }
 
+    if (!last) {
+      const [canvasX, canvasY] = this.controls.toCanvas(clientX, clientY);
+      this.measureNormal = this.scene.surfaceNormalAt(canvasX, canvasY, point);
+    }
     this.chain.push(point);
+    if (this.measureMode === 'coordinate') {
+      const id = ++this.measurementSeq;
+      this.shapes.push({
+        id,
+        kind: 'coordinate',
+        label: this.defaultMeasurementLabel('coordinate'),
+        visible: true,
+        points: [[...point]],
+        perimeter: 0,
+      });
+      this.chain = [];
+      this.measureNormal = null;
+      this.measurementRevision += 1;
+      this.pushMeasure();
+      return;
+    }
     if (last) {
       this.spans.push({
         id: ++this.spanSeq,
@@ -2007,20 +2404,25 @@ class ViewerImpl implements Viewer {
         ends: ['surface', hit.kind],
         shape: PENDING_SHAPE,
       });
+      this.spansChanged();
     }
     this.measureHover = hit;
     if (this.measureMode === 'angle' && this.chain.length === 3) {
       const [a, b, c] = this.chain;
-      const id = ++this.shapeSeq;
+      const id = ++this.measurementSeq;
       this.shapes.push({
         id,
         kind: 'angle',
+        label: this.defaultMeasurementLabel('angle'),
+        visible: true,
         points: [a, b, c],
         angle: angleAt(a, b, c),
         perimeter: ringPerimeter([a, b, c], false),
       });
       this.adoptPending(id);
       this.chain = [];
+      this.measureNormal = null;
+      this.measurementRevision += 1;
     }
     this.pushMeasure();
   }
@@ -2035,7 +2437,10 @@ class ViewerImpl implements Viewer {
   /** Throw away the half-drawn shape: its points and the legs between them. */
   private dropPending(): void {
     this.chain = [];
+    this.measureNormal = null;
+    const before = this.spans.length;
     this.spans = this.spans.filter((span) => span.shape !== PENDING_SHAPE);
+    if (this.spans.length !== before) this.spansChanged();
   }
 
   /** A click within this of the first point counts as closing the ring. */
@@ -2052,7 +2457,7 @@ class ViewerImpl implements Viewer {
   closeArea(): boolean {
     if (this.measureMode !== 'area' || this.chain.length < 3) return false;
     const points = this.chain;
-    const id = ++this.shapeSeq;
+    const id = ++this.measurementSeq;
     this.spans.push({
       id: ++this.spanSeq,
       a: points[points.length - 1],
@@ -2060,15 +2465,40 @@ class ViewerImpl implements Viewer {
       ends: ['surface', 'surface'],
       shape: PENDING_SHAPE,
     });
+    this.spansChanged();
     this.shapes.push({
       id,
       kind: 'area',
+      label: this.defaultMeasurementLabel('area'),
+      visible: true,
       points: [...points],
       area: ringArea(points),
       perimeter: ringPerimeter(points, true),
     });
     this.adoptPending(id);
     this.chain = [];
+    this.measureNormal = null;
+    this.measurementRevision += 1;
+    this.pushMeasure();
+    return true;
+  }
+
+  finishPath(): boolean {
+    if (this.measureMode !== 'path' || this.chain.length < 2) return false;
+    const points = this.chain.map((point) => [...point] as [number, number, number]);
+    const id = ++this.measurementSeq;
+    this.shapes.push({
+      id,
+      kind: 'path',
+      label: this.defaultMeasurementLabel('path'),
+      visible: true,
+      points,
+      perimeter: ringPerimeter(points, false),
+    });
+    this.adoptPending(id);
+    this.chain = [];
+    this.measureNormal = null;
+    this.measurementRevision += 1;
     this.pushMeasure();
     return true;
   }
@@ -2080,6 +2510,7 @@ class ViewerImpl implements Viewer {
     this.dropPending();
     this.measureA = null;
     this.measureAKind = null;
+    this.measureNormal = null;
     this.pushMeasure();
   }
 
@@ -2101,6 +2532,8 @@ class ViewerImpl implements Viewer {
     if (this.shapes.length === before) return;
     // The legs were only ever the shape drawing itself; they go with it.
     this.spans = this.spans.filter((span) => span.shape !== id);
+    this.spansChanged();
+    this.measurementRevision += 1;
     this.pushMeasure();
   }
 
@@ -2116,19 +2549,26 @@ class ViewerImpl implements Viewer {
     if (this.measureMode !== 'distance') return this.chainUp(clientX, clientY);
     if (!this.measureA) return;
     if (this.measureOpening && !moved) return;
-    const hit = this.probe(clientX, clientY) ?? this.measureHover;
-    if (!hit) return;
+    const raw = this.probe(clientX, clientY) ?? this.measureHover;
+    if (!raw) return;
+    const hit = this.constrainedHit(raw);
     const a = this.measureA;
     // A second click on the very same point is not a span; keep waiting.
     if (hit.point[0] === a[0] && hit.point[1] === a[1] && hit.point[2] === a[2]) return;
+    const id = ++this.measurementSeq;
     this.spans.push({
-      id: ++this.spanSeq,
+      id,
       a,
       b: hit.point,
       ends: [this.measureAKind ?? 'surface', hit.kind],
+      label: this.defaultMeasurementLabel('distance'),
+      visible: true,
     });
+    this.spansChanged();
+    this.measurementRevision += 1;
     this.measureA = null;
     this.measureAKind = null;
+    this.measureNormal = null;
     // Keep the hover on the placed end: the tool is already armed for the
     // next span, and the dot says so.
     this.measureHover = hit;
@@ -2147,8 +2587,10 @@ class ViewerImpl implements Viewer {
       this.hoverFrame = 0;
       const at = this.hoverPending;
       this.hoverPending = null;
-      if (!at || !this.measuring) return;
-      const next = this.probe(at[0], at[1]);
+      if (!at || (!this.measuring && !this.pickGuide)) return;
+      const probed = this.probe(at[0], at[1]);
+      const next = probed ? this.constrainedHit(probed) : null;
+      this.hoverAt = at;
       const current = this.measureHover;
       if (
         next?.kind === current?.kind &&
@@ -2171,9 +2613,9 @@ class ViewerImpl implements Viewer {
   private pushMeasure(): void {
     const from = this.measureA ?? (this.measuring ? this.chain[this.chain.length - 1] ?? null : null);
     this.scene.setMeasure(
-      this.spans,
+      this.drawnMeasureSpans(),
       from ? { a: from, end: this.measureHover?.point ?? null } : null,
-      this.measuring ? this.measureHover?.point ?? null : null,
+      this.measuring || this.pickGuide ? this.measureHover?.point ?? null : null,
     );
     this.scene.render();
     this.emitMeasure();
@@ -2192,11 +2634,13 @@ class ViewerImpl implements Viewer {
 
     const entries: Array<{ text: string; at: [number, number, number] }> = [];
     for (const span of this.spans) {
-      entries.push({ text: formatLength(length(span.a, span.b)), at: mid(span.a, span.b) });
+      if (span.visible === false) continue;
+      entries.push({ text: formatLength(length(span.a, span.b), this.measurementFormat), at: mid(span.a, span.b) });
     }
     // The answer goes in the middle of the shape it answers for, so an angle
     // and a ring read off the model without a trip to the panel.
     for (const shape of this.shapes) {
+      if (!shape.visible) continue;
       const at: [number, number, number] = [0, 0, 0];
       for (const point of shape.points) {
         at[0] += point[0] / shape.points.length;
@@ -2204,14 +2648,17 @@ class ViewerImpl implements Viewer {
         at[2] += point[2] / shape.points.length;
       }
       entries.push({
-        text: shape.kind === 'angle' ? formatAngle(shape.angle ?? 0) : formatArea(shape.area ?? 0),
+        text: shape.kind === 'angle' ? formatAngle(shape.angle ?? 0)
+          : shape.kind === 'area' ? formatArea(shape.area ?? 0, this.measurementFormat)
+            : shape.kind === 'path' ? formatLength(shape.perimeter, this.measurementFormat)
+              : formatCoordinate(shape.points[0], this.measurementFormat),
         at: shape.kind === 'angle' ? shape.points[1] : at,
       });
     }
     const end = this.measureHover?.point ?? null;
     const from = this.measureA ?? (this.measuring ? this.chain[this.chain.length - 1] ?? null : null);
     if (from && end && length(from, end) > 0) {
-      entries.push({ text: formatLength(length(from, end)), at: mid(from, end) });
+      entries.push({ text: formatLength(length(from, end), this.measurementFormat), at: mid(from, end) });
     }
     while (this.spanLabels.length < entries.length) {
       const node = this.container.ownerDocument.createElement('div');
@@ -2221,15 +2668,19 @@ class ViewerImpl implements Viewer {
     }
     this.spanLabels.forEach((node, index) => this.placeLabel(node, entries[index] ?? null));
 
-    // With snapping off every point is a surface point, so naming it is noise.
-    const hover = this.measuring && this.snapMode !== 'off' ? this.measureHover : null;
+    const hover = this.measuring || this.pickGuide ? this.measureHover : null;
     if (hover && !this.snapTag) {
       this.snapTag = this.container.ownerDocument.createElement('div');
       this.snapTag.className = 'ifc-snap-tag';
       this.container.appendChild(this.snapTag);
     }
     if (this.snapTag) {
-      this.placeLabel(this.snapTag, hover ? { text: SNAP_LABEL[hover.kind], at: hover.point } : null);
+      const lockName = this.measureConstraint === 'perpendicular' ? 'PERP'
+        : this.measureConstraint === 'parallel' ? 'PAR'
+          : this.measureConstraint.toUpperCase();
+      const lock = this.measureConstraint === 'free' ? '' : ` · ${lockName} lock`;
+      this.snapTag.dataset.constraint = this.measureConstraint;
+      this.placeLabel(this.snapTag, hover ? { text: `${SNAP_LABEL[hover.kind]}${lock}`, at: hover.point } : null);
     }
   }
 
@@ -2239,13 +2690,18 @@ class ViewerImpl implements Viewer {
     entry: { text: string; at: [number, number, number] } | null,
   ): void {
     if (!entry) {
-      node.style.display = 'none';
+      if (node.style.display !== 'none') node.style.display = 'none';
       return;
     }
     const screen = this.scene.projectPoint(entry.at);
-    node.style.display = screen.behind ? 'none' : 'block';
-    node.style.left = `${screen.x}px`;
-    node.style.top = `${screen.y}px`;
+    const display = screen.behind ? 'none' : 'block';
+    if (node.style.display !== display) node.style.display = display;
+    if (!screen.behind) {
+      const left = `${screen.x}px`;
+      const top = `${screen.y}px`;
+      if (node.style.left !== left) node.style.left = left;
+      if (node.style.top !== top) node.style.top = top;
+    }
     if (node.textContent !== entry.text) node.textContent = entry.text;
   }
 
@@ -2306,7 +2762,11 @@ class ViewerImpl implements Viewer {
   }
 
   getLastPick(): PickResult | null {
-    return this.lastPick ? { expressID: this.lastPick.expressID, point: [...this.lastPick.point] } : null;
+    return this.lastPick ? {
+      expressID: this.lastPick.expressID,
+      point: [...this.lastPick.point],
+      ...(this.lastPick.kind ? { kind: this.lastPick.kind } : {}),
+    } : null;
   }
 
   getCamera(): CameraPose {

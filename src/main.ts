@@ -8,6 +8,7 @@ import { listCachedModels, loadCachedSource, storeSourceBytes, type CachedModel 
 import type { LoadProgress } from "./viewer-core/engine/types.js";
 import { PythonEngine, type ProposedEdit } from "./python/pythonEngine.js";
 import { IfcEngine, type EditOp, type ValidationReport } from "./ifc/ifcEngine.js";
+import { clashReport } from "./ifc/clash.js";
 import { isStep, sniffSchema, worthConverting } from "./ifc/format.js";
 import { findProvider, isConfigured, isVerified, loadSettings, type ChatMessage } from "./llm/llmClient.js";
 import { systemPrompt } from "./llm/prompts.js";
@@ -38,6 +39,7 @@ import { ageLabel, clearChats, readChats, saveChat, type Conversation } from "./
 import { sampleModel, SAMPLE_NAME } from "./ui/sample.js";
 import { download } from "./sdk/data.js";
 import type { PluginPython } from "./sdk/types.js";
+import type { ExtensionIssueInput, ExtensionIssueResult } from "./sdk/v2/types.js";
 import { PluginHost } from "./plugins/runtime/host.js";
 import { PluginBrowser } from "./plugins/runtime/browser.js";
 import { CATALOG, setInstalledExtensions } from "./plugins/registry.js";
@@ -61,10 +63,22 @@ const bootFailed = (message: string): void => {
   document.getElementById("splash")?.remove();
   const card = document.querySelector("#dropzone .dz-card");
   if (!card) return;
+  document.getElementById("btn-open-first")?.classList.add("hidden");
+  card.querySelector(".dz-hint")?.classList.add("hidden");
   const note = document.createElement("p");
   note.className = "dz-fatal";
+  note.setAttribute("role", "alert");
   note.textContent = `IFCViewX could not start: ${message || "unknown error"}`;
   card.appendChild(note);
+  const actions = document.createElement("div");
+  actions.className = "dz-fatal-actions";
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "btn primary";
+  retry.textContent = /webgl|3d graphics|gpu context/i.test(message) ? "Retry 3D viewer" : "Retry";
+  retry.addEventListener("click", () => window.location.reload());
+  actions.appendChild(retry);
+  card.appendChild(actions);
 };
 window.addEventListener("error", (e) => bootFailed(e.message));
 window.addEventListener("unhandledrejection", (e) =>
@@ -357,12 +371,32 @@ async function bcfPanel(): Promise<BcfPanel> {
 }
 
 /** An issue is always raised on a view, so the elements are isolated first. */
-async function raiseIssue(title: string, ids: number[]): Promise<void> {
-  if (!activeBytes) return toast("Open a model first", "info");
-  if (ids.length) filters.add({ label: title, mode: "keep", ids });
+async function raiseIssue(
+  title: string,
+  ids: number[],
+  input: Omit<ExtensionIssueInput, "title" | "elementIds"> = {},
+): Promise<ExtensionIssueResult> {
+  if (!activeBytes) {
+    toast("Open a model first", "info");
+    throw new Error("Open a model before creating an issue");
+  }
+  if (ids.length) {
+    filters.add({ label: title, mode: "keep", ids });
+    viewer.selectMany(ids, "replace");
+    const box = viewer.boxAround(ids, 0.35);
+    if (box) viewer.setSectionBox(box);
+  }
+  if (input.point) viewer.fitToPoint(input.point, 1.2);
   const panel = await bcfPanel();
+  const metadata = Object.entries(input.metadata ?? {}).map(([key, value]) => `${key}: ${String(value)}`);
+  const description = [
+    input.description ?? (ids.length ? `${ids.length} elements do not meet this specification.` : ""),
+    metadata.length ? metadata.join("\n") : "",
+  ].filter(Boolean).join("\n\n");
+  const issueId = panel.capture(title, description, { elementIds: ids, priority: input.priority });
+  if (!issueId) throw new Error("The issue could not be created");
   shell.selectTab("bcf");
-  panel.capture(title, ids.length ? `${ids.length} elements do not meet this specification.` : "");
+  return { id: issueId, title: title || "New issue", status: "Open", snapshot: "pending" };
 }
 
 /** A panel that fails to arrive is not mounted, so opening the tab retries. */
@@ -1224,7 +1258,6 @@ const semanticActions: SemanticActions = {
     return idsReport(viewer);
   },
   clash: async (a, b, tolerance, clearance, signal) => {
-    const { clashReport } = await import("./ifc/clash.js");
     return clashReport(viewer, a, b, tolerance, clearance, signal);
   },
 };
@@ -1905,9 +1938,9 @@ const RIBBON: RibbonTab[] = [
       ] },
     ],
   },
-  // Home is the tab that is open by default, so it carries only what is used
-  // constantly. Cameras live on View, panels on Model, and both are one click
-  // away there; repeating them here made the strip scroll on a laptop.
+  // Each command has one ribbon home. Home follows the everyday loop from
+  // selection to visibility, measurement and editing. The other tabs hold
+  // role-specific controls without repeating that loop.
   {
     id: "home",
     label: "Home",
@@ -1917,22 +1950,22 @@ const RIBBON: RibbonTab[] = [
         { kind: "cmd", id: "ai.new", size: "sm" },
       ] },
       { label: "Selection", items: [
-        { kind: "cmd", id: "vis.isolate" },
-        { kind: "cmd", id: "vis.hide" },
-        { kind: "cmd", id: "cam.fitsel", size: "sm" },
+        { kind: "cmd", id: "cam.fitsel" },
         { kind: "cmd", id: "sel.clear", size: "sm" },
       ] },
-      { label: "Filter", items: [
-        { kind: "cmd", id: "vis.filters" },
-        { kind: "cmd", id: "vis.clear", size: "sm" },
+      { label: "Visibility", items: [
+        { kind: "cmd", id: "vis.isolate" },
+        { kind: "cmd", id: "vis.hide" },
+        { kind: "cmd", id: "vis.all" },
         { kind: "cmd", id: "vis.undo", size: "sm" },
         { kind: "cmd", id: "vis.redo", size: "sm" },
       ] },
-      { label: "Tools", items: [
+      { label: "Find", items: [
+        { kind: "cmd", id: "vis.filters" },
+        { kind: "cmd", id: "vis.clear", size: "sm" },
+      ] },
+      { label: "Measure", items: [
         { kind: "cmd", id: "tool.measure" },
-        { kind: "cmd", id: "tool.section" },
-        { kind: "cmd", id: "tool.box", size: "sm" },
-        { kind: "cmd", id: "tool.plan", size: "sm" },
       ] },
       { label: "Edit", items: [
         { kind: "cmd", id: "edit.undo", size: "sm" },
@@ -1941,6 +1974,7 @@ const RIBBON: RibbonTab[] = [
         { kind: "cmd", id: "edit.property", size: "sm" },
         { kind: "cmd", id: "edit.apply", size: "sm" },
         { kind: "cmd", id: "edit.discard", size: "sm" },
+        { kind: "cmd", id: "edit.delete", size: "sm" },
       ] },
     ],
   },
@@ -1955,29 +1989,25 @@ const RIBBON: RibbonTab[] = [
         { kind: "cmd", id: "cam.right", size: "sm" },
         { kind: "cmd", id: "cam.iso", size: "sm" },
       ] },
-      { label: "Show", items: [
-        { kind: "cmd", id: "vis.all" },
+      { label: "Display", items: [
         { kind: "cmd", id: "vis.ghost", size: "sm" },
         { kind: "cmd", id: "vis.spaces", size: "sm" },
         { kind: "cmd", id: "vis.openings", size: "sm" },
-        { kind: "cmd", id: "vis.clear", size: "sm" },
-        { kind: "cmd", id: "vis.undo", size: "sm" },
-        { kind: "cmd", id: "vis.redo", size: "sm" },
       ] },
       { label: "Section", items: [
         { kind: "cmd", id: "tool.section" },
         { kind: "cmd", id: "tool.box" },
         { kind: "cmd", id: "tool.plan", size: "sm" },
       ] },
-      { label: "Display", items: [
+      { label: "Render", items: [
         { kind: "control", build: buildScaleControl },
         { kind: "cmd", id: "tool.hud", size: "sm" },
         { kind: "cmd", id: "app.theme", size: "sm" },
       ] },
       { label: "Workspace", items: [
-        { kind: "cmd", id: "panel.summary", size: "sm" },
+        { kind: "cmd", id: "panel.tree", size: "sm" },
+        { kind: "cmd", id: "panel.insp", size: "sm" },
         { kind: "cmd", id: "panel.log", size: "sm" },
-        { kind: "cmd", id: "app.ribbon", size: "sm" },
       ] },
     ],
   },
@@ -1986,17 +2016,13 @@ const RIBBON: RibbonTab[] = [
     label: "Model",
     groups: [
       { label: "Inspect", items: [
-        { kind: "cmd", id: "panel.types" },
-        { kind: "cmd", id: "panel.summary" },
-        { kind: "cmd", id: "panel.props" },
+        { kind: "cmd", id: "panel.structure" },
+        { kind: "cmd", id: "panel.types", size: "sm" },
+        { kind: "cmd", id: "panel.summary", size: "sm" },
+        { kind: "cmd", id: "panel.props", size: "sm" },
       ] },
       { label: "Convert", items: [
         { kind: "cmd", id: "file.convert" },
-      ] },
-      { label: "Data", items: [
-        { kind: "cmd", id: "file.export" },
-        { kind: "cmd", id: "panel.structure", size: "sm" },
-        { kind: "cmd", id: "panel.summary", size: "sm" },
       ] },
       // The Python console is a plugin like any other, so it is opened from
       // the catalog rather than from a tile of its own up here.
@@ -2009,11 +2035,6 @@ const RIBBON: RibbonTab[] = [
     id: "review",
     label: "Review",
     groups: [
-      { label: "Filter", items: [
-        { kind: "cmd", id: "vis.filters" },
-        { kind: "cmd", id: "vis.clear", size: "sm" },
-        { kind: "cmd", id: "panel.types", size: "sm" },
-      ] },
       { label: "Quality", items: [
         { kind: "cmd", id: "file.check" },
         { kind: "cmd", id: "file.schedule" },
@@ -2022,13 +2043,9 @@ const RIBBON: RibbonTab[] = [
       { label: "Issues", items: [
         { kind: "cmd", id: "bcf.new" },
         { kind: "cmd", id: "panel.bcf", size: "sm" },
-        { kind: "cmd", id: "file.viewpoint", size: "sm" },
       ] },
       { label: "Report", items: [
         { kind: "cmd", id: "file.report" },
-        { kind: "cmd", id: "panel.summary", size: "sm" },
-        { kind: "cmd", id: "file.screenshot", size: "sm" },
-        { kind: "cmd", id: "panel.log", size: "sm" },
       ] },
     ],
   },
@@ -2120,12 +2137,14 @@ const plugins = new PluginHost(
       section: "Extensions",
       run,
     }),
-    // Taken from the viewer, not from activeBytes: onModelLoaded fires from
-    // inside viewer.load(), before the load path here records the new bytes.
-    modelKey: () => {
-      const stats = viewer.getStats();
-      return stats ? `${stats.totalEntities}:${stats.triangleCount}` : "";
+    createIssue: (input) => raiseIssue(input.title, input.elementIds ?? [], input),
+    setActiveResult: (id) => {
+      activeAssistantResult = id;
+      focusedAssistantRow = undefined;
     },
+    // Match the assistant result revision exactly so extension-created rows
+    // can be paged and grouped by follow-up tools without a false stale error.
+    modelKey: () => viewer.isReady() ? modelRevision(viewer) : "",
     modelName: () => fileName,
     python: pythonFacet,
     changed: () => {
@@ -2134,6 +2153,7 @@ const plugins = new PluginHost(
     },
   },
   (id) => pluginBrowser.open(id),
+  assistantCapabilities.results,
 );
 
 const pluginBrowser = new PluginBrowser(plugins, service, {

@@ -22,7 +22,7 @@ function kindOf(capabilityId: string, row: unknown): EvidenceKind {
   return idsOf(row).length ? "element" : "result";
 }
 
-function labelOf(kind: EvidenceKind, row: unknown, index: number): string {
+function labelOf(kind: EvidenceKind, row: unknown, index: number, capabilityId: string): string {
   if (!row || typeof row !== "object") return `Result row ${index + 1}`;
   const value = row as Record<string, unknown>;
   if (kind === "clash") {
@@ -35,6 +35,10 @@ function labelOf(kind: EvidenceKind, row: unknown, index: number): string {
     return `${value.axis.toUpperCase()} ${side} axis to #${String(value.id ?? "?")}`;
   }
   const id = idsOf(row)[0];
+  if (capabilityId === "sectionContours" && id) {
+    const sectionName = typeof value.name === "string" && value.name ? value.name : typeof value.type === "string" ? value.type : "Element";
+    return `Section ${sectionName} #${id}`;
+  }
   if (typeof value.key === "string") return `${value.key} (${Number(value.count) || 0})`;
   const name = typeof value.name === "string" && value.name ? value.name : typeof value.type === "string" ? value.type : "Element";
   return id ? `${name} #${id}` : `Result row ${index + 1}`;
@@ -57,7 +61,7 @@ export function evidenceForRows(
     return {
       id: nextId(),
       kind,
-      label: labelOf(kind, row, offset + index),
+      label: labelOf(kind, row, offset + index, capabilityId),
       capabilityId,
       ...(handle ? { resultId: handle.id, row: offset + index } : {}),
       ...(idsOf(row).length ? { elementIds: idsOf(row) } : {}),

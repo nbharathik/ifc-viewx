@@ -7,16 +7,46 @@ Yours belongs here too: see [writing a plugin](index.md).
 
 These run in the tab. Nothing to install, nothing uploaded.
 
+### Clash Detection
+
+*Turn raw clashes into an auditable coordination docket*
+
+Saves repeatable A and B coordination checks, then classifies their mesh intersections and clearance failures against the previous run. Every result receives a stable GlobalId-based reference, can be grouped by review state, level, class pair, primary element or proximity, and carries local ignore and assignment decisions. A reviewed pair becomes a BCF topic with its focused section box, selected elements and snapshot. Geometry stays in the existing browser worker, so the viewport remains responsive and no model geometry leaves the tab.
+
+- Saved A and B class and federated-model definitions
+- Stable clash references with new, unchanged, resolved, ignored and assigned states
+- Grouping by review state, level, class pair, primary element or proximity cluster
+- Personal pair decisions and portable class-pair ignore rule packs
+- Direct BCF topics with pair selection, section box, contact point and snapshot
+- Full coordination CSV with GlobalIds, levels, decisions and clash position
+
+<small>Category: Coordination</small>
+
+### Element Explorer
+
+*A spreadsheet over every element and property in the model*
+
+Indexes every placed element with its class, name, storey and GlobalId, then lets you add any property set value as a column. Search across the whole table, sort on any column, and push what is left of the filter straight into the viewport.
+
+- Add any Pset property as a column, ranked by how common it is
+- Search and per-class filtering across the whole model
+- Isolate or hide everything the filter matched
+- CSV export of the filtered rows, not just the visible page
+
+<small>Category: Data</small>
+
 ### Model Compare
 
-*Diff the open model against an earlier IFC*
+*See what moved, reshaped, changed level or changed data*
 
-Parses a second IFC in a background worker without drawing it, then matches both models by GlobalId to report what was added, removed and changed. Changed elements list the exact attributes and property values that moved, and anything present in the open model can be isolated in place.
+Matches revisions by GlobalId and builds compact mesh signatures in background workers to distinguish placement, rotation, bounds and shape changes from ordinary property edits. The baseline mesh is never added to the renderer and is released after its signatures are built, keeping the interactive model responsive. Results can be filtered, isolated, colored and handed to the shared result store for assistant follow-up.
 
-- Added, removed, changed and unchanged, matched on GlobalId
-- Per element list of the attributes and properties that changed
-- Isolate added or changed elements in the viewport
-- CSV export of the change report
+- Added, removed and unchanged records matched by GlobalId
+- Placement translation and rotation deltas with world-bounds size changes
+- Compact sampled mesh signatures for geometry-change classification
+- Separate shape, movement, containment and property filters, including mixed changes
+- Fast element coloring, isolation, focused details and complete CSV export
+- Typed shared results with mesh fidelity and completeness metadata
 
 <small>Category: Quality</small>
 
@@ -32,6 +62,20 @@ Ranked search over every element's class, name and storey, and over its property
 - Property values are included once the index has been built, on request
 
 <small>Category: Data</small>
+
+### Model Health
+
+*Catch model identity and geometry problems before review*
+
+Runs a fast structural and bounds scan immediately, then reuses the shared property index for GlobalId and property coverage checks. Every finding is actionable in the viewport and the full audit is published to the activity report.
+
+- Duplicate and missing GlobalId checks
+- Elements without storey containment
+- Missing, invalid and degenerate geometry bounds
+- Property-set coverage across placed elements
+- Select and frame every affected group in the viewport
+
+<small>Category: Quality</small>
 
 ### Python Console
 
@@ -71,6 +115,50 @@ Lists every IfcSpace with the areas and volumes the file authored, rolled up by 
 - Click a room to isolate it; CSV export of the whole book
 
 <small>Category: Data</small>
+
+### Section Workspace
+
+*Turn the live 3D cut into a readable drawing*
+
+Builds element-owned 2D contours from the same retained geometry shown in the viewer. Moving the section plane updates the drafting sheet without replacing its controls; selecting a line selects the element in 3D, and 3D selection highlights the drawing. Screen-stable coordinates, a measured scale rail, storey cuts, keyboard navigation, pan, zoom and SVG export make the section useful without a round trip to a desktop authoring tool.
+
+- Synchronized 2D contours from the active X, Y or Z section plane
+- Element selection shared between the drawing and 3D viewer
+- Storey cut presets plus precise plane offset and flip controls
+- Pan, zoom, fit and coordinate grid for drafting review
+- Selection focus, keyboard navigation and a screen-stable scale rail
+- Open-contour and partial-geometry diagnostics
+- Browser-generated SVG export with explicit mesh fidelity
+
+<small>Category: Coordination</small>
+
+### Smart Measure
+
+*Put object gaps and room axes on the model*
+
+Measures the shortest gap between two selected meshes and casts six rays from a picked surface to the next visible geometry. The live laser stays lightweight and reversible; chosen spans become ordinary viewer measurements that travel with saved viewpoints. Loaded geometry remains in the browser unless the optional local precise route is explicitly selected.
+
+- Shortest surface distance with witness points between two selected elements
+- Configurable clearance threshold with a clear pass or fail result
+- Six-direction X, Y and Z laser from the last clicked surface
+- Perpendicular camera alignment using the picked face normal
+- Persistent measurement spans stored with saved viewpoints
+- Optional higher-precision IFC routing through a trusted Local Studio provider
+
+<small>Category: Coordination</small>
+
+### Storey Navigator
+
+*Walk the building one level at a time*
+
+Lists every storey with its elevation and how much sits on it, and isolates one with a click. The camera stays put as you step up and down, which is what makes comparing levels readable, and the ceiling cut drops a section under the level above so you look into the storey instead of at its slab.
+
+- Every storey with elevation and element count
+- Isolate a level without moving the camera
+- Ceiling cut for a plan style look into the level
+- Step up and down through the building
+
+<small>Category: Navigation</small>
 
 ## Local Studio
 

@@ -10,6 +10,7 @@ export type ExtensionPermission =
   | "view.read"
   | "view.control"
   | "view.overlay"
+  | "review.issue.create"
   | "edit.propose"
   | "file.open"
   | "file.export"

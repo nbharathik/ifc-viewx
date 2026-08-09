@@ -1,11 +1,20 @@
 import { modelOf } from "../viewer-core/ids.js";
 import type { TriangleChunk } from "../viewer-core/scene/triangleStore.js";
 import type { Placement } from "../ifc/clash/narrow.js";
+import { BufferAttribute, BufferGeometry } from "three";
+import { MeshBVH } from "three-mesh-bvh";
+import { GeometrySignatureBuilder, shapeFingerprint } from "./signature.js";
+import type { GeometryShapeFingerprint, GeometrySignature } from "./types.js";
 
 interface StoredGeometry {
+  key: string;
   positions: Float32Array;
   indices: Uint32Array;
   bounds: Float32Array;
+  fingerprint?: GeometryShapeFingerprint;
+  bvh?: MeshBVH;
+  bvhGeometry?: BufferGeometry;
+  bvhBytes?: number;
 }
 
 interface StoredElement {
@@ -20,10 +29,44 @@ export interface GeometryBounds {
   max: [number, number, number];
 }
 
+export interface BvhPlacement extends Placement {
+  bvh: MeshBVH;
+}
+
+export interface GeometryIndexOptions {
+  /** Retained BVH budget. Defaults to 100 MB per reported GB of device memory. */
+  bvhBudgetBytes?: number;
+}
+
+export interface GeometryIndexDiagnostics {
+  bvhBudgetBytes: number;
+  bvhBytes: number;
+  bvhGeometries: number;
+  bvhTriangles: number;
+}
+
+const MB = 1024 * 1024;
+const BVH_BYTES_PER_TRIANGLE = 64;
+
+function defaultBvhBudget(): number {
+  const memory = typeof navigator === "undefined"
+    ? 2
+    : Number((navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 2);
+  return Math.max(100 * MB, Math.min(800 * MB, memory * 100 * MB));
+}
+
 export class GeometryIndex {
   private readonly geometries = new Map<number, Map<number, StoredGeometry>>();
   private readonly elements = new Map<number, StoredElement>();
+  private readonly bvhLru = new Map<string, StoredGeometry>();
+  private readonly bvhBudgetBytes: number;
+  private retainedBvhBytes = 0;
+  private retainedBvhTriangles = 0;
   private version = 0;
+
+  constructor(options: GeometryIndexOptions = {}) {
+    this.bvhBudgetBytes = Math.max(1024, options.bvhBudgetBytes ?? defaultBvhBudget());
+  }
 
   addChunk(chunk: TriangleChunk): void {
     if (chunk.geometryIDs.length === 0 && chunk.elementIDs.length === 0) return;
@@ -38,7 +81,11 @@ export class GeometryIndex {
     for (let i = 0; i < chunk.geometryIDs.length; i++) {
       const vertexFloats = chunk.vertexCounts[i] * 3;
       const indexCount = chunk.indexCounts[i];
-      table.set(chunk.geometryIDs[i], {
+      const geometryID = chunk.geometryIDs[i];
+      const existing = table.get(geometryID);
+      if (existing) this.disposeBvh(existing);
+      table.set(geometryID, {
+        key: `${chunk.model}:${geometryID}`,
         positions: chunk.positions.subarray(po, po + vertexFloats),
         indices: chunk.indices.subarray(io, io + indexCount),
         bounds: chunk.localBounds.subarray(i * 6, i * 6 + 6),
@@ -59,6 +106,8 @@ export class GeometryIndex {
   }
 
   dropModel(model: number): void {
+    const table = this.geometries.get(model);
+    if (table) for (const geometry of table.values()) this.disposeBvh(geometry);
     const hadGeometry = this.geometries.delete(model);
     let removed = false;
     for (const id of [...this.elements.keys()]) {
@@ -69,8 +118,14 @@ export class GeometryIndex {
 
   clear(): void {
     if (this.geometries.size || this.elements.size) this.version += 1;
+    for (const table of this.geometries.values()) {
+      for (const geometry of table.values()) this.disposeBvh(geometry);
+    }
     this.geometries.clear();
     this.elements.clear();
+    this.bvhLru.clear();
+    this.retainedBvhBytes = 0;
+    this.retainedBvhTriangles = 0;
   }
 
   has(id: number): boolean {
@@ -111,6 +166,94 @@ export class GeometryIndex {
       }
     }
     return out;
+  }
+
+  /** The same placements with one lazy BVH shared by every instance of a mesh. */
+  bvhPlacements(id: number): BvhPlacement[] {
+    const element = this.elements.get(id);
+    const table = this.geometries.get(modelOf(id));
+    if (!element || !table) return [];
+    const out: BvhPlacement[] = [];
+    for (let index = 0; index < element.geometryIDs.length; index++) {
+      const geometry = table.get(element.geometryIDs[index]);
+      if (!geometry) continue;
+      out.push({
+        positions: geometry.positions,
+        indices: geometry.indices,
+        matrix: element.matrices[index],
+        bvh: this.bvhFor(geometry),
+      });
+    }
+    return out;
+  }
+
+  diagnostics(): GeometryIndexDiagnostics {
+    return {
+      bvhBudgetBytes: this.bvhBudgetBytes,
+      bvhBytes: this.retainedBvhBytes,
+      bvhGeometries: this.bvhLru.size,
+      bvhTriangles: this.retainedBvhTriangles,
+    };
+  }
+
+  private bvhFor(stored: StoredGeometry): MeshBVH {
+    if (stored.bvh) {
+      this.bvhLru.delete(stored.key);
+      this.bvhLru.set(stored.key, stored);
+      return stored.bvh;
+    }
+    const geometry = new BufferGeometry();
+    geometry.setAttribute("position", new BufferAttribute(stored.positions, 3));
+    geometry.setIndex(new BufferAttribute(stored.indices, 1));
+    const bvh = new MeshBVH(geometry, { indirect: true, verbose: false });
+    const triangles = stored.indices.length / 3;
+    stored.bvh = bvh;
+    stored.bvhGeometry = geometry;
+    stored.bvhBytes = Math.ceil(triangles * BVH_BYTES_PER_TRIANGLE);
+    this.retainedBvhBytes += stored.bvhBytes;
+    this.retainedBvhTriangles += triangles;
+    this.bvhLru.set(stored.key, stored);
+    this.trimBvhs(stored);
+    return bvh;
+  }
+
+  private trimBvhs(protectedGeometry: StoredGeometry): void {
+    while (this.retainedBvhBytes > this.bvhBudgetBytes && this.bvhLru.size > 1) {
+      const oldest = this.bvhLru.values().next().value as StoredGeometry | undefined;
+      if (!oldest) break;
+      if (oldest === protectedGeometry) {
+        this.bvhLru.delete(oldest.key);
+        this.bvhLru.set(oldest.key, oldest);
+        continue;
+      }
+      this.disposeBvh(oldest);
+    }
+  }
+
+  private disposeBvh(stored: StoredGeometry): void {
+    if (!stored.bvh) return;
+    const triangles = stored.indices.length / 3;
+    this.retainedBvhBytes = Math.max(0, this.retainedBvhBytes - (stored.bvhBytes ?? 0));
+    this.retainedBvhTriangles = Math.max(0, this.retainedBvhTriangles - triangles);
+    this.bvhLru.delete(stored.key);
+    stored.bvhGeometry?.dispose();
+    stored.bvh = undefined;
+    stored.bvhGeometry = undefined;
+    stored.bvhBytes = undefined;
+  }
+
+  signature(id: number): GeometrySignature | null {
+    const element = this.elements.get(id);
+    const table = this.geometries.get(modelOf(id));
+    if (!element || !table) return null;
+    const builder = new GeometrySignatureBuilder();
+    for (let index = 0; index < element.geometryIDs.length; index++) {
+      const geometry = table.get(element.geometryIDs[index]);
+      if (!geometry) continue;
+      geometry.fingerprint ??= shapeFingerprint(geometry.positions, geometry.indices, geometry.bounds);
+      builder.add(id, geometry.fingerprint, geometry.bounds, element.matrices[index]);
+    }
+    return builder.finish()[0] ?? null;
   }
 
   worldBounds(

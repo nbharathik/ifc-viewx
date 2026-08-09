@@ -1,0 +1,57 @@
+{
+  "manifestVersion": 2,
+  "id": "section-workspace",
+  "name": "Section Workspace",
+  "version": "1.1.0",
+  "sdk": ">=2.0.0 <3",
+  "description": "Cut visible IFC geometry into synchronized 2D drafting contours while keeping the 3D section live.",
+  "runtime": {
+    "kind": "bundled",
+    "entry": "panel.ts"
+  },
+  "activationEvents": ["onPanel:section-workspace", "onCommand:section-workspace.open"],
+  "permissions": [
+    "model.summary.read",
+    "model.structure.read",
+    "geometry.query",
+    "view.read",
+    "view.control",
+    "storage.extension",
+    "file.export"
+  ],
+  "contributes": {
+    "panels": [
+      { "id": "section-workspace", "title": "Section Workspace", "icon": "section" }
+    ],
+    "commands": [
+      { "id": "section-workspace.open", "title": "Open Section Workspace", "icon": "section" }
+    ],
+    "analyses": [
+      { "id": "section-workspace.contours", "title": "Section contours", "capability": "sectionContours", "resultView": "section-workspace.results" }
+    ],
+    "resultViews": [
+      { "id": "section-workspace.results", "title": "Section elements" }
+    ],
+    "exporters": [
+      { "id": "section-workspace.svg", "title": "Section drawing SVG", "mimeTypes": ["image/svg+xml"], "extensions": ["svg"] },
+      { "id": "section-workspace.booklet", "title": "Floor plan set", "mimeTypes": ["text/html"], "extensions": ["html"] }
+    ]
+  },
+  "catalog": {
+    "tagline": "Turn the live 3D cut into a readable drawing",
+    "about": "Builds element-owned 2D contours from the same retained geometry shown in the viewer. Moving the section plane updates the drafting sheet without replacing its controls; selecting a line selects the element in 3D, and 3D selection highlights the drawing. Screen-stable coordinates, a measured scale rail, storey cuts, keyboard navigation, pan, zoom and SVG export make the section useful without a round trip to a desktop authoring tool.",
+    "icon": "section",
+    "category": "Coordination",
+    "keywords": "section contour plan elevation 2d 3d drawing svg storey cut",
+    "does": [
+      "Synchronized 2D contours from the active X, Y or Z section plane",
+      "Element selection shared between the drawing and 3D viewer",
+      "Automatic floor plan creation for every IfcBuildingStorey",
+      "Individual SVG downloads and a print-ready floor plan set",
+      "Pan, zoom, fit and coordinate grid for drafting review",
+      "Selection focus, keyboard navigation and a screen-stable scale rail",
+      "Open-contour and partial-geometry diagnostics",
+      "Browser-generated SVG export with explicit mesh fidelity"
+    ]
+  }
+}

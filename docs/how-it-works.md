@@ -30,9 +30,27 @@ exists in graphics memory. Analysis that needs real surfaces rather than boxes
 reads a second and much leaner copy of the same triangles: positions and
 indices, one entry per unique geometry, no normals or colours. It is handed to
 one lazy geometry worker on the first query and never copied again. Clash,
-shortest-distance, and six-direction axis laser queries share this
-representation. New algorithms extend the service rather than retaining
-another copy.
+shortest-distance, six-direction axis laser, and section-contour queries share
+this representation. Geometry-aware compare also derives compact, sampled
+shape, placement and bounds signatures there. New algorithms extend the
+service rather than retaining another copy.
+
+When a geometry tool asks for an exact viewport point, the existing GPU pick
+patch probes at most once per animation frame and reports Vertex, Edge
+midpoint, Edge or Face beside the cursor. The click reuses that hover result,
+so tools receive a real snapped geometry point without adding hover work during
+ordinary navigation.
+
+Section contours apply every retained placement, origin shift, and federation
+offset before intersecting the requested plane. The worker joins segments per
+element and classifies open and closed paths. The synchronized
+[Section Workspace](section-workspace.md) draws those paths without reaching
+into the renderer.
+
+Model Compare parses its baseline in a separate worker but never uploads it to
+the renderer. Mesh batches become compact signatures and are released. The
+current model stays as the only GPU model while property, containment,
+placement, rotation, bounds and sampled shape changes are classified.
 
 Assistant viewer tools, browser MCP actions, bundled extensions, and installed
 extension RPC calls share a typed capability registry. Each operation declares

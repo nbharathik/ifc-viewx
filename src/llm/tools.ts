@@ -89,7 +89,7 @@ export const TOOLS: ToolSpec[] = [
     plain: "Validate against your loaded IDS",
     params: { properties: {} } },
   { name: "clash", tier: "viewer", icon: "compare", syntax: '{"action":"clash","a":["IfcWall"],"b":["IfcDuctSegment"],"tolerance":10}',
-    summary: "triangle-level clash sweep between two class sets; omit a/b for structure vs services",
+    summary: "triangle-level clash sweep with rows ready to group by severity, classPair, level, primary or kind; omit a/b for structure vs services",
     plain: "Clash sweep between two sets of classes",
     params: { properties: {
       a: { type: "array", items: { type: "string" }, description: "IFC classes for set A" },
@@ -162,6 +162,16 @@ export const TOOLS: ToolSpec[] = [
       offset: { type: "number", description: "where along the axis; omit for the middle" },
       flip: { type: "boolean", description: "keep the other half" },
       clear: { type: "boolean", description: "remove every cut" },
+    } } },
+  { name: "sectionContours", tier: "viewer", icon: "section", syntax: '{"action":"sectionContours","axis":"y","offset":3.2}',
+    summary: "build element-owned 2D contour summaries at an axis-aligned cut and put the same plane in the 3D view; omit axis and offset to reuse the active cut or model middle",
+    plain: "Analyze a section drawing",
+    params: { properties: {
+      axis: { type: "string", enum: ["x", "y", "z"], description: "y produces a plan; x and z produce elevations" },
+      offset: { type: "number", description: "cut position in model metres" },
+      flip: { type: "boolean", description: "keep the other half in 3D" },
+      includeHidden: { type: "boolean", description: "also analyze currently hidden elements" },
+      maxSegments: { type: "integer", description: "mesh segment budget from 1,000 to 100,000; default 50,000" },
     } } },
   { name: "sectionBox", tier: "viewer", icon: "cube", syntax: '{"action":"sectionBox","ids":[1,2]}',
     summary: "clip to a box around these elements; pass clear to remove it",
@@ -375,7 +385,7 @@ export function summarizeReport(report: string): string {
   try {
     const value = JSON.parse(report) as Record<string, unknown> | unknown[];
     if (Array.isArray(value)) return `${value.length} rows`;
-    const counts = ["matches", "total", "issues", "clashes", "failures"]
+    const counts = ["matches", "total", "issues", "clashes", "failures", "intersectedElements", "pathCount"]
       .filter((key) => typeof value[key] === "number")
       .map((key) => `${String(value[key])} ${key}`);
     if (counts.length) return counts.join(" · ");

@@ -30,6 +30,7 @@ function manifest(permissions: ExtensionManifestV2["permissions"]): ExtensionMan
       commands: [{ id: "sample.run", title: "Run sample" }],
       overlays: [{ id: "sample.overlay", title: "Overlay" }],
       resultViews: [{ id: "sample.results", title: "Results" }],
+      importers: [{ id: "sample.rules", title: "Rules", accepts: ["application/json"] }],
     },
     catalog: {
       tagline: "Sample",
@@ -50,6 +51,9 @@ function legacy() {
     }));
   const execute = vi.fn(async <T,>(_id: string): Promise<T> => "ok" as T);
   const laser = vi.fn(async () => ({ axes: [], fidelity: "mesh" }));
+  const sectionContours = vi.fn(async () => ({ polylines: [], fidelity: "mesh" }));
+  const geometrySignatures = vi.fn(async () => ({ signatures: [], fidelity: "mesh" }));
+  const setPickGuide = vi.fn();
   const value = {
     capabilities: {
       list: () => [summary("counts", "read"), summary("clash", "read"), summary("select", "view"), summary("danger", "propose")],
@@ -61,7 +65,10 @@ function legacy() {
     bounds: vi.fn(() => null),
     clash,
     laser,
+    sectionContours,
+    geometrySignatures,
     lastPick: vi.fn(() => ({ expressID: 1, point: [1, 2, 3] })),
+    setPickGuide,
     isVisible: vi.fn(() => true),
     camera: vi.fn(() => ({ position: [2, 2, 2], target: [0, 0, 0] })),
     setCamera: vi.fn(),
@@ -74,7 +81,7 @@ function legacy() {
     read: vi.fn((_key: string, fallback: unknown) => fallback),
     write: vi.fn(),
   } as unknown as PluginContext;
-  return { value, off, clash, laser, execute };
+  return { value, off, clash, laser, sectionContours, geometrySignatures, setPickGuide, execute };
 }
 
 describe("SDK v2 extension context", () => {
@@ -108,9 +115,11 @@ describe("SDK v2 extension context", () => {
     const addOverlayLine = vi.fn(() => 42);
     const removeOverlayLine = vi.fn();
     const results = new ExtensionResultStore();
+    const onResult = vi.fn();
     const ctx = createExtensionContextV2(definition, old.value, scope, {
       registerCommand,
       results,
+      onResult,
       addOverlayLine,
       removeOverlayLine,
     });
@@ -120,7 +129,9 @@ describe("SDK v2 extension context", () => {
     ctx.commands.register("sample.run", vi.fn());
     ctx.contributions.register("overlays", definition.contributes.overlays![0], overlayCleanup);
     ctx.overlays.line("sample.overlay", [0, 0, 0], [1, 0, 0]);
+    ctx.view.pickGuide(true);
     const handle = ctx.results.create("sample.results", [{ id: 1 }, { id: 2 }]);
+    expect(onResult).toHaveBeenCalledWith(handle);
     expect(ctx.results.page<{ id: number }>(handle.id, 0, 1).items).toEqual([{ id: 1 }]);
     const pending = ctx.geometry.clash([1], [2]);
     scope.dispose();
@@ -132,11 +143,12 @@ describe("SDK v2 extension context", () => {
     expect(overlayCleanup).toHaveBeenCalledOnce();
     expect(addOverlayLine).toHaveBeenCalledOnce();
     expect(removeOverlayLine).toHaveBeenCalledWith(42);
+    expect(old.setPickGuide).toHaveBeenLastCalledWith(false);
     expect(ctx.results.get(handle.id)).toBeNull();
     expect(registry.count("sample")).toBe(0);
   });
 
-  it("mediates laser, surface pick, camera, visibility and persistent measurements", async () => {
+  it("mediates geometry, surface pick, camera, visibility and persistent measurements", async () => {
     const old = legacy();
     const scope = new ExtensionScope("sample", new ExtensionContributionRegistry());
     const definition = manifest(["geometry.query", "view.read", "view.control"]);
@@ -149,7 +161,16 @@ describe("SDK v2 extension context", () => {
       maxDistance: 12,
       signal: expect.any(AbortSignal),
     }));
+    await ctx.geometry.sectionContours("y", 3.2, { maxSegments: 25_000 });
+    expect(old.sectionContours).toHaveBeenCalledWith("y", 3.2, expect.objectContaining({
+      maxSegments: 25_000,
+      signal: expect.any(AbortSignal),
+    }));
+    await ctx.geometry.signatures([1]);
+    expect(old.geometrySignatures).toHaveBeenCalledWith([1], expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(ctx.view.lastPick()).toEqual({ expressID: 1, point: [1, 2, 3] });
+    ctx.view.pickGuide(true);
+    expect(old.setPickGuide).toHaveBeenCalledWith(true);
     expect(ctx.view.isVisible(1)).toBe(true);
     expect(ctx.view.camera()).toEqual({ position: [2, 2, 2], target: [0, 0, 0] });
     ctx.view.setCamera({ position: [4, 4, 4], target: [1, 2, 3] });
@@ -166,6 +187,50 @@ describe("SDK v2 extension context", () => {
     const ctx = createExtensionContextV2(definition, old.value, scope, { registerCommand: vi.fn() });
     expect(() => ctx.commands.run("other.run")).toThrow(/did not declare command/);
     expect(() => ctx.contributions.register("overlays", { id: "other.overlay", title: "Other" })).toThrow(/did not declare/);
+  });
+
+  it("creates review issues only with explicit issue and viewport permissions", async () => {
+    const old = legacy();
+    const deniedScope = new ExtensionScope("sample", new ExtensionContributionRegistry());
+    const deniedDefinition = manifest(["review.issue.create"]);
+    deniedScope.registerManifest(deniedDefinition.contributes);
+    const denied = createExtensionContextV2(deniedDefinition, old.value, deniedScope, {
+      createIssue: vi.fn(async () => ({
+        id: "issue-1", title: "Clash", status: "Open" as const, snapshot: "pending" as const,
+      })),
+    });
+    await expect(denied.issues.create({ title: "Clash" })).rejects.toThrow(/viewport\.capture/);
+
+    const scope = new ExtensionScope("sample", new ExtensionContributionRegistry());
+    const definition = manifest(["review.issue.create", "viewport.capture"]);
+    scope.registerManifest(definition.contributes);
+    const createIssue = vi.fn(async () => ({
+      id: "issue-1", title: "Wall and pipe", status: "Open" as const, snapshot: "pending" as const,
+    }));
+    const ctx = createExtensionContextV2(definition, old.value, scope, { createIssue });
+    await expect(ctx.issues.create({
+      title: "Wall and pipe",
+      elementIds: [11, 22],
+      point: [1, 2, 3],
+      priority: "High",
+    })).resolves.toMatchObject({ id: "issue-1", status: "Open" });
+    expect(createIssue).toHaveBeenCalledWith(expect.objectContaining({ elementIds: [11, 22], priority: "High" }));
+    deniedScope.dispose();
+    scope.dispose();
+  });
+
+  it("opens only files declared by an importer contribution", async () => {
+    const old = legacy();
+    const scope = new ExtensionScope("sample", new ExtensionContributionRegistry());
+    const definition = manifest(["file.open"]);
+    scope.registerManifest(definition.contributes);
+    const openFile = vi.fn(async () => ({ name: "rules.json", mimeType: "application/json", text: "{}" }));
+    const ctx = createExtensionContextV2(definition, old.value, scope, { openFile });
+
+    await expect(ctx.files.open("sample.rules")).resolves.toMatchObject({ name: "rules.json", text: "{}" });
+    expect(openFile).toHaveBeenCalledWith(["application/json"]);
+    await expect(ctx.files.open("other.rules")).rejects.toThrow(/did not declare importer/);
+    scope.dispose();
   });
 
   it("namespaces and caps extension storage", () => {

@@ -1,6 +1,8 @@
 import { runSweep } from "../ifc/clash/sweep.js";
 import { runDistance } from "./distanceQuery.js";
 import { runLaser } from "./laserQuery.js";
+import { runSectionContours } from "./sectionQuery.js";
+import { runGeometrySignatures } from "./signatureQuery.js";
 import { GeometryIndex } from "./geometryIndex.js";
 import { GeometryScheduler } from "./scheduler.js";
 import type { GeometryRequest, GeometryResponse } from "./types.js";
@@ -85,6 +87,52 @@ self.onmessage = (event: MessageEvent<GeometryRequest>): void => {
           yieldTurn: turn,
         }).then((result) => {
           if (!cancelled.has(id)) post({ type: "laserResult", id, result });
+        });
+      })
+        .catch((error: unknown) => post({
+          type: "fail",
+          id,
+          message: error instanceof Error ? error.message : String(error),
+        }))
+        .finally(() => {
+          active.delete(id);
+          cancelled.delete(id);
+        });
+      return;
+    }
+    case "sectionContours": {
+      const { id, spec } = message;
+      scheduler.schedule(message.priority, async () => {
+        active.add(id);
+        if (cancelled.has(id)) return;
+        await runSectionContours(index, spec, {
+          cancelled: () => cancelled.has(id),
+          yieldTurn: turn,
+        }).then((result) => {
+          if (!cancelled.has(id)) post({ type: "sectionContourResult", id, result });
+        });
+      })
+        .catch((error: unknown) => post({
+          type: "fail",
+          id,
+          message: error instanceof Error ? error.message : String(error),
+        }))
+        .finally(() => {
+          active.delete(id);
+          cancelled.delete(id);
+        });
+      return;
+    }
+    case "signatures": {
+      const { id, spec } = message;
+      scheduler.schedule(message.priority, async () => {
+        active.add(id);
+        if (cancelled.has(id)) return;
+        await runGeometrySignatures(index, spec, {
+          cancelled: () => cancelled.has(id),
+          yieldTurn: turn,
+        }).then((result) => {
+          if (!cancelled.has(id)) post({ type: "signatureResult", id, result });
         });
       })
         .catch((error: unknown) => post({

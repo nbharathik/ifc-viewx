@@ -18,6 +18,7 @@ describe("assistant capability adapter", () => {
     expect(edit.map((tool) => tool.name)).toContain(assistantToolName("issue.stage"));
     expect(edit.map((tool) => tool.name)).toContain(assistantToolName("view.pickAt"));
     expect(query.map((tool) => tool.name)).toContain(assistantToolName("laser"));
+    expect(query.map((tool) => tool.name)).toContain(assistantToolName("sectionContours"));
     expect(edit.every((tool) => tool.schema.additionalProperties === false)).toBe(true);
   });
 

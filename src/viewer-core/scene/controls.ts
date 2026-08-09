@@ -4,11 +4,13 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
-import type { SceneController, CameraPose } from './scene.js';
+import type { SceneController, CameraPose, SnapKind } from './scene.js';
 
 export interface PickResult {
   expressID: number;
   point: [number, number, number];
+  /** Present when a precision-pick guide supplied the point. */
+  kind?: SnapKind;
 }
 
 export interface ControlHandlers {
@@ -16,7 +18,7 @@ export interface ControlHandlers {
    * Single click on the viewport: pick result, or null when nothing was hit.
    * `additive` is a Ctrl/Cmd/Shift click, i.e. "add this to what I have".
    */
-  onPick?: (pick: PickResult | null, additive: boolean) => void;
+  onPick?: (pick: PickResult | null, additive: boolean, clientX: number, clientY: number) => void;
   /**
    * Pointer went down while a viewport tool is active. Returning true takes
    * the whole gesture: OrbitControls never sees it, and neither does the pick.
@@ -28,6 +30,8 @@ export interface ControlHandlers {
   onToolUp?: (clientX: number, clientY: number, moved: boolean) => void;
   /** Escape pressed. */
   onEscape?: () => void;
+  /** Tool-specific unmodified key. True means the tool consumed it. */
+  onToolKey?: (key: string) => boolean;
   /** H: hide selection. */
   onHide?: () => void;
   /** I: isolate selection. */
@@ -430,7 +434,12 @@ export class ViewerControls {
     // Releasing an orbit/pan drag fires a click on the same element; only a
     // stationary click is a selection.
     if (this.wasDrag(e)) return;
-    this.handlers.onPick?.(this.pickAt(e.clientX, e.clientY), e.ctrlKey || e.metaKey || e.shiftKey);
+    this.handlers.onPick?.(
+      this.pickAt(e.clientX, e.clientY),
+      e.ctrlKey || e.metaKey || e.shiftKey,
+      e.clientX,
+      e.clientY,
+    );
   }
 
   private onDoubleClick(e: MouseEvent): void {
@@ -451,6 +460,11 @@ export class ViewerControls {
       return;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (this.toolActive && this.handlers.onToolKey?.(e.key.toLowerCase())) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
     switch (e.key) {
       case 'f':
       case 'F':

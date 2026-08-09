@@ -45,6 +45,7 @@ nav:
   - How the viewer works: how-it-works.md
   - Assistant: assistant.md
   - Smart Measure: smart-measure.md
+  - Section Workspace: section-workspace.md
   - Plugins:
       - Writing an extension: plugins/index.md
       - Installed browser extensions: plugins/installed.md

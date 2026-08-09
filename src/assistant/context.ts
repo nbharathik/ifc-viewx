@@ -75,7 +75,11 @@ export function buildViewerContext(viewer: Viewer, options: ViewerContextOptions
         rules: viewer.getRules().map((rule) => ({ label: text(rule.label), mode: rule.mode, count: rule.ids.length })),
       },
       modelsHidden: viewer.getModels().filter((model) => !model.visible).map((model) => model.index),
-      ...(recentPick ? { recentPick: { expressId: recentPick.expressID, point: recentPick.point.map(round) } } : {}),
+      ...(recentPick ? { recentPick: {
+        expressId: recentPick.expressID,
+        point: recentPick.point.map(round),
+        ...(recentPick.kind ? { kind: recentPick.kind } : {}),
+      } } : {}),
     },
     workspace: {
       panel: options.panel,

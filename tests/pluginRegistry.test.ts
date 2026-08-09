@@ -6,6 +6,7 @@ describe("plugin compatibility registry", () => {
     expect(findPlugin("storeys")).toMatchObject({ manifestVersion: 2 });
     expect(findPlugin("explorer")).toMatchObject({ manifestVersion: 2 });
     expect(findPlugin("clash")).toMatchObject({ manifestVersion: 2 });
+    expect(findPlugin("model-health")).toMatchObject({ manifestVersion: 2 });
     expect(findPlugin("python")).toMatchObject({ manifestVersion: 1 });
   });
 });

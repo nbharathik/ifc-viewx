@@ -476,6 +476,8 @@ describe("the sweep as the assistant and panels reach it", () => {
     const worst = report.worst as Array<Record<string, unknown>>;
     expect(worst[0].penetrationMm).toBe(500);
     expect((worst[0].a as { type: string }).type).toBe("IfcWall");
+    expect(worst[0]).toMatchObject({ classPair: "DuctSegment|Wall", level: "L1", severity: "critical" });
+    expect(report.rows).toHaveLength(1);
   });
 
   it("names the empty side rather than reporting a clean model", async () => {

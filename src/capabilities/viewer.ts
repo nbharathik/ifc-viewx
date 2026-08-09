@@ -18,17 +18,17 @@ export interface ViewerCapabilityContext {
 const MCP_ACTIONS = new Set([
   "find", "search", "counts", "storeys", "selection", "visibility",
   "isolate", "hide", "unhide", "show", "categories", "color",
-  "section", "sectionBox", "camera", "clash", "check", "schedule", "ids",
+  "section", "sectionContours", "sectionBox", "camera", "clash", "check", "schedule", "ids",
   "distance", "laser",
 ]);
 
 const VIEW_EFFECTS = new Set([
   "select", "fit", "isolate", "hide", "unhide", "show", "categories",
-  "color", "section", "sectionBox", "models", "camera", "distance", "laser",
+  "color", "section", "sectionContours", "sectionBox", "models", "camera", "distance", "laser",
 ]);
 
 const LONG_ACTIONS = new Set(["check", "schedule", "ids", "clash"]);
-const INTERACTIVE_ACTIONS = new Set(["distance", "laser"]);
+const INTERACTIVE_ACTIONS = new Set(["distance", "laser", "sectionContours"]);
 
 function inputSchema(tool: ToolSpec): JsonSchema {
   return {

@@ -5,11 +5,13 @@
 // closes, so a plugin cannot leak a listener into the viewer.
 import { expressOf, modelOf } from "../../viewer-core/ids.js";
 import { toast } from "../../ui/kit.js";
-import { publishFindings } from "../../ui/report.js";
+import { publishFindings } from "../../ui/findings.js";
 import { classCounts, type PropertyIndex } from "../../sdk/data.js";
 import { detectClashes } from "../../ifc/clash.js";
 import { measureDistance } from "../../geometry/distance.js";
 import { measureLaser } from "../../geometry/laser.js";
+import { extractSectionContours } from "../../geometry/section.js";
+import { geometrySignatures } from "../../geometry/signatures.js";
 import { modelElements } from "../../llm/actions.js";
 import type {
   PluginContext,
@@ -80,6 +82,8 @@ export function createContext(manifest: Pick<PluginManifest, "id" | "name">, dep
     clash: (a, b, options) => detectClashes(viewer, a, b, options),
     distance: (a, b, options) => measureDistance(viewer, a, b, options),
     laser: (origin, options) => measureLaser(viewer, origin, options),
+    sectionContours: (axis, offset, options) => extractSectionContours(viewer, axis, offset, options),
+    geometrySignatures: (ids, options) => geometrySignatures(viewer, ids, options),
 
     select: (ids) => {
       if (ids === null) viewer.clearSelection();
@@ -88,6 +92,7 @@ export function createContext(manifest: Pick<PluginManifest, "id" | "name">, dep
     },
     selection: () => viewer.getSelectedIds(),
     lastPick: () => viewer.getLastPick(),
+    setPickGuide: (on) => viewer.setPickGuide(on),
     isVisible: (id) => viewer.isElementVisible(id),
     isolate: (ids, label) => viewer.isolate(ids, label),
     hide: (ids) => viewer.setHidden(ids, true),

@@ -80,6 +80,22 @@ const SNAP_SEGMENT_LIMIT = 400;
 const BOX_EDGES = [0, 1, 2, 3, 4, 5, 6, 7, 0, 2, 1, 3, 4, 6, 5, 7, 0, 4, 1, 5, 2, 6, 3, 7];
 
 /**
+ * Normals need direction, not float precision. WebGL expands a normalized
+ * signed-short attribute back to [-1, 1] in the vertex shader, cutting the
+ * GPU normal buffer from 12 to 6 bytes per vertex at roughly 3e-5 component
+ * precision.
+ */
+function packNormalComponent(source: number): number {
+  return Math.round(Math.max(-1, Math.min(1, source || 0)) * 32_767);
+}
+
+export function packNormalBuffer(source: ArrayLike<number>): Int16Array {
+  const packed = new Int16Array(source.length);
+  for (let i = 0; i < source.length; i++) packed[i] = packNormalComponent(Number(source[i]));
+  return packed;
+}
+
+/**
  * Feature edges in local space, reused by every mesh that shares the geometry
  * (IFC repeats doors and windows heavily). Weak, so it costs nothing once the
  * engine drops the geometry.
@@ -162,10 +178,29 @@ class U32Writer {
   }
 }
 
+class I16Writer {
+  array = new Int16Array(4096);
+  length = 0;
+
+  ensure(extra: number): void {
+    const needed = this.length + extra;
+    if (needed <= this.array.length) return;
+    let capacity = this.array.length * 2;
+    while (capacity < needed) capacity *= 2;
+    const next = new Int16Array(capacity);
+    next.set(this.array);
+    this.array = next;
+  }
+
+  take(): Int16Array {
+    return this.array.subarray(0, this.length);
+  }
+}
+
 /** Accumulator for one merged chunk (opaque or transparent). */
 class ChunkAccumulator {
   positions = new F32Writer();
-  normals = new F32Writer();
+  normals = new I16Writer();
   colors = new F32Writer();
   elementIndices = new F32Writer();
   indices = new U32Writer();
@@ -180,7 +215,7 @@ class ChunkAccumulator {
   /** Hand off the current buffers and start fresh (post-finalize). */
   reset(): void {
     this.positions = new F32Writer();
-    this.normals = new F32Writer();
+    this.normals = new I16Writer();
     this.colors = new F32Writer();
     this.elementIndices = new F32Writer();
     this.indices = new U32Writer();
@@ -765,9 +800,9 @@ export class ModelBatcher {
       const wy = n[1] * nx + n[4] * ny + n[7] * nz;
       const wz = n[2] * nx + n[5] * ny + n[8] * nz;
       const len = Math.sqrt(wx * wx + wy * wy + wz * wz) || 1;
-      normals[po] = wx / len;
-      normals[po + 1] = wy / len;
-      normals[po + 2] = wz / len;
+      normals[po] = packNormalComponent(wx / len);
+      normals[po + 1] = packNormalComponent(wy / len);
+      normals[po + 2] = packNormalComponent(wz / len);
       po += 3;
       colors[co] = color.r;
       colors[co + 1] = color.g;
@@ -806,11 +841,11 @@ export class ModelBatcher {
     // GPU upload. This roughly halves JS heap on geometry-heavy models. The
     // tradeoff is no re-upload after a GPU context loss, which the viewer
     // does not currently recover from anyway.
-    const uploaded = (array: Float32Array | Uint32Array, itemSize: number) =>
-      new THREE.BufferAttribute(array, itemSize).onUpload(freeAttributeArray);
+    const uploaded = (array: Float32Array | Uint32Array | Int16Array, itemSize: number, normalized = false) =>
+      new THREE.BufferAttribute(array, itemSize, normalized).onUpload(freeAttributeArray);
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', uploaded(chunk.positions.take(), 3));
-    geometry.setAttribute('normal', uploaded(chunk.normals.take(), 3));
+    geometry.setAttribute('normal', uploaded(chunk.normals.take(), 3, true));
     geometry.setAttribute('color', uploaded(chunk.colors.take(), chunk.colorSize));
     geometry.setAttribute('aElementIndex', uploaded(chunk.elementIndices.take(), 1));
     geometry.setIndex(uploaded(chunk.indices.take(), 1));
@@ -853,7 +888,7 @@ export class ModelBatcher {
       // buffer the worker transferred, and one small entry holding a view
       // pins that whole multi-megabyte buffer for the life of the model.
       position: new THREE.BufferAttribute(new Float32Array(g.positions), 3),
-      normal: new THREE.BufferAttribute(new Float32Array(g.normals), 3),
+      normal: new THREE.BufferAttribute(packNormalBuffer(g.normals), 3, true),
       index: new THREE.BufferAttribute(new Uint32Array(g.indices), 1),
       mesh: null,
       elementIndexAttr: null,

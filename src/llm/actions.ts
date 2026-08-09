@@ -7,6 +7,7 @@ import type { CameraPose, SectionBox, SpatialNode, Viewer, ViewPreset } from "..
 import type { ModelElement } from "../sdk/types.js";
 import { measureDistance } from "../geometry/distance.js";
 import { measureLaser } from "../geometry/laser.js";
+import { extractSectionContours, type SectionAxis } from "../geometry/section.js";
 
 export type IndexedElement = ModelElement;
 
@@ -364,6 +365,74 @@ export async function runViewerAction(
         },
       ]);
       return `cut on ${axis}`;
+    }
+    case "sectionContours": {
+      const requestedAxis = lower(action.axis);
+      const active = viewer.getSections()[0];
+      const axis: SectionAxis = requestedAxis === "x" || requestedAxis === "y" || requestedAxis === "z"
+        ? requestedAxis
+        : active?.axis ?? "y";
+      const axisAt = axis === "x" ? 0 : axis === "y" ? 1 : 2;
+      const requestedOffset = Number(action.offset);
+      const offset = Number.isFinite(requestedOffset)
+        ? requestedOffset
+        : active?.axis === axis
+          ? active.offset
+          : (viewer.getModelBox().min[axisAt] + viewer.getModelBox().max[axisAt]) / 2;
+      const askedSegments = Number(action.maxSegments);
+      const maxSegments = Number.isFinite(askedSegments)
+        ? Math.min(100_000, Math.max(1_000, Math.floor(askedSegments)))
+        : 50_000;
+      viewer.setSections([{ axis, offset, flip: action.flip === true }]);
+      const result = await extractSectionContours(viewer, axis, offset, {
+        includeHidden: action.includeHidden === true,
+        maxSegments,
+        signal,
+      });
+      const byId = new Map(modelElements(viewer).map((element) => [element.id, element]));
+      const groups = new Map<number, { type: string; paths: number; closed: number; open: number; length: number }>();
+      for (const line of result.polylines) {
+        const group = groups.get(line.elementId) ?? {
+          type: line.elementType,
+          paths: 0,
+          closed: 0,
+          open: 0,
+          length: 0,
+        };
+        group.paths += 1;
+        group.closed += line.closed ? 1 : 0;
+        group.open += line.closed ? 0 : 1;
+        group.length += line.length;
+        groups.set(line.elementId, group);
+      }
+      const allRows = [...groups].map(([id, group]) => ({
+        id,
+        type: byId.get(id)?.type || group.type,
+        name: byId.get(id)?.name || "",
+        storey: byId.get(id)?.storey || "",
+        paths: group.paths,
+        closed: group.closed,
+        open: group.open,
+        lengthM: Number(group.length.toFixed(4)),
+      }));
+      const rowLimit = 5_000;
+      return JSON.stringify({
+        axis,
+        offset: Number(offset.toFixed(4)),
+        fidelity: result.fidelity,
+        engine: result.engine,
+        geometryRevision: result.geometryRevision,
+        segmentCount: result.segmentCount,
+        pathCount: result.polylines.length,
+        closedCount: result.closedCount,
+        openCount: result.openCount,
+        intersectedElements: allRows.length,
+        testedElements: result.testedElements,
+        missingGeometry: result.missing,
+        truncated: result.truncated,
+        rowsTruncated: allRows.length > rowLimit,
+        rows: allRows.slice(0, rowLimit),
+      });
     }
     case "sectionBox": {
       if (action.clear === true) {

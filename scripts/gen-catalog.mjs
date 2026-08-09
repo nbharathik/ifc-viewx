@@ -21,7 +21,26 @@ const found = [];
 for (const entry of await readdir(PLUGINS, { withFileTypes: true })) {
   if (!entry.isDirectory() || entry.name === "runtime") continue;
   const source = await readFile(join(PLUGINS, entry.name, "manifest.ts"), "utf8").catch(() => null);
-  if (source) found.push((await evaluate(source)).default);
+  if (source) {
+    found.push((await evaluate(source)).default);
+    continue;
+  }
+  const manifestText = await readFile(join(PLUGINS, entry.name, "extension.json"), "utf8").catch(() => null);
+  if (!manifestText) continue;
+  const manifest = JSON.parse(manifestText);
+  found.push({
+    id: manifest.id,
+    name: manifest.name,
+    tier: "web",
+    tagline: manifest.catalog.tagline,
+    about: manifest.catalog.about,
+    icon: manifest.catalog.icon,
+    category: manifest.catalog.category,
+    keywords: manifest.catalog.keywords,
+    does: manifest.catalog.does,
+    author: manifest.publisher?.name,
+    url: manifest.publisher?.url,
+  });
 }
 found.push(...(await evaluate(await readFile(join(PLUGINS, "shortcuts.ts"), "utf8"))).SHORTCUTS);
 found.sort((a, b) => a.name.localeCompare(b.name));

@@ -3,6 +3,8 @@ import type { ElementRow, PropertyIndex } from "../data.js";
 import type { ClashOptions, SweepResult } from "../../ifc/clash.js";
 import type { DistanceOptions, DistanceResult } from "../../geometry/distance.js";
 import type { LaserOptions, LaserResult } from "../../geometry/laser.js";
+import type { SectionAxis, SectionContourOptions, SectionContourResult } from "../../geometry/section.js";
+import type { GeometrySignatureOptions, GeometrySignatureResult } from "../../geometry/signatures.js";
 import type { ResultHandle, ResultOptions, ResultPage } from "../../capabilities/results.js";
 import type { ReportFinding } from "../../ui/report.js";
 import type {
@@ -42,12 +44,15 @@ export interface ExtensionGeometryService {
   clash(a: number[], b: number[], options?: ClashOptions): Promise<SweepResult>;
   distance(a: number, b: number, options?: DistanceOptions): Promise<DistanceResult>;
   laser(origin: [number, number, number], options?: LaserOptions): Promise<LaserResult>;
+  sectionContours(axis: SectionAxis, offset: number, options?: SectionContourOptions): Promise<SectionContourResult>;
+  signatures(ids: number[], options?: GeometrySignatureOptions): Promise<GeometrySignatureResult>;
 }
 
 export interface ExtensionViewService {
   select(ids: number | number[] | null): void;
   selection(): number[];
   lastPick(): PickResult | null;
+  pickGuide(on: boolean): void;
   isVisible(id: number): boolean;
   isolate(ids: number[], label?: string): void;
   hide(ids: number[]): void;
@@ -107,7 +112,30 @@ export interface ExtensionOverlayService {
 }
 
 export interface ExtensionFileService {
+  open(importer: string): Promise<{ name: string; mimeType: string; text: string }>;
   export(exporter: string, name: string, data: string, mimeType: string): void;
+}
+
+export type ExtensionIssuePriority = "Low" | "Normal" | "High" | "Critical";
+
+export interface ExtensionIssueInput {
+  title: string;
+  description?: string;
+  elementIds?: number[];
+  point?: [number, number, number];
+  priority?: ExtensionIssuePriority;
+  metadata?: Record<string, string | number | boolean>;
+}
+
+export interface ExtensionIssueResult {
+  id: string;
+  title: string;
+  status: "Open";
+  snapshot: "pending";
+}
+
+export interface ExtensionIssueService {
+  create(input: ExtensionIssueInput): Promise<ExtensionIssueResult>;
 }
 
 export interface ExtensionResultService {
@@ -146,6 +174,7 @@ export interface ExtensionContextV2 {
   readonly contributions: ExtensionContributionService;
   readonly overlays: ExtensionOverlayService;
   readonly files: ExtensionFileService;
+  readonly issues: ExtensionIssueService;
   readonly results: ExtensionResultService;
   readonly local: ExtensionLocalService;
   close(): void;

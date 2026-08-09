@@ -37,7 +37,7 @@ export interface ViewerContextSnapshot {
     plan: boolean;
     visibility: { total: number; hidden: number; manualHidden: number; rules: Array<{ label: string; mode: string; count: number }> };
     modelsHidden: number[];
-    recentPick?: { expressId: number; point: number[] };
+    recentPick?: { expressId: number; point: number[]; kind?: "vertex" | "midpoint" | "edge" | "surface" };
   };
   workspace: {
     panel: string;

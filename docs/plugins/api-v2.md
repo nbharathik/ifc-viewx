@@ -50,16 +50,18 @@ Supported activation events are:
 | `model.structure.read` | Elements, classes, tree, subtree, and federated IDs |
 | `model.properties.read` | Properties for one element |
 | `model.index.build` | Shared full property index |
-| `geometry.query` | Bounds, boxes, clash, shortest distance, and axis laser |
-| `view.read` | Selection, last surface pick, visibility, camera, sections, and measurements |
-| `view.control` | Selection, visibility, camera, sections, measurements, and color overrides |
+| `geometry.query` | Bounds, boxes, clash, shortest distance, axis laser, section contours, and compact mesh signatures |
+| `view.read` | Selection, last precision pick, visibility, camera, sections, and measurements |
+| `view.control` | Selection, precision-pick guide, visibility, camera, sections, measurements, and color overrides |
 | `view.overlay` | Declared host-owned overlay contribution |
-| `file.open` | Declared importer contribution |
+| `review.issue.create` | Create a BCF review topic from the current view and chosen elements |
+| `viewport.capture` | Include a host-rendered viewport snapshot with a review topic |
+| `file.open` | Ask the user to choose a file through a declared importer contribution |
 | `file.export` | Declared exporter contribution |
 | `storage.extension` | Namespaced extension storage and settings |
 | `assistant.contribute` | Declared assistant tool contribution |
 
-Permissions reserved for later hosts include `geometry.mesh.read`, `edit.propose`, and `viewport.capture`. Declaring a contribution that needs a permission without requesting it is a manifest error.
+Permissions reserved for later hosts include `geometry.mesh.read` and `edit.propose`. Declaring a contribution that needs a permission without requesting it is a manifest error.
 
 ## Domain services
 
@@ -97,9 +99,25 @@ await ctx.geometry.laser([12.4, 3.1, -8.0], {
   maxDistance: 30,
   signal: controller.signal,
 });
+
+await ctx.geometry.sectionContours("y", 3.2, {
+  maxSegments: 100_000,
+  signal: controller.signal,
+});
+
+const revisionGeometry = await ctx.geometry.signatures(elementIds, {
+  signal: controller.signal,
+});
+
+ctx.view.pickGuide(true);
 ```
 
-All calls use the host-owned retained geometry and shared worker. They do not copy the model into the extension. Laser searches visible geometry by default and returns the nearest surface on both sides of X, Y, and Z. The host signal is linked to the optional call signal, so closing the extension cancels pending work.
+`geometry.signatures` returns compact sampled shape, placement and bounds data,
+not raw triangles. `view.pickGuide(true)` enables frame-throttled Vertex, Edge
+midpoint, Edge and Face feedback for the next extension-owned viewport pick.
+The host turns the guide off automatically when the extension closes.
+
+All calls use the host-owned retained geometry and shared worker. They do not copy the model into the extension. Laser searches visible geometry by default and returns the nearest surface on both sides of X, Y, and Z. Section contours return element-owned 2D paths, open and closed classification, mesh fidelity, truncation, and geometry revision. The host signal is linked to the optional call signal, so closing the extension cancels pending work.
 
 ### Local companion
 
@@ -151,6 +169,47 @@ ctx.feedback.publishFindings(summary, findings);
 
 Storage is JSON serializable and namespaced by extension ID. The installed profile limits values to 64 KB, 64 keys, and 256 KB total per extension.
 
+### Files and review issues
+
+File access always begins with a user choice and a declared contribution:
+
+```ts
+const opened = await ctx.files.open("my-extension.rules");
+const rules = JSON.parse(opened.text);
+
+ctx.files.export(
+  "my-extension.report",
+  "report.csv",
+  csv,
+  "text/csv",
+);
+```
+
+The importer controls accepted MIME types and extensions. The browser host
+returns the chosen file name, MIME type, and text. Bundled and installed
+extensions share a 240 KB import limit so the response remains inside the
+256 KB sandbox message budget. Exporters remain restricted to their
+declared MIME types.
+
+An extension with both `review.issue.create` and `viewport.capture` can create
+a BCF topic from a user-reviewed result:
+
+```ts
+const issue = await ctx.issues.create({
+  title: "Wall and pipe clash",
+  description: "Penetration: 64 mm",
+  elementIds: [wallId, pipeId],
+  point: [12.4, 3.1, -8.0],
+  priority: "Critical",
+  metadata: { reference: "CL-01ABCDEF" },
+});
+```
+
+The host owns isolation, section-box capture, selected-component GlobalIds,
+snapshot rendering, BCF storage, and issue-panel navigation. Installed RPC
+limits an issue to 200 element IDs, 4,000 description characters, 24 scalar
+metadata fields, and 16 KB total input.
+
 ### Commands and contributions
 
 Declare a command in `extension.json`, then attach its runtime handler:
@@ -185,7 +244,9 @@ The result view ID must be declared. Handles are owned by the creating extension
 
 - Storey Navigator is the small structure and view example.
 - Element Explorer is the property-index and export example.
-- Clash Detection is the geometry worker, cancellation, results, and export example.
+- Clash Detection is the saved workflow, geometry worker, revision identity, file exchange, result, and BCF issue example.
 - Smart Measure is the surface pick, axis laser, persistent measurement, and optional local fidelity example.
+- Section Workspace is the contour worker, synchronized 2D/3D selection, bounded result, and SVG export example.
+- Model Compare is the compact mesh-signature, revision classification, colorized result, and bounded baseline-memory example.
 
 These bundled examples import only `@ifcviewx/sdk` and use no renderer, service client, or Python escape hatch.

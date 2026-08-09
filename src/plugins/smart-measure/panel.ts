@@ -26,6 +26,8 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
   let laser: LaserResult | null = null;
   let armed = false;
   let running: "distance" | "laser" | null = null;
+  let workflow = ctx.storage.read<"gap" | "laser">("workflow", "gap");
+  if (workflow !== "gap" && workflow !== "laser") workflow = "gap";
   let controller: AbortController | null = null;
   let resultHandle = "";
   let generation = 0;
@@ -49,6 +51,16 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
     paint();
   };
 
+  const selectWorkflow = (next: "gap" | "laser"): void => {
+    workflow = next;
+    ctx.storage.write("workflow", workflow);
+    if (workflow !== "laser" && armed) {
+      armed = false;
+      ctx.view.pickGuide(false);
+    }
+    paint();
+  };
+
   const setSlot = (slot: "a" | "b"): void => {
     const selected = ctx.view.selection();
     const id = selected[selected.length - 1];
@@ -66,6 +78,8 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
   const runDistance = async (): Promise<void> => {
     if (!a || !b || a === b) return void ctx.feedback.toast("Set two different elements", "error");
     controller?.abort();
+    if (distance?.measurementId) ctx.view.removeMeasurement(distance.measurementId);
+    distance = null;
     const localGeneration = generation;
     const next = new AbortController();
     controller = next;
@@ -145,6 +159,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
     controller = next;
     running = "laser";
     armed = false;
+    ctx.view.pickGuide(false);
     paint();
     try {
       const result = await ctx.geometry.laser(pick.point, {
@@ -190,6 +205,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
       kept += 1;
     }
     clearLiveLaser();
+    laser = null;
     ctx.feedback.toast(`Kept ${kept} axis measurement${kept === 1 ? "" : "s"}`, "success");
     paint();
   };
@@ -267,63 +283,101 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
     pair.querySelectorAll("button")[0].addEventListener("click", () => setSlot("a"));
     pair.querySelectorAll("button")[1].addEventListener("click", () => setSlot("b"));
 
-    const distanceControls = bar(
-      button("Use 2 selected", setPairFromSelection),
-      button(precise ? "Local precise" : "Browser mesh", () => {
-        if (!preciseAvailable) return void ctx.feedback.toast("Connect Local Studio with the stored IFC source for a higher-precision IFC distance", "info");
-        precise = !precise;
-        ctx.storage.write("precise", precise);
-        paint();
-      }, precise ? "accent" : ""),
-      field("Clearance", number(thresholdMm, (value) => {
-        thresholdMm = Math.max(0, value);
-        ctx.storage.write("thresholdMm", thresholdMm);
-        paint();
-      }, 5)),
-      running === "distance" ? button("Stop", () => controller?.abort(), "warn") : button("Measure gap", () => void runDistance(), "accent"),
-    );
-
-    const pick = ctx.view.lastPick();
-    const laserControls = bar(
-      armed
-        ? button("Cancel pick", () => { armed = false; paint(); }, "warn")
-        : button("Pick surface", () => { armed = true; paint(); }, "accent"),
-      button("Use last pick", () => void runLaser()),
-      field("Range m", number(maxDistanceM, (value) => {
-        maxDistanceM = Math.max(0.1, value);
-        ctx.storage.write("maxDistanceM", maxDistanceM);
-      }, 1, 0.1)),
-      running === "laser" ? button("Stop", () => controller?.abort(), "warn") : "",
-    );
-    const axes = h("div", { class: "sm-axes" }, laser
-      ? laser.axes.map(axisRow)
-      : [h("div", { class: "sm-laser-empty", text: armed ? "Click the model where the laser should sit" : "No laser placed" })]);
-    const laserActions = laser ? bar(
-      button("Keep axes", keepLaser, "accent"),
-      button("Face surface", alignSurface),
-      button("Clear laser", () => { laser = null; clearLiveLaser(); paint(); }),
-    ) : h("span");
+    const switcher = h("div", { class: "seg sm-tool-switch", role: "tablist", "aria-label": "Smart measure workflow" }, [
+      h("button", { type: "button", role: "tab", text: "Clearance", "aria-selected": String(workflow === "gap") }),
+      h("button", { type: "button", role: "tab", text: "Axis scan", "aria-selected": String(workflow === "laser") }),
+    ]);
+    const workflowButtons = switcher.querySelectorAll<HTMLButtonElement>("button");
+    workflowButtons[0].addEventListener("click", () => selectWorkflow("gap"));
+    workflowButtons[1].addEventListener("click", () => selectWorkflow("laser"));
 
     root.append(
-      h("section", { class: "sm-instrument" }, [
-        h("header", {}, [h("span", { text: "01" }), h("div", {}, [h("h3", { text: "Object gap" }), h("p", { text: "Shortest surface-to-surface witness" })])]),
-        pair,
-        distanceResult,
-        distanceControls,
+      h("header", { class: "sm-head" }, [
+        h("div", {}, [h("h3", { text: "Smart measure" }), h("p", { text: "Check a pair or scan from one surface." })]),
+        h("span", { class: "sm-fidelity", text: precise ? "IFC" : "MESH" }),
       ]),
-      h("section", { class: `sm-instrument laser${armed ? " armed" : ""}` }, [
-        h("header", {}, [h("span", { text: "02" }), h("div", {}, [h("h3", { text: "Axis laser" }), h("p", { text: "Next visible surface in six directions" })])]),
-        laserControls,
+      switcher,
+    );
+
+    if (workflow === "gap") {
+      const runControl = running === "distance"
+        ? button("Stop", () => controller?.abort(), "warn")
+        : button("Measure clearance", () => void runDistance(), "accent");
+      runControl.disabled = !a || !b || a === b;
+      const options = h("details", { class: "sm-options" }, [
+        h("summary", {}, [h("span", { text: "Clearance settings" }), h("small", { text: `${thresholdMm} mm / ${precise ? "IFC" : "mesh"}` })]),
+        h("div", { class: "sm-options-body" }, [
+          field("Required clearance mm", number(thresholdMm, (value) => {
+            thresholdMm = Math.max(0, value);
+            ctx.storage.write("thresholdMm", thresholdMm);
+            paint();
+          }, 5)),
+          button(precise ? "Use browser mesh" : "Use local IFC", () => {
+            if (!preciseAvailable) return void ctx.feedback.toast("Connect Local Studio with the stored IFC source for a higher-precision IFC distance", "info");
+            precise = !precise;
+            ctx.storage.write("precise", precise);
+            paint();
+          }),
+        ]),
+      ]);
+      root.append(
+        h("section", { class: "sm-instrument sm-focused" }, [
+          h("div", { class: "sm-step" }, [h("b", { text: "1" }), h("span", { text: "Select two elements and place them in A and B." })]),
+          pair,
+          bar(button("Use selected pair", setPairFromSelection), runControl),
+          distanceResult,
+          options,
+        ]),
+        hint("info", distance?.measurementId
+          ? "The shortest witness is now a regular viewer measurement and stays with saved viewpoints."
+          : "The result uses retained browser geometry unless Local IFC precision is selected."),
+      );
+      return;
+    }
+
+    const pick = ctx.view.lastPick();
+    const pickControl = armed
+      ? button("Cancel pick", () => { armed = false; ctx.view.pickGuide(false); paint(); }, "warn")
+      : button("Pick scan origin", () => { armed = true; ctx.view.pickGuide(true); paint(); }, "accent");
+    const axes = h("div", { class: "sm-axes" }, laser
+      ? laser.axes.map(axisRow)
+      : [h("div", { class: "sm-laser-empty", text: armed ? "Click a visible face, edge or vertex in the model" : "Pick an origin to scan all six axis directions" })]);
+    const laserOptions = h("details", { class: "sm-options" }, [
+      h("summary", {}, [h("span", { text: "Scan range" }), h("small", { text: `${maxDistanceM} m` })]),
+      h("div", { class: "sm-options-body" }, [
+        field("Maximum distance m", number(maxDistanceM, (value) => {
+          maxDistanceM = Math.max(0.1, value);
+          ctx.storage.write("maxDistanceM", maxDistanceM);
+        }, 1, 0.1)),
+      ]),
+    ]);
+    root.append(
+      h("section", { class: `sm-instrument sm-focused${armed ? " armed" : ""}` }, [
+        h("div", { class: "sm-step" }, [h("b", { text: "1" }), h("span", { text: "Pick one origin. The scan finds the next surface on X, Y and Z." })]),
+        bar(
+          pickControl,
+          ...(pick && !armed ? [button("Scan last pick", () => void runLaser())] : []),
+          ...(running === "laser" ? [button("Stop", () => controller?.abort(), "warn")] : []),
+        ),
         h("div", { class: "sm-pick-line" }, [
           h("span", { class: `sm-pick-dot${pick ? " ready" : ""}` }),
-          h("span", { text: pick ? `Surface #${ctx.model.expressOf(pick.expressID)} at ${pick.point.map((value) => value.toFixed(2)).join(", ")}` : "Click a model surface to set the origin" }),
+          h("span", { text: pick ? `Origin #${ctx.model.expressOf(pick.expressID)} at ${pick.point.map((value) => value.toFixed(2)).join(", ")}` : "No scan origin yet" }),
         ]),
+        armed ? h("div", { class: "sm-snap-guide", "aria-label": "Available precision targets" }, [
+          h("span", { class: "vertex", text: "Vertex" }),
+          h("span", { class: "edge", text: "Edge" }),
+          h("span", { class: "face", text: "Face" }),
+          h("b", { text: "Hover, then click" }),
+        ]) : "",
         axes,
-        laserActions,
+        ...(laser ? [bar(
+          button("Keep measurements", keepLaser, "accent"),
+          button("Face surface", alignSurface),
+          button("Clear", () => { laser = null; clearLiveLaser(); paint(); }),
+        )] : []),
+        laserOptions,
       ]),
-      hint("info", preciseAvailable
-        ? "Browser mesh is the responsive default. A tighter native IFC tessellation is available through this trusted Local Studio session."
-        : "Runs fully in this tab on retained mesh geometry. Local precise distance is available when Local Studio holds the IFC source."),
+      hint("info", "Axis scan is useful for room spans, headroom and nearest-neighbour checks from one picked surface."),
     );
   };
 
@@ -343,6 +397,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
     laser = null;
     resultHandle = "";
     armed = false;
+    ctx.view.pickGuide(false);
     paint();
   });
   ctx.commands.register("smart-measure.open", () => paint());
@@ -352,6 +407,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
   return {
     dispose: () => {
       controller?.abort();
+      ctx.view.pickGuide(false);
       clearLiveLaser();
     },
   };

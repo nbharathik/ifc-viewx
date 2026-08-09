@@ -15,9 +15,27 @@ import { elementsOf } from "../sdk/data.js";
 import type { ModelElement } from "../sdk/types.js";
 import type { Viewer } from "../viewer-core/viewer.js";
 import { geometryService } from "../geometry/service.js";
+import { clashClassPair } from "./clash/workflow.js";
 
 export type { ClashKind, ClashPair, SweepProgress, SweepResult } from "./clash/types.js";
 export { CLASH_LIMIT } from "./clash/types.js";
+export {
+  clashClassPair,
+  clashFingerprint,
+  groupClashes,
+  resolvedClashes,
+  reviewClashes,
+} from "./clash/workflow.js";
+export type {
+  ClashCurrentState,
+  ClashDecision,
+  ClashElementIdentity,
+  ClashGroupMode,
+  ClashIgnoreRule,
+  ClashReviewGroup,
+  ClashReviewRow,
+  ClashReviewState,
+} from "./clash/workflow.js";
 
 export const STRUCTURE = ["IfcWall", "IfcWallStandardCase", "IfcSlab", "IfcBeam", "IfcColumn", "IfcFooting", "IfcRoof", "IfcMember", "IfcPlate"];
 export const MEP = ["IfcDuctSegment", "IfcDuctFitting", "IfcPipeSegment", "IfcPipeFitting", "IfcCableCarrierSegment", "IfcCableSegment", "IfcFlowTerminal", "IfcAirTerminal", "IfcSanitaryTerminal", "IfcValve", "IfcPump", "IfcTank", "IfcSpaceHeater", "IfcElectricAppliance"];
@@ -109,10 +127,29 @@ export async function clashReport(
   }
 
   const names = new Map(elements.map((element) => [element.id, element.name]));
+  const elementById = new Map(elements.map((element) => [element.id, element]));
   const result = await detectClashes(viewer, idsA, idsB, { toleranceMm, clearanceMm, signal });
   const hard = result.hits.filter((hit) => hit.kind === "hard");
   const near = result.hits.filter((hit) => hit.kind === "clearance");
-  const worst = result.hits.slice(0, 20);
+  const row = (hit: ClashPair): Record<string, unknown> => {
+    const elementA = elementById.get(hit.a);
+    const elementB = elementById.get(hit.b);
+    const level = elementA?.storey && elementB?.storey && elementA.storey !== elementB.storey
+      ? `${elementA.storey} / ${elementB.storey}`
+      : elementA?.storey || elementB?.storey || "No level";
+    return {
+      a: { id: hit.a, type: hit.aType, name: names.get(hit.a) ?? "", storey: elementA?.storey ?? "" },
+      b: { id: hit.b, type: hit.bType, name: names.get(hit.b) ?? "", storey: elementB?.storey ?? "" },
+      kind: hit.kind,
+      severity: hit.kind === "hard" && hit.distance * MM > 50 ? "critical" : hit.kind === "hard" ? "hard" : "clearance",
+      classPair: clashClassPair(hit.aType, hit.bType).replaceAll("Ifc", ""),
+      level,
+      primary: `${hit.aType.replace(/^Ifc/, "")} #${hit.a}`,
+      [hit.kind === "hard" ? "penetrationMm" : "gapMm"]: Math.round(hit.distance * MM),
+      at: hit.point.map((value) => Number(value.toFixed(3))),
+    };
+  };
+  const rows = result.hits.map(row);
 
   return {
     setA: a,
@@ -124,15 +161,11 @@ export async function clashReport(
     pairsTested: result.pairsTested,
     clashes: hard.length,
     clearanceFailures: near.length,
-    shown: worst.length,
-    truncated: result.truncated || worst.length < result.hits.length,
+    shown: Math.min(rows.length, 40),
+    truncated: result.truncated,
+    sweepTruncated: result.truncated,
     method: "triangle-level mesh intersection over the loaded geometry, accelerated by per-element BVHs",
-    worst: worst.map((hit) => ({
-      a: { id: hit.a, type: hit.aType, name: names.get(hit.a) ?? "" },
-      b: { id: hit.b, type: hit.bType, name: names.get(hit.b) ?? "" },
-      kind: hit.kind,
-      [hit.kind === "hard" ? "penetrationMm" : "gapMm"]: Math.round(hit.distance * MM),
-      at: hit.point.map((value) => Number(value.toFixed(3))),
-    })),
+    rows,
+    worst: rows.slice(0, 20),
   };
 }

@@ -13,7 +13,7 @@ A configured remote provider receives:
 - a compact `VIEWER_CONTEXT_V1` snapshot with the model summary, current
   selection, camera, sections, visibility state, active panel, and active
   result handle;
-- the most recent real viewport surface pick, when one exists;
+- the most recent real viewport pick, including its precise face, edge or vertex kind when one exists;
 - tool schemas and the bounded reports returned by tools;
 - a viewport image only when you press the camera button for that turn.
 
@@ -45,6 +45,13 @@ returned by `view.pickAt`. It casts to visible geometry on both sides of X, Y,
 and Z, creates reversible measurement spans, and returns one evidence row per
 axis hit.
 
+The `sectionContours` capability reuses the active X, Y, or Z cut, or creates
+one at the model midpoint. It synchronizes that plane with the 3D view and
+returns one compact row per intersected element with open and closed path
+counts. Raw 2D points stay in the browser drawing. Rows receive result handles
+and local evidence links, so a follow-up can group, select, or isolate them
+without rerunning the cut.
+
 ## Result handles
 
 Search, schedule, clash, check, and other row-oriented capabilities can return
@@ -55,6 +62,17 @@ a result handle. The assistant can then use:
 - `result.open` to make a result or row active;
 - `result.select` and `result.isolate` to act on referenced elements;
 - `issue.stage` in Edit mode to prepare a BCF issue payload for review.
+
+Bundled and installed SDK v2 extensions use the same bounded result store.
+When an extension such as Model Compare creates a result, that handle becomes
+the active viewer result and the same page, group, open and selection follow-ups
+work without rescanning the model.
+
+Clash rows include `severity`, `classPair`, `level`, `primary`, and `kind`, so
+the assistant can turn a large sweep into coordination groups before it opens,
+isolates, or stages selected rows as an issue. The full clash row set enters
+the bounded result store, while the initial answer still shows only the worst
+bounded page.
 
 The source analysis is not rerun for these steps. Reports keep at most 40 rows
 in conversation history, while the bounded local result store retains the full

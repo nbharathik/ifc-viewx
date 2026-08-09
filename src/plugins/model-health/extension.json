@@ -1,0 +1,38 @@
+{
+  "manifestVersion": 2,
+  "id": "model-health",
+  "name": "Model Health",
+  "version": "1.0.0",
+  "sdk": ">=2.0.0 <3",
+  "description": "Find identity, containment, geometry and property coverage problems before coordination starts.",
+  "runtime": {
+    "kind": "bundled",
+    "entry": "panel.ts"
+  },
+  "activationEvents": ["onPanel:model-health"],
+  "permissions": [
+    "model.structure.read",
+    "model.index.build",
+    "geometry.query",
+    "view.control"
+  ],
+  "contributes": {
+    "panels": [
+      { "id": "model-health", "title": "Model Health", "icon": "check" }
+    ]
+  },
+  "catalog": {
+    "tagline": "Catch model identity and geometry problems before review",
+    "about": "Runs a fast structural and bounds scan immediately, then reuses the shared property index for GlobalId and property coverage checks. Every finding is actionable in the viewport and the full audit is published to the activity report.",
+    "icon": "check",
+    "category": "Quality",
+    "keywords": "health audit quality globalid duplicate orphan bounds degenerate properties validation",
+    "does": [
+      "Duplicate and missing GlobalId checks",
+      "Elements without storey containment",
+      "Missing, invalid and degenerate geometry bounds",
+      "Property-set coverage across placed elements",
+      "Select and frame every affected group in the viewport"
+    ]
+  }
+}

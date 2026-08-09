@@ -30,8 +30,8 @@ function boxMesh(id: number, size: [number, number, number], at: [number, number
   };
 }
 
-function indexed(meshes: IfcMesh[]): GeometryIndex {
-  const index = new GeometryIndex();
+function indexed(meshes: IfcMesh[], bvhBudgetBytes?: number): GeometryIndex {
+  const index = new GeometryIndex({ bvhBudgetBytes });
   const store = new TriangleStore();
   store.connect({
     chunk: (chunk) => index.addChunk(chunk),
@@ -69,6 +69,7 @@ describe("three-axis laser", () => {
     expect(result.axes[2].negative?.distance).toBeCloseTo(1);
     expect(result.axes[2].positive?.distance).toBeCloseTo(7);
     expect(result.sourceNormal).not.toBeNull();
+    expect(result.sourceNormal?.[0]).toBeCloseTo(1);
     expect(result).toMatchObject({ source: 1, fidelity: "mesh", engine: "browser-ray", missing: 0 });
   });
 
@@ -89,6 +90,27 @@ describe("three-axis laser", () => {
     const hidden = await runLaser(index, { ...base, ids: new Float64Array() });
     expect(hidden.axes.every((axis) => !axis.negative && !axis.positive)).toBe(true);
     await expect(runLaser(index, base, { cancelled: () => true })).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("shares lazy mesh BVHs across instances and stays inside its memory budget", () => {
+    const first = boxMesh(1, [2, 2, 2], [-4, 0, 0]);
+    const second = boxMesh(2, [2, 2, 2], [4, 0, 0]);
+    second.geometryID = first.geometryID;
+    second.geometry = first.geometry;
+    const shared = indexed([first, second], 1024);
+    shared.bvhPlacements(1);
+    shared.bvhPlacements(2);
+    expect(shared.diagnostics()).toMatchObject({ bvhGeometries: 1, bvhTriangles: 12 });
+
+    const bounded = indexed([
+      boxMesh(1, [2, 2, 2], [-4, 0, 0]),
+      boxMesh(2, [2, 2, 2], [4, 0, 0]),
+    ], 1024);
+    bounded.bvhPlacements(1);
+    bounded.bvhPlacements(2);
+    expect(bounded.diagnostics()).toMatchObject({ bvhBudgetBytes: 1024, bvhGeometries: 1, bvhBytes: 768 });
+    bounded.clear();
+    expect(bounded.diagnostics()).toMatchObject({ bvhGeometries: 0, bvhBytes: 0, bvhTriangles: 0 });
   });
 
   it("returns typed axis rows and puts reversible witness spans in the viewer", async () => {

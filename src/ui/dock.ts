@@ -5,11 +5,18 @@
 // anywhere else.
 import { attachPopover, busyRow, h, icon, iconButton, toast } from "./kit.js";
 import { applyColors, colorableKeys, computeColors, cssColor, type ColorResult, type ColorRule } from "./colorBy.js";
-import { formatAngle, formatArea, formatLength } from "../viewer-core/viewer.js";
+import { formatLength } from "../viewer-core/viewer.js";
 import type { PropertyIndex } from "../sdk/data.js";
 import type {
-  CameraPose, LazyCategory, MeasurementState, MeasureMode, SectionBox, SectionState, SnapMode, Viewer, ViewPreset,
+  CameraPose, LazyCategory, MeasureConstraint, MeasurementFormat, MeasurementObject, MeasurementState,
+  MeasureMode, SectionBox, SectionState, SnapMode, Viewer, ViewPreset,
 } from "../viewer-core/viewer.js";
+import {
+  measurementTypeLabel,
+  measurementValue,
+  measurementsFromCsv,
+  measurementsToCsv,
+} from "./measurementLedger.js";
 
 interface Viewpoint {
   name: string;
@@ -41,21 +48,49 @@ const SNAPS: Array<[SnapMode, string, string]> = [
 ];
 const MODES: Array<[MeasureMode, string, string]> = [
   ["distance", "Length", "Two points"],
+  ["path", "Path", "Chained segments with a running total"],
   ["angle", "Angle", "Three points: arm, corner, arm"],
   ["area", "Area", "Click a ring of points, then close it"],
+  ["coordinate", "Point", "Place a persistent XYZ coordinate"],
 ];
-/** What each end of the span caught, for the line under the number. */
-const ENDS: Record<string, string> = {
-  vertex: "corner",
-  midpoint: "midpoint",
-  edge: "edge",
-  surface: "surface",
-};
-
+const CONSTRAINTS: Array<[MeasureConstraint, string, string]> = [
+  ["free", "Free", "No axis constraint (0)"],
+  ["x", "X", "Lock to world X (X)"],
+  ["y", "Y", "Lock to world Y (Y)"],
+  ["z", "Z", "Lock to world Z (Z)"],
+  ["perpendicular", "⊥", "Lock perpendicular to the picked start surface (P)"],
+  ["parallel", "∥", "Lock parallel to the picked start surface (L)"],
+];
+const UNIT_PRESETS: Array<[string, string, MeasurementFormat]> = [
+  ["auto", "Auto", { unit: "auto", precision: { mode: "decimals", value: 2 }, zeroSuppression: 0 }],
+  ["mm", "Millimetres", { unit: "millimetres", precision: { mode: "decimals", value: 0 }, zeroSuppression: 8 }],
+  ["cm", "Centimetres", { unit: "centimetres", precision: { mode: "decimals", value: 1 }, zeroSuppression: 8 }],
+  ["m", "Metres", { unit: "metres", precision: { mode: "decimals", value: 3 }, zeroSuppression: 8 }],
+  ["ft", "Decimal feet", { unit: "decimal-feet", precision: { mode: "decimals", value: 3 }, zeroSuppression: 8 }],
+  ["in", "Decimal inches", { unit: "decimal-inches", precision: { mode: "decimals", value: 2 }, zeroSuppression: 8 }],
+  ["eng", "Engineering", { unit: "engineering", precision: { mode: "decimals", value: 2 }, zeroSuppression: 1 }],
+  ["arch", "Architectural", { unit: "architectural", precision: { mode: "denominator", value: 16 }, zeroSuppression: 0 }],
+];
+const MEASURE_FORMAT_KEY = "ifcviewx.measure.format.v1";
 /** Viewpoints are keyed by model shape so they follow the model, not the tab. */
 export function viewpointKey(viewer: Viewer): string | null {
   const stats = viewer.getStats();
   return stats ? `ifcviewx.vp.${stats.totalEntities}-${stats.triangleCount}` : null;
+}
+
+/** First-class measurements live with the model shape, independently of viewpoints. */
+export function measurementKey(viewer: Viewer): string | null {
+  const stats = viewer.getStats();
+  return stats ? `ifcviewx.measure.${stats.totalEntities}-${stats.triangleCount}` : null;
+}
+
+export function readMeasurements(key: string): MeasurementState[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) ?? "[]") as unknown;
+    return Array.isArray(parsed) ? parsed as MeasurementState[] : [];
+  } catch {
+    return [];
+  }
 }
 
 /** Named element sets, keyed by model shape the same way viewpoints are. */
@@ -125,9 +160,21 @@ export class Dock {
   private readonly measureSplit = h("div", { class: "mc-split" });
   private readonly measureList = h("div", { class: "mc-list hidden" });
   private readonly measureHint = h("div", { class: "mc-hint" });
-  /** What the list currently shows; rows rebuild only when this changes. */
-  private measureSig = "";
+  /** Hover emits at frame rate; the ledger only rereads objects on a real revision. */
+  private renderedMeasureRevision = -1;
+  private renderedMeasureFormat = "";
   private readonly closeRing = h("button", { class: "btn sm grow hidden", type: "button", text: "Close ring" });
+  private readonly finishPath = h("button", { class: "btn sm grow hidden", type: "button", text: "Finish path" });
+  private readonly measureUnit = h("select", { class: "mc-unit", "aria-label": "Measurement units" });
+  private readonly measureSearch = h("input", {
+    class: "mc-filter", type: "search", placeholder: "Filter measurements", "aria-label": "Filter measurements",
+  }) as HTMLInputElement;
+  private readonly measureSort = h("select", { class: "mc-sort", "aria-label": "Sort measurements" }) as HTMLSelectElement;
+  private readonly measureImport = h("input", { class: "hidden", type: "file", accept: ".csv,text/csv" });
+  private readonly measureCount = h("span", { class: "mc-count", text: "0" });
+  private measureVisibility!: HTMLButtonElement;
+  private persistedMeasureRevision = -1;
+  private restoringMeasurements = false;
   private readonly colorBtn: HTMLButtonElement;
   private colorRule: ColorRule = { kind: "none" };
   private colorResult: ColorResult | null = null;
@@ -140,8 +187,7 @@ export class Dock {
   constructor(host: HTMLElement, private readonly viewer: Viewer) {
     this.root = h("div", { id: "dock", role: "toolbar", "aria-label": "Viewport tools" });
 
-    this.tool("frame", "Frame model  F", () => viewer.fitToModel());
-    this.popTool("cube", "Camera views", (pop, close) => this.buildViews(pop, close));
+    this.popTool("frame", "Camera and framing", (pop, close) => this.buildViews(pop, close));
 
     this.sep();
     // One click starts measuring; the card is the options panel and the
@@ -158,14 +204,18 @@ export class Dock {
     this.popTool("layers", "Models", (pop, close) => this.buildModels(pop, close));
     this.popTool("focus", "Selection sets", (pop) => this.buildSelectionSets(pop));
     this.popTool("bookmark", "Saved viewpoints", (pop) => this.buildViewpoints(pop));
-    this.tool("camera", "Screenshot  S", () => viewer.screenshot());
 
+    this.restoreMeasurementFormat();
     this.measureCard = this.buildMeasureCard();
     host.append(this.root, this.measureCard);
     // Dragging a handle in the viewport moves the same value the popover
     // shows, so keep any open slider honest.
     viewer.onSectionChange(() => this.syncSectionInputs());
-    viewer.onMeasureChange(() => this.syncMeasure());
+    viewer.onMeasureChange(() => {
+      this.persistMeasurements();
+      this.syncMeasure();
+    });
+    viewer.onModelLoaded(() => this.restoreMeasurements());
     this.sync();
   }
 
@@ -217,6 +267,75 @@ export class Dock {
    * click into the viewport, which is exactly when the tool starts being used.
    * It only exists while measuring, so nothing sits over the model otherwise.
    */
+  private restoreMeasurementFormat(): void {
+    try {
+      const stored = JSON.parse(localStorage.getItem(MEASURE_FORMAT_KEY) ?? "null") as MeasurementFormat | null;
+      const preset = stored && UNIT_PRESETS.find(([, , value]) => value.unit === stored.unit)?.[2];
+      if (preset) this.viewer.setMeasurementFormat(preset);
+    } catch { /* invalid preferences return to Auto */ }
+  }
+
+  private persistMeasurements(): void {
+    if (this.restoringMeasurements) return;
+    const key = measurementKey(this.viewer);
+    if (!key) return;
+    const revision = this.viewer.getMeasurementRevision();
+    if (revision === this.persistedMeasureRevision) return;
+    try {
+      localStorage.setItem(key, JSON.stringify(this.viewer.getMeasurementStates()));
+      this.persistedMeasureRevision = revision;
+    } catch {
+      // A storage quota should never interrupt measuring; CSV remains available.
+    }
+  }
+
+  private restoreMeasurements(): void {
+    const key = measurementKey(this.viewer);
+    if (!key) return;
+    const states = readMeasurements(key);
+    this.restoringMeasurements = true;
+    if (states.length) this.viewer.setMeasurementStates(states);
+    this.restoringMeasurements = false;
+    this.persistedMeasureRevision = this.viewer.getMeasurementRevision();
+    this.syncMeasure();
+  }
+
+  private formatLength(value: number): string {
+    return formatLength(value, this.viewer.getMeasurementFormat());
+  }
+
+  private copyMeasurement(item: MeasurementObject): void {
+    const text = `${item.label}: ${measurementValue(item, this.viewer.getMeasurementFormat())}`;
+    const fallback = (): void => {
+      const input = h("textarea", { "aria-hidden": "true" });
+      input.value = text;
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand("copy");
+      input.remove();
+      toast("Measurement copied", "success");
+    };
+    if (!navigator.clipboard?.writeText) return fallback();
+    void navigator.clipboard.writeText(text).then(
+      () => toast("Measurement copied", "success"),
+      fallback,
+    );
+  }
+
+  private exportMeasurements(): void {
+    const items = this.listedMeasurements();
+    if (!items.length) return void toast("There are no matching measurements to export", "info");
+    const blob = new Blob([measurementsToCsv(items, this.viewer.getMeasurementFormat())], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = h("a", { href: url, download: "ifc-measurements.csv" });
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
   private buildMeasureCard(): HTMLElement {
     const snaps = h("div", { class: "seg mc-snap" });
     for (const [mode, label, hint] of SNAPS) {
@@ -237,29 +356,116 @@ export class Dock {
       modes.appendChild(button);
     }
 
+    const constraints = h("div", { class: "mc-constraints", role: "group", "aria-label": "Axis constraint" });
+    for (const [constraint, label, title] of CONSTRAINTS) {
+      const button = h("button", {
+        class: constraint === "free" ? "free" : `axis-${constraint}`,
+        type: "button",
+        text: label,
+        title,
+        "data-constraint": constraint,
+      });
+      button.addEventListener("click", () => this.viewer.setMeasureConstraint(constraint));
+      constraints.appendChild(button);
+    }
+
+    const activeFormat = this.viewer.getMeasurementFormat();
+    for (const [id, label] of UNIT_PRESETS) this.measureUnit.appendChild(h("option", { value: id, text: label }));
+    this.measureUnit.value = UNIT_PRESETS.find(([, , format]) => format.unit === activeFormat.unit)?.[0] ?? "auto";
+    this.measureUnit.addEventListener("change", () => {
+      const format = UNIT_PRESETS.find(([id]) => id === this.measureUnit.value)?.[2];
+      if (!format) return;
+      this.viewer.setMeasurementFormat(format);
+      localStorage.setItem(MEASURE_FORMAT_KEY, JSON.stringify(format));
+      this.renderedMeasureRevision = -1;
+      this.syncMeasure();
+    });
+
     const reset = h("button", { class: "btn sm grow", type: "button", text: "Clear all" });
     reset.addEventListener("click", () => this.viewer.resetMeasure());
     this.closeRing.addEventListener("click", () => {
       if (!this.viewer.closeArea()) toast("Place at least three points first", "info");
+    });
+    this.finishPath.addEventListener("click", () => {
+      if (!this.viewer.finishPath()) toast("Place at least two points first", "info");
     });
     const done = iconButton("x", "Close measure  Esc", () => {
       this.viewer.setMeasuring(false);
       this.sync();
     }, "icon-btn sm");
 
+    this.measureVisibility = iconButton("eye", "Hide all measurements", () => {
+      const items = this.listedMeasurements();
+      const visible = items.some((item) => item.visible);
+      this.viewer.setMeasurementsVisible(items.map((item) => item.id), !visible);
+    }, "icon-btn sm");
+    this.measureSearch.addEventListener("input", () => {
+      this.renderedMeasureRevision = -1;
+      this.syncMeasureLedger();
+    });
+    for (const [value, label] of [["created", "Created"], ["label", "Label"], ["type", "Type"], ["value", "Value"]]) {
+      this.measureSort.appendChild(h("option", { value, text: label }));
+    }
+    this.measureSort.addEventListener("change", () => {
+      this.renderedMeasureRevision = -1;
+      this.syncMeasureLedger();
+    });
+    const importButton = iconButton("upload", "Import measurement CSV", () => this.measureImport.click(), "icon-btn sm");
+    const exportButton = iconButton("download", "Export measurement CSV", () => this.exportMeasurements(), "icon-btn sm");
+    this.measureImport.addEventListener("change", () => {
+      const file = this.measureImport.files?.[0];
+      this.measureImport.value = "";
+      if (!file) return;
+      void file.text().then((text) => {
+        const imported = measurementsFromCsv(text);
+        if (!imported.length) throw new Error("No valid measurements were found");
+        this.viewer.setMeasurementStates([...this.viewer.getMeasurementStates(), ...imported]);
+        toast(`Imported ${imported.length} measurement${imported.length === 1 ? "" : "s"}`, "success");
+      }).catch((error: unknown) => toast(error instanceof Error ? error.message : "Could not import measurements", "error"));
+    });
+
+    const precision = h("details", { class: "mc-disclosure" }, [
+      h("summary", {}, [h("span", { text: "Precision and units" }), h("span", { class: "mc-summary-note", text: "Auto snap" })]),
+      h("div", { class: "mc-disclosure-body" }, [
+        h("div", { class: "mc-settings" }, [
+          h("label", {}, [h("span", { class: "mc-key", text: "Snap" }), snaps]),
+          h("label", {}, [h("span", { class: "mc-key", text: "Units" }), this.measureUnit]),
+        ]),
+      ]),
+    ]);
+    const ledger = h("details", { class: "mc-disclosure mc-ledger" }, [
+      h("summary", {}, [h("span", { text: "Saved measurements" }), h("span", { class: "mc-summary-note", text: "Manage" })]),
+      h("div", { class: "mc-disclosure-body" }, [
+        h("div", { class: "mc-ledger-tools" }, [
+          this.measureSearch,
+          this.measureSort,
+          this.measureVisibility,
+          importButton,
+          exportButton,
+        ]),
+        this.measureList,
+        h("div", { class: "mc-row mc-ledger-actions" }, [reset]),
+      ]),
+    ]);
+
     return h("div", { id: "measure-card", class: "hidden" }, [
       h("div", { class: "mc-head" }, [
         icon("ruler", 12),
         h("span", { class: "grow", text: "Measure" }),
+        this.measureCount,
         done,
       ]),
-      h("div", { class: "mc-row" }, [h("span", { class: "mc-key", text: "Mode" }), modes]),
-      this.measureValue,
-      this.measureSplit,
-      this.measureList,
-      h("div", { class: "mc-row" }, [h("span", { class: "mc-key", text: "Snap" }), snaps]),
-      h("div", { class: "mc-row" }, [this.closeRing, reset]),
+      modes,
+      h("div", { class: "mc-readout" }, [this.measureValue, this.measureSplit]),
       this.measureHint,
+      h("div", { class: "mc-constraint-row" }, [
+        h("span", { class: "mc-key", text: "Constraint" }),
+        constraints,
+      ]),
+      h("div", { class: "mc-row mc-finish" }, [this.closeRing, this.finishPath]),
+      precision,
+      ledger,
+      this.measureImport,
     ]);
   }
 
@@ -272,54 +478,78 @@ export class Dock {
     SNAPS.forEach(([value], index) =>
       buttons[index]?.setAttribute("aria-pressed", String(value === snap)),
     );
-    const shape = this.viewer.getMeasureMode();
+    const mode = this.viewer.getMeasureMode();
     const modeButtons = this.measureCard.querySelectorAll<HTMLButtonElement>(".mc-mode button");
     MODES.forEach(([value], index) =>
-      modeButtons[index]?.setAttribute("aria-pressed", String(value === shape)),
+      modeButtons[index]?.setAttribute("aria-pressed", String(value === mode)),
     );
-    this.closeRing.classList.toggle("hidden", shape !== "area");
+    const constraint = this.viewer.getMeasureConstraint();
+    for (const button of this.measureCard.querySelectorAll<HTMLButtonElement>("[data-constraint]")) {
+      button.setAttribute("aria-pressed", String(button.dataset.constraint === constraint));
+    }
+    this.closeRing.classList.toggle("hidden", mode !== "area");
+    this.finishPath.classList.toggle("hidden", mode !== "path");
+    this.finishPath.disabled = this.viewer.getPendingPoints().length < 2;
+    this.syncMeasureLedger();
 
-    if (shape === "distance") return this.syncDistance();
-    this.syncShape(shape);
+    if (mode === "distance") return this.syncDistance();
+    this.syncShape(mode);
   }
 
   private syncDistance(): void {
     const found = this.viewer.getMeasurement();
-    this.measureValue.textContent = found && found.distance > 0 ? formatLength(found.distance) : "-";
+    this.measureValue.textContent = found && found.distance > 0 ? this.formatLength(found.distance) : "-";
     this.measureValue.classList.toggle("live", !found?.complete);
     this.measureSplit.textContent =
       found && found.distance > 0
-        ? `${formatLength(found.horizontal)} across · ${formatLength(found.vertical)} up`
+        ? `${this.formatLength(found.horizontal)} across · ${this.formatLength(found.vertical)} up · ${
+          found.slopePercent === null ? "vertical" : `${found.slopePercent.toFixed(1)}% slope`
+        }`
         : "";
 
     const spans = this.viewer.getMeasurements();
-    this.syncMeasureList(spans);
     const pending = found !== null && !found.complete;
     this.measureHint.textContent = pending
       ? "Release or click on the second point"
       : spans.length
-        ? `${ENDS[found!.ends[0]]} to ${ENDS[found!.ends[1] ?? "surface"]} · click starts the next one`
-        : "Click or drag from the first point · right-drag orbits";
+        ? `${measurementTypeLabel(found!)} · click starts the next one`
+        : "Click or drag from the first point · X/Y/Z axis · P/L surface";
   }
 
-  /** Angle and area read the finished shapes, and say what the ring still needs. */
-  private syncShape(mode: "angle" | "area"): void {
+  /** Shape tools read their finished object and say exactly what the next click does. */
+  private syncShape(mode: Exclude<MeasureMode, "distance">): void {
     const shapes = this.viewer.getShapeMeasures().filter((entry) => entry.kind === mode);
     const pending = this.viewer.getPendingPoints();
     const last = shapes[shapes.length - 1];
 
-    if (last && pending.length === 0) {
-      this.measureValue.textContent =
-        last.kind === "angle" ? formatAngle(last.angle ?? 0) : formatArea(last.area ?? 0);
+    if (mode === "path" && pending.length) {
+      let total = 0;
+      for (let index = 1; index < pending.length; index++) {
+        total += Math.hypot(
+          pending[index][0] - pending[index - 1][0],
+          pending[index][1] - pending[index - 1][1],
+          pending[index][2] - pending[index - 1][2],
+        );
+      }
+      this.measureValue.textContent = this.formatLength(total);
+      this.measureValue.classList.add("live");
+      this.measureSplit.textContent = `${pending.length - 1} segment${pending.length === 2 ? "" : "s"} · running total`;
+    } else if (last && pending.length === 0) {
+      this.measureValue.textContent = measurementValue(last, this.viewer.getMeasurementFormat());
       this.measureValue.classList.remove("live");
-      this.measureSplit.textContent = `perimeter ${formatLength(last.perimeter)}`;
+      this.measureSplit.textContent = last.kind === "area"
+        ? `perimeter ${this.formatLength(last.perimeter)}`
+        : last.kind === "angle"
+          ? `arms ${this.formatLength(last.perimeter)}`
+          : last.kind === "path"
+            ? `${Math.max(0, last.points.length - 1)} segments`
+            : "persistent model coordinate";
     } else {
       this.measureValue.textContent = pending.length ? `${pending.length} point(s)` : "-";
       this.measureValue.classList.toggle("live", pending.length > 0);
       this.measureSplit.textContent = "";
     }
 
-    this.syncShapeList(shapes);
     if (mode === "angle") {
       this.measureHint.textContent =
         pending.length === 0
@@ -327,6 +557,16 @@ export class Dock {
           : pending.length === 1
             ? "Click the corner the angle is measured at"
             : "Click the far end of the second arm";
+      return;
+    }
+    if (mode === "path") {
+      this.measureHint.textContent = pending.length < 2
+        ? "Click at least two points · Enter finishes · X/Y/Z/P/L constrains"
+        : "Continue the chain, or press Enter / Finish path";
+      return;
+    }
+    if (mode === "coordinate") {
+      this.measureHint.textContent = "Click any vertex, edge or face to keep its XYZ coordinate";
       return;
     }
     this.measureHint.textContent =
@@ -337,55 +577,93 @@ export class Dock {
           : "Click the first point again, or Close ring";
   }
 
-  private syncShapeList(shapes: ReturnType<Viewer["getShapeMeasures"]>): void {
-    const sig = shapes.map((shape) => `${shape.id}:${(shape.area ?? shape.angle ?? 0).toFixed(4)}`).join("|");
-    if (sig === this.measureSig) return;
-    this.measureSig = sig;
-    this.measureList.classList.toggle("hidden", shapes.length === 0);
-    this.measureList.replaceChildren(
-      ...shapes.map((shape, index) =>
-        h("div", { class: "mc-mrow" }, [
-          h("span", { class: "idx", text: String(index + 1) }),
-          h("span", {
-            class: "d",
-            text: shape.kind === "angle" ? formatAngle(shape.angle ?? 0) : formatArea(shape.area ?? 0),
-          }),
-          h("span", { class: "grow ends", text: `${shape.points.length} points` }),
-          iconButton("x", "Remove this measurement", () => this.viewer.removeShapeMeasure(shape.id), "icon-btn sm"),
-        ]),
-      ),
-    );
+  private beginMeasurementRename(button: HTMLButtonElement, item: MeasurementObject): void {
+    const input = h("input", { class: "mc-rename", type: "text", value: item.label, maxlength: 80 });
+    const commit = (): void => {
+      if (!input.isConnected) return;
+      this.viewer.updateMeasurement(item.id, { label: input.value });
+      this.renderedMeasureRevision = -1;
+      this.syncMeasureLedger();
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") commit();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.renderedMeasureRevision = -1;
+        this.syncMeasureLedger();
+      }
+    });
+    input.addEventListener("blur", commit, { once: true });
+    button.replaceWith(input);
+    input.focus();
+    input.select();
   }
 
-  /** One row per placed span; rebuilt only when the spans actually change. */
-  private syncMeasureList(spans: ReturnType<Viewer["getMeasurements"]>): void {
-    const sig = spans.map((span) => `${span.id}:${span.distance.toFixed(4)}`).join("|");
-    if (sig === this.measureSig) return;
-    this.measureSig = sig;
-    this.measureList.classList.toggle("hidden", spans.length === 0);
-    this.measureList.replaceChildren(
-      ...spans.map((span, index) =>
-        h("div", { class: "mc-mrow" }, [
-          h("span", { class: "idx", text: String(index + 1) }),
-          h("span", { class: "d", text: formatLength(span.distance) }),
-          h("span", {
-            class: "grow ends",
-            text: `${ENDS[span.ends[0]]} to ${ENDS[span.ends[1] ?? "surface"]}`,
-          }),
-          iconButton("x", "Remove this measurement", () => this.viewer.removeMeasurement(span.id), "icon-btn sm"),
-        ]),
-      ),
-    );
-    if (spans.length > 1) {
-      const total = spans.reduce((sum, span) => sum + span.distance, 0);
-      this.measureList.appendChild(
-        h("div", { class: "mc-mrow total" }, [
-          h("span", { class: "idx" }),
-          h("span", { class: "d", text: formatLength(total) }),
-          h("span", { class: "grow ends", text: "total" }),
-        ]),
-      );
+  /** A mixed, persistent ledger; rebuilt only when objects or formatting change. */
+  private listedMeasurements(): MeasurementObject[] {
+    const format = this.viewer.getMeasurementFormat();
+    const query = this.measureSearch.value.trim().toLocaleLowerCase();
+    const items = this.viewer.getMeasurementObjects().filter((item) => {
+      if (!query) return true;
+      return `${item.label} ${measurementTypeLabel(item)} ${measurementValue(item, format)}`
+        .toLocaleLowerCase()
+        .includes(query);
+    });
+    const sort = this.measureSort.value;
+    if (sort === "label") items.sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
+    if (sort === "type") items.sort((a, b) => measurementTypeLabel(a).localeCompare(measurementTypeLabel(b)) || a.id - b.id);
+    if (sort === "value") {
+      items.sort((a, b) => measurementValue(a, format).localeCompare(measurementValue(b, format), undefined, { numeric: true }));
     }
+    return items;
+  }
+
+  private syncMeasureLedger(): void {
+    const format = this.viewer.getMeasurementFormat();
+    const revision = this.viewer.getMeasurementRevision();
+    const formatSig = `${format.unit}:${format.precision.mode}:${format.precision.value}:${format.zeroSuppression}`;
+    if (revision === this.renderedMeasureRevision && formatSig === this.renderedMeasureFormat) return;
+    this.renderedMeasureRevision = revision;
+    this.renderedMeasureFormat = formatSig;
+    const total = this.viewer.getMeasurementObjects().length;
+    const items = this.listedMeasurements();
+    this.measureCount.textContent = items.length === total ? String(total) : `${items.length}/${total}`;
+    const anyVisible = items.some((item) => item.visible);
+    this.measureVisibility.setAttribute("aria-pressed", String(anyVisible));
+    this.measureVisibility.title = anyVisible ? "Hide all measurements" : "Show all measurements";
+    if (!items.length) {
+      const text = total ? "No measurements match this filter." : "Placed measurements will stay with this model.";
+      this.measureList.replaceChildren(h("div", { class: "mc-empty", text }));
+      return;
+    }
+    const rows = items.map((item, index) => {
+      const name = h("button", { class: "mc-label", type: "button", text: item.label, title: "Rename measurement" });
+      name.addEventListener("click", () => this.beginMeasurementRename(name, item));
+      const visibility = iconButton(
+        item.visible ? "eye" : "eye-off",
+        item.visible ? "Hide measurement" : "Show measurement",
+        () => this.viewer.updateMeasurement(item.id, { visible: !item.visible }),
+        "icon-btn sm",
+      );
+      const value = measurementValue(item, format);
+      const row = h("div", { class: `mc-mrow${item.visible ? "" : " is-hidden"}`, "data-measure-id": item.id }, [
+        h("span", { class: "idx", text: String(index + 1) }),
+        visibility,
+        h("div", { class: "mc-record grow" }, [
+          name,
+          h("span", { class: "ends", text: measurementTypeLabel(item) }),
+        ]),
+        h("span", { class: "d", text: value, title: value }),
+        iconButton("copy", "Copy value", () => this.copyMeasurement(item), "icon-btn sm mc-copy"),
+        iconButton("x", "Remove measurement", () => this.viewer.removeMeasurementObject(item.id), "icon-btn sm"),
+      ]);
+      row.addEventListener("dblclick", (event) => {
+        if ((event.target as Element).closest("button,input")) return;
+        this.viewer.focusMeasurement(item.id);
+      });
+      return row;
+    });
+    this.measureList.replaceChildren(...rows);
   }
 
   // -- popovers --------------------------------------------------------------
@@ -438,7 +716,25 @@ export class Dock {
       this.sync();
     };
 
-    pop.append(h("div", { class: "pop-title", text: "Section planes" }));
+    pop.classList.add("section-pop");
+    const planePanel = h("div", { class: "section-panel" });
+    const boxPanel = h("div", { class: "section-panel" });
+    const mode = h("div", { class: "seg section-mode", role: "tablist", "aria-label": "Section mode" }, [
+      h("button", { type: "button", role: "tab", text: "Planes" }),
+      h("button", { type: "button", role: "tab", text: "Box" }),
+    ]);
+    const modeButtons = mode.querySelectorAll<HTMLButtonElement>("button");
+    const setMode = (next: "planes" | "box"): void => {
+      const boxOn = next === "box";
+      planePanel.classList.toggle("hidden", boxOn);
+      boxPanel.classList.toggle("hidden", !boxOn);
+      modeButtons[0].setAttribute("aria-selected", String(!boxOn));
+      modeButtons[1].setAttribute("aria-selected", String(boxOn));
+    };
+    modeButtons[0].addEventListener("click", () => setMode("planes"));
+    modeButtons[1].addEventListener("click", () => setMode("box"));
+    pop.append(h("div", { class: "pop-title", text: "Section" }), mode, planePanel, boxPanel);
+
     for (const axis of AXES) {
       const index = AXES.indexOf(axis);
       const [min, max] = [bounds.min[index], bounds.max[index]];
@@ -491,7 +787,7 @@ export class Dock {
           apply();
         }
       });
-      pop.appendChild(h("div", { class: "pop-row" }, [toggle, slider, flip]));
+      planePanel.appendChild(h("div", { class: "pop-row section-plane-row" }, [toggle, slider, flip]));
     }
 
     const plan = h("button", {
@@ -526,8 +822,9 @@ export class Dock {
       }
       this.sync();
     });
-    pop.appendChild(h("div", { class: "pop-row" }, [plan, off]));
-    this.buildSectionBox(pop, bounds);
+    planePanel.appendChild(h("div", { class: "pop-row section-actions" }, [plan, off]));
+    this.buildSectionBox(boxPanel, bounds);
+    setMode(this.viewer.getSectionBox() ? "box" : "planes");
   }
 
   /**
@@ -540,22 +837,33 @@ export class Dock {
     const model = this.viewer.getModelBox();
     let box = this.viewer.getSectionBox() ?? model;
     const rows: HTMLInputElement[] = [];
+    const values: HTMLElement[] = [];
+    const status = h("span", { class: "section-box-status" });
 
     const apply = (): void => {
       this.viewer.setSectionBox(box);
       this.sync();
+      status.textContent = "Active";
+      status.classList.add("active");
     };
     const paint = (): void => {
       rows.forEach((slider, i) => {
-        slider.value = String(i % 2 === 0 ? box.min[i >> 1] : box.max[i >> 1]);
+        const value = i % 2 === 0 ? box.min[i >> 1] : box.max[i >> 1];
+        slider.value = String(value);
+        if (values[i]) values[i].textContent = value.toFixed(2);
       });
     };
 
-    pop.append(h("div", { class: "pop-title", text: "Section box" }));
+    status.textContent = this.viewer.getSectionBox() ? "Active" : "Not active";
+    status.classList.toggle("active", Boolean(this.viewer.getSectionBox()));
+    pop.append(h("div", { class: "section-box-head" }, [
+      h("div", {}, [h("b", { text: "Section box" }), h("small", { text: "Trim the model from six sides" })]),
+      status,
+    ]));
     for (const axis of AXES) {
       const index = AXES.indexOf(axis);
       const [low, high] = [bounds.min[index], bounds.max[index]];
-      const pair: HTMLInputElement[] = [];
+      const pair: HTMLElement[] = [];
       for (const end of ["min", "max"] as const) {
         const slider = h("input", {
           type: "range",
@@ -568,32 +876,49 @@ export class Dock {
         slider.addEventListener("input", () => {
           box = { min: [...box.min], max: [...box.max] };
           box[end][index] = Number(slider.value);
+          const other = end === "min" ? box.max[index] : box.min[index];
+          box[end][index] = end === "min" ? Math.min(box[end][index], other) : Math.max(box[end][index], other);
+          slider.value = String(box[end][index]);
+          value.textContent = box[end][index].toFixed(2);
           apply();
         });
+        const value = h("span", { class: "section-box-value", text: box[end][index].toFixed(2) });
         pair.push(slider);
         rows.push(slider);
+        values.push(value);
+        pair.push(value);
       }
-      pop.appendChild(
-        h("div", { class: "pop-row" }, [h("span", { class: "axis-tag", text: axis.toUpperCase() }), ...pair]),
-      );
+      pop.appendChild(h("div", { class: `section-box-row axis-${axis}` }, [
+        h("span", { class: "axis-tag", text: axis.toUpperCase() }),
+        h("label", {}, [h("small", { text: "Min" }), pair[0], pair[1]]),
+        h("label", {}, [h("small", { text: "Max" }), pair[2], pair[3]]),
+      ]));
     }
 
-    const around = h("button", { class: "btn grow", type: "button", text: "Box selection" });
+    const around = h("button", { class: "btn primary grow", type: "button", text: "Fit to selection" });
     around.addEventListener("click", () => {
-      const fitted = this.viewer.boxAround(this.viewer.getSelectedIds());
+      const fitted = this.viewer.boxAround(this.viewer.getSelectedIds(), 0.08);
       if (!fitted) return toast("Select something first", "info");
       box = fitted;
       paint();
       apply();
     });
-    const clear = h("button", { class: "btn", type: "button", text: "No box" });
+    const modelBox = h("button", { class: "btn", type: "button", text: "Fit model" });
+    modelBox.addEventListener("click", () => {
+      box = this.viewer.getModelBox();
+      paint();
+      apply();
+    });
+    const clear = h("button", { class: "btn", type: "button", text: "Clear" });
     clear.addEventListener("click", () => {
       box = this.viewer.getModelBox();
       paint();
       this.viewer.setSectionBox(null);
       this.sync();
+      status.textContent = "Not active";
+      status.classList.remove("active");
     });
-    pop.appendChild(h("div", { class: "pop-row" }, [around, clear]));
+    pop.appendChild(h("div", { class: "pop-row section-actions" }, [around, modelBox, clear]));
   }
 
   /**

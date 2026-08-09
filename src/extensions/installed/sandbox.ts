@@ -70,11 +70,14 @@ const BOOTSTRAP = `(() => {
     geometry: {
       distance: (a, b, options) => call("geometry.distance", { a, b, ...(options || {}) }),
       clash: (a, b, options) => call("geometry.clash", { a, b, ...(options || {}) }),
-      laser: (origin, options) => call("geometry.laser", { origin, ...(options || {}) })
+      laser: (origin, options) => call("geometry.laser", { origin, ...(options || {}) }),
+      sectionContours: (axis, offset, options) => call("geometry.sectionContours", { axis, offset, ...(options || {}) }),
+      signatures: (ids, options) => call("geometry.signatures", { ids, ...(options || {}) })
     },
     view: {
       selection: () => call("view.selection"),
       lastPick: () => call("view.lastPick"),
+      pickGuide: (on) => call("view.pickGuide", { on }),
       isVisible: (id) => call("view.isVisible", { id }),
       select: (ids) => call("view.select", { ids }),
       isolate: (ids, label) => call("view.isolate", { ids, label }),
@@ -115,7 +118,11 @@ const BOOTSTRAP = `(() => {
       capabilities: () => call("local.capabilities"),
       invoke: (capability, input) => call("local.invoke", { capability, input: input || {} })
     },
-    files: { export: (exporter, name, data, mimeType) => call("files.export", { exporter, name, data, mimeType }) }
+    issues: { create: (input) => call("issues.create", { input }) },
+    files: {
+      open: (importer) => call("files.open", { importer }),
+      export: (exporter, name, data, mimeType) => call("files.export", { exporter, name, data, mimeType })
+    }
   };
   window.IFCViewX = { ready: () => connected.then(() => api), call, on, ui: {
     element: (tag, attributes = {}, children = []) => {
@@ -394,6 +401,19 @@ export class SandboxRuntime implements PluginInstance {
         epsilon: optionalFinite(params.epsilon, "epsilon"),
         signal,
       });
+      case "geometry.sectionContours": {
+        if (params.axis !== "x" && params.axis !== "y" && params.axis !== "z") {
+          throw new Error("axis must be x, y or z");
+        }
+        return this.context.geometry.sectionContours(params.axis, finite(params.offset, "offset"), {
+          ids: params.ids === undefined ? undefined : ids(params.ids, "ids"),
+          includeHidden: params.includeHidden === true,
+          tolerance: optionalFinite(params.tolerance, "tolerance"),
+          maxSegments: Math.min(2500, Math.max(1, Math.floor(optionalFinite(params.maxSegments, "maxSegments") ?? 2500))),
+          signal,
+        });
+      }
+      case "geometry.signatures": return this.context.geometry.signatures(ids(params.ids, "ids").slice(0, 500), { signal });
       case "geometry.clash": return this.context.geometry.clash(ids(params.a, "a"), ids(params.b, "b"), {
         toleranceMm: optionalFinite(params.toleranceMm, "toleranceMm"),
         clearanceMm: optionalFinite(params.clearanceMm, "clearanceMm"),
@@ -402,6 +422,7 @@ export class SandboxRuntime implements PluginInstance {
       });
       case "view.selection": return this.context.view.selection();
       case "view.lastPick": return this.context.view.lastPick();
+      case "view.pickGuide": this.context.view.pickGuide(params.on === true); return null;
       case "view.isVisible": return this.context.view.isVisible(integer(params.id, "id"));
       case "view.select": this.context.view.select(params.ids === null ? null : ids(params.ids, "ids")); return null;
       case "view.isolate": this.context.view.isolate(ids(params.ids, "ids"), params.label === undefined ? undefined : textValue(params.label, "label", 100)); return null;
@@ -466,6 +487,31 @@ export class SandboxRuntime implements PluginInstance {
           signal,
         );
       }
+      case "issues.create": {
+        const input = record(params.input);
+        if (encodedSize(input) > 16 * 1024) throw new Error("Issue input is limited to 16 KB");
+        const metadata = input.metadata === undefined ? undefined : record(input.metadata);
+        if (metadata && Object.keys(metadata).length > 24) throw new Error("Issue metadata is limited to 24 fields");
+        for (const [key, value] of Object.entries(metadata ?? {})) {
+          textValue(key, "metadata key", 80);
+          if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+            throw new Error(`metadata.${key} must be a string, number, or boolean`);
+          }
+        }
+        const priority = input.priority;
+        if (priority !== undefined && !["Low", "Normal", "High", "Critical"].includes(String(priority))) {
+          throw new Error("priority must be Low, Normal, High, or Critical");
+        }
+        return this.context.issues.create({
+          title: textValue(input.title, "title", 160),
+          description: input.description === undefined ? undefined : textValue(input.description, "description", 4000),
+          elementIds: input.elementIds === undefined ? undefined : ids(input.elementIds, "elementIds", 200),
+          point: input.point === undefined ? undefined : point(input.point, "point"),
+          priority: priority as "Low" | "Normal" | "High" | "Critical" | undefined,
+          metadata: metadata as Record<string, string | number | boolean> | undefined,
+        });
+      }
+      case "files.open": return this.context.files.open(textValue(params.importer, "importer", 100));
       case "files.export": {
         const name = textValue(params.name, "name", 160);
         if (/[/\\]/.test(name)) throw new Error("Export names cannot contain a path");
@@ -486,7 +532,7 @@ export class SandboxRuntime implements PluginInstance {
   }
 
   private sensitive(method: string): boolean {
-    return method.startsWith("view.") || method.startsWith("overlays.") || method.startsWith("local.") || method === "storage.write" || method === "files.export";
+    return method.startsWith("view.") || method.startsWith("overlays.") || method.startsWith("local.") || method.startsWith("issues.") || method === "storage.write" || method.startsWith("files.");
   }
 
   private violation(reason: string): void {

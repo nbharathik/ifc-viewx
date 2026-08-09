@@ -35,7 +35,7 @@ const PATHS: Record<string, string> = {
   layers: '<path d="m12 2 10 5-10 5L2 7Z"/><path d="m4 12-2 1 10 5 10-5-2-1"/><path d="m4 17-2 1 10 5 10-5-2-1"/>',
   bookmark: '<path d="M6 3.5h12v17l-6-4-6 4Z"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
-  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="7.8" r="1" fill="currentColor" stroke="none"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
   check: '<path d="m4.5 12.5 5 5 10-11"/>',
   "check-circle": '<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>',
   alert: '<circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5"/><circle cx="12" cy="16.3" r="1" fill="currentColor" stroke="none"/>',

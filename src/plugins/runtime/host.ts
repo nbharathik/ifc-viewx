@@ -12,11 +12,12 @@ import { createContext, type ContextDeps } from "./context.js";
 import { CATALOG, findPlugin, isBuiltIn, isLive } from "../registry.js";
 import type { CatalogPlugin } from "../registry.js";
 import type { PluginCapabilities, PluginInstance, PluginModule, PluginPython } from "../../sdk/types.js";
-import type { ExtensionModuleV2 } from "../../sdk/v2/types.js";
+import type { ExtensionIssueInput, ExtensionIssueResult, ExtensionModuleV2 } from "../../sdk/v2/types.js";
 import type { CommandContribution } from "../../sdk/v2/contributions.js";
 import { ExtensionContributionRegistry, ExtensionScope } from "../../extensions/contributions.js";
 import { createExtensionContextV2 } from "../../extensions/context.js";
 import { ExtensionResultStore } from "../../extensions/results.js";
+import type { ResultStore } from "../../capabilities/results.js";
 import type { Viewer } from "../../viewer-core/viewer.js";
 import type { ServiceClient } from "../../bridge/serviceClient.js";
 
@@ -38,12 +39,48 @@ export function pluginDetails(plugin: CatalogPlugin): HTMLElement {
   return body;
 }
 
+const EXTENSION_FILE_BYTES = 240 * 1024;
+
+function openExtensionFile(accepts: readonly string[]): Promise<{ name: string; mimeType: string; text: string }> {
+  return new Promise((resolve, reject) => {
+    const input = h("input", { type: "file", accept: accepts.join(","), hidden: true }) as HTMLInputElement;
+    let settled = false;
+    const finish = (): void => input.remove();
+    input.addEventListener("change", () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      settled = true;
+      if (file.size > EXTENSION_FILE_BYTES) {
+        finish();
+        reject(new Error("Extension imports are limited to 240 KB"));
+        return;
+      }
+      void file.text().then((text) => {
+        finish();
+        resolve({ name: file.name, mimeType: file.type || "text/plain", text });
+      }, (error) => {
+        finish();
+        reject(error);
+      });
+    }, { once: true });
+    window.addEventListener("focus", () => setTimeout(() => {
+      if (settled || input.files?.length) return;
+      finish();
+      reject(new DOMException("File selection cancelled", "AbortError"));
+    }), { once: true });
+    document.body.appendChild(input);
+    input.click();
+  });
+}
+
 export interface HostActions {
   showPanel(): void;
   setPanelVisible(visible: boolean): void;
   log(text: string, kind?: "info" | "success" | "error"): void;
   runCommand(id: string): void;
   registerCommand(contribution: CommandContribution, run: () => void): () => void;
+  createIssue(input: ExtensionIssueInput): Promise<ExtensionIssueResult>;
+  setActiveResult(id: string): void;
   modelKey(): string;
   modelName(): string;
   python: PluginPython;
@@ -69,7 +106,7 @@ export class PluginHost {
   private readonly running = new Map<string, Running>();
   private readonly propertyIndex: PropertyIndex;
   private readonly contributions = new ExtensionContributionRegistry();
-  private readonly results = new ExtensionResultStore();
+  private readonly results: ExtensionResultStore;
   private readonly watchers: Record<"model" | "service", Set<() => void>> = {
     model: new Set(),
     service: new Set(),
@@ -91,7 +128,9 @@ export class PluginHost {
     private readonly capabilities: PluginCapabilities,
     private readonly actions: HostActions,
     private readonly browse: (id?: string) => void,
+    sharedResults?: ResultStore,
   ) {
+    this.results = new ExtensionResultStore(sharedResults);
     this.propertyIndex = new PropertyIndex(viewer, () => actions.modelKey());
     this.strip = h("div", { class: "plug-strip" });
     this.body = h("div", { class: "plug-body" });
@@ -155,10 +194,10 @@ export class PluginHost {
     const details = pluginDetails(plugin);
     details.classList.add("hidden");
     const info = iconButton("info", `What ${plugin.name} does`, () => {
-      const open = details.classList.toggle("hidden");
-      info.setAttribute("aria-pressed", String(!open));
-    }, "icon-btn sm");
-    info.setAttribute("aria-pressed", "false");
+      const hidden = details.classList.toggle("hidden");
+      info.setAttribute("aria-expanded", String(!hidden));
+    }, "icon-btn sm plug-entry-info");
+    info.setAttribute("aria-expanded", "false");
     return h("div", { class: "plug-entry-wrap" }, [
       h("div", { class: "plug-entry-row" }, [row, info]),
       details,
@@ -243,9 +282,12 @@ export class PluginHost {
         const context = createExtensionContextV2(manifest.extension, scoped.ctx, extensionScope, {
           registerCommand: (contribution, run) => this.actions.registerCommand(contribution, run),
           results: this.results,
+          onResult: (handle) => this.actions.setActiveResult(handle.id),
           addOverlayLine: (a, b) => this.viewer.addMeasurement(a, b).id,
           removeOverlayLine: (measurementId) => this.viewer.removeMeasurement(measurementId),
+          openFile: (accepts) => openExtensionFile(accepts),
           exportFile: (name, data, mimeType) => download(name, data, mimeType),
+          createIssue: (input) => this.actions.createIssue(input),
         });
         entry.instance = (module as ExtensionModuleV2).mount(host, context, entry.pending ?? payload) ?? null;
       } else {

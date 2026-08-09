@@ -54,10 +54,12 @@ export function sampleModel(): Uint8Array {
   const units = add(`IFCUNITASSIGNMENT((#${metre},#${sqm},#${cbm}))`);
 
   const origin = add("IFCCARTESIANPOINT((0.,0.,0.))");
+  const profileOrigin = add("IFCCARTESIANPOINT((0.,0.))");
   const dirZ = add("IFCDIRECTION((0.,0.,1.))");
   const dirX = add("IFCDIRECTION((1.,0.,0.))");
   const dirY = add("IFCDIRECTION((0.,1.,0.))");
   const axis = add(`IFCAXIS2PLACEMENT3D(#${origin},#${dirZ},#${dirX})`);
+  const profileAxis = add(`IFCAXIS2PLACEMENT2D(#${profileOrigin},$)`);
   const context = add(`IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#${axis},$)`);
 
   const project = add(`IFCPROJECT('${g()}',#${owner},'Sample building',$,$,$,$,(#${context}),#${units})`);
@@ -109,7 +111,7 @@ export function sampleModel(): Uint8Array {
     const point = add(`IFCCARTESIANPOINT((${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}))`);
     const place3d = add(`IFCAXIS2PLACEMENT3D(#${point},#${dirZ},#${alongY ? dirY : dirX})`);
     const place = add(`IFCLOCALPLACEMENT(#${storeyPlaces[storey]},#${place3d})`);
-    const profile = add(`IFCRECTANGLEPROFILEDEF(.AREA.,$,$,${width.toFixed(3)},${depth.toFixed(3)})`);
+    const profile = add(`IFCRECTANGLEPROFILEDEF(.AREA.,$,#${profileAxis},${width.toFixed(3)},${depth.toFixed(3)})`);
     const solid = add(`IFCEXTRUDEDAREASOLID(#${profile},#${axis},#${dirZ},${height.toFixed(3)})`);
     const shape = add(`IFCSHAPEREPRESENTATION(#${context},'Body','SweptSolid',(#${solid}))`);
     const definition = add(`IFCPRODUCTDEFINITIONSHAPE($,$,(#${shape}))`);
@@ -168,7 +170,7 @@ export function sampleModel(): Uint8Array {
     const point = add(`IFCCARTESIANPOINT((${x.toFixed(3)},${y.toFixed(3)},0.))`);
     const place3d = add(`IFCAXIS2PLACEMENT3D(#${point},#${dirZ},#${dirX})`);
     const place = add(`IFCLOCALPLACEMENT(#${storeyPlaces[storey]},#${place3d})`);
-    const profile = add(`IFCRECTANGLEPROFILEDEF(.AREA.,$,$,${width.toFixed(3)},${depth.toFixed(3)})`);
+    const profile = add(`IFCRECTANGLEPROFILEDEF(.AREA.,$,#${profileAxis},${width.toFixed(3)},${depth.toFixed(3)})`);
     const solid = add(`IFCEXTRUDEDAREASOLID(#${profile},#${axis},#${dirZ},${height.toFixed(3)})`);
     const shape = add(`IFCSHAPEREPRESENTATION(#${context},'Body','SweptSolid',(#${solid}))`);
     const definition = add(`IFCPRODUCTDEFINITIONSHAPE($,$,(#${shape}))`);

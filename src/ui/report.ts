@@ -10,23 +10,11 @@
 import type { ValidationReport } from "../ifc/checks.js";
 import type { IdsReport } from "./ids.js";
 import type { Viewer } from "../viewer-core/viewer.js";
+import { clearFindings, publishFindings, publishedFindings } from "./findings.js";
+import type { FindingSet, ReportFinding, Severity } from "./findings.js";
 
-export type Severity = "error" | "warning" | "info";
-
-export interface ReportFinding {
-  severity: Severity;
-  title: string;
-  count?: number;
-  detail?: string;
-}
-
-/** What a plugin contributes. Keyed by id, so a re-run replaces the last one. */
-export interface FindingSet {
-  id: string;
-  source: string;
-  summary: string;
-  findings: ReportFinding[];
-}
+export { clearFindings, publishFindings, publishedFindings };
+export type { FindingSet, ReportFinding, Severity };
 
 export interface ReportIssue {
   title: string;
@@ -50,22 +38,6 @@ export interface ReportModel {
   ids: IdsReport | null;
   findings: FindingSet[];
   issues: ReportIssue[] | null;
-}
-
-const contributed = new Map<string, FindingSet>();
-
-/** A plugin publishes what it found; the next report picks it up. */
-export function publishFindings(set: FindingSet): void {
-  contributed.set(set.id, set);
-}
-
-export function clearFindings(id?: string): void {
-  if (id === undefined) contributed.clear();
-  else contributed.delete(id);
-}
-
-export function publishedFindings(): FindingSet[] {
-  return [...contributed.values()];
 }
 
 const esc = (text: string): string =>

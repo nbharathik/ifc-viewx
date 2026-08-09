@@ -8,6 +8,8 @@ import type { PropertyIndex } from "./data.js";
 import type { ClashOptions, SweepResult } from "../ifc/clash.js";
 import type { DistanceOptions, DistanceResult } from "../geometry/distance.js";
 import type { LaserOptions, LaserResult } from "../geometry/laser.js";
+import type { SectionAxis, SectionContourOptions, SectionContourResult } from "../geometry/section.js";
+import type { GeometrySignatureOptions, GeometrySignatureResult } from "../geometry/signatures.js";
 import type { ReportFinding } from "../ui/report.js";
 import type { ServiceClient } from "../bridge/serviceClient.js";
 import type {
@@ -171,11 +173,17 @@ export interface PluginContext {
   distance(a: number, b: number, options?: DistanceOptions): Promise<DistanceResult>;
   /** Axis-aligned distances from a picked surface to the next visible meshes. */
   laser(origin: [number, number, number], options?: LaserOptions): Promise<LaserResult>;
+  /** Element-owned mesh contours where an axis-aligned plane cuts visible geometry. */
+  sectionContours(axis: SectionAxis, offset: number, options?: SectionContourOptions): Promise<SectionContourResult>;
+  /** Compact shape, placement and world-bounds fingerprints for revision comparison. */
+  geometrySignatures(ids: number[], options?: GeometrySignatureOptions): Promise<GeometrySignatureResult>;
 
   // -- driving the viewport --------------------------------------------------
   select(ids: number | number[] | null): void;
   selection(): number[];
   lastPick(): PickResult | null;
+  /** Show precise face, edge and vertex feedback while the extension expects a viewport pick. */
+  setPickGuide(on: boolean): void;
   isVisible(id: number): boolean;
   isolate(ids: number[], label?: string): void;
   hide(ids: number[]): void;

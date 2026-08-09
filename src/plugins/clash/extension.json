@@ -2,9 +2,9 @@
   "manifestVersion": 2,
   "id": "clash",
   "name": "Clash Detection",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "sdk": ">=2.0.0 <3",
-  "description": "Find mesh intersections and clearance failures between IFC class sets.",
+  "description": "Run saved coordination checks with revision states, stable references and BCF issue creation.",
   "runtime": {
     "kind": "bundled",
     "entry": "panel.ts"
@@ -17,7 +17,10 @@
     "model.index.build",
     "geometry.query",
     "view.control",
+    "review.issue.create",
+    "viewport.capture",
     "storage.extension",
+    "file.open",
     "file.export"
   ],
   "contributes": {
@@ -30,22 +33,27 @@
     "resultViews": [
       { "id": "clash.results", "title": "Clash results" }
     ],
+    "importers": [
+      { "id": "clash.rules", "title": "Shared clash ignore rules", "accepts": ["application/json", ".json"] }
+    ],
     "exporters": [
-      { "id": "clash.csv", "title": "Clash report CSV", "mimeTypes": ["text/csv"] }
+      { "id": "clash.csv", "title": "Clash report CSV", "mimeTypes": ["text/csv"] },
+      { "id": "clash.rules", "title": "Shareable ignore rules", "mimeTypes": ["application/json"] }
     ]
   },
   "catalog": {
-    "tagline": "Find elements that fight for the same space",
-    "about": "Sweeps two sets of IFC classes against each other and reports every pair whose meshes actually intersect. Boxes and BVH nodes only narrow the search; the answer comes from triangle-level intersection of the geometry the viewer already loaded, so a hit is a real collision rather than two boxes overlapping. Set a clearance and it also reports pairs that pass closer than they should. The work runs in a worker, so the viewport keeps drawing while a full discipline is swept, and no geometry leaves the tab.",
+    "tagline": "Turn raw clashes into an auditable coordination docket",
+    "about": "Saves repeatable A and B coordination checks, then classifies their mesh intersections and clearance failures against the previous run. Every result receives a stable GlobalId-based reference, can be grouped by review state, level, class pair, primary element or proximity, and carries local ignore and assignment decisions. A reviewed pair becomes a BCF topic with its focused section box, selected elements and snapshot. Geometry stays in the existing browser worker, so the viewport remains responsive and no model geometry leaves the tab.",
     "icon": "alert",
     "category": "Coordination",
-    "keywords": "collision interference coordination mep structure hit ducts pipes clearance bvh",
+    "keywords": "collision interference coordination mep structure clearance bvh revision grouping bcf issue assignment",
     "does": [
-      "Any class against any class, with structure and MEP presets",
-      "Triangle-level mesh intersection, with penetration depth per hit",
-      "Clearance checking against the true minimum distance between surfaces",
-      "Click a hit to isolate the pair and zoom to the collision itself",
-      "Full report as CSV, with GlobalId and the clash position"
+      "Saved A and B class and federated-model definitions",
+      "Stable clash references with new, unchanged, resolved, ignored and assigned states",
+      "Grouping by review state, level, class pair, primary element or proximity cluster",
+      "Personal pair decisions and portable class-pair ignore rule packs",
+      "Direct BCF topics with pair selection, section box, contact point and snapshot",
+      "Full coordination CSV with GlobalIds, levels, decisions and clash position"
     ]
   }
 }

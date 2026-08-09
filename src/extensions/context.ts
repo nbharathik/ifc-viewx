@@ -1,5 +1,5 @@
 import type { PluginCapabilities, PluginContext } from "../sdk/types.js";
-import type { ExtensionContextV2 } from "../sdk/v2/types.js";
+import type { ExtensionContextV2, ExtensionIssueInput, ExtensionIssueResult } from "../sdk/v2/types.js";
 import type {
   CommandContribution,
   ContributionFor,
@@ -9,6 +9,7 @@ import type {
 } from "../sdk/v2/contributions.js";
 import type { ExtensionScope } from "./contributions.js";
 import type { ExtensionResultStore } from "./results.js";
+import type { ResultHandle } from "../capabilities/results.js";
 
 const EXTENSION_STORAGE_VALUE_BYTES = 64 * 1024;
 const EXTENSION_STORAGE_TOTAL_BYTES = 256 * 1024;
@@ -17,9 +18,12 @@ const EXTENSION_STORAGE_KEYS = 64;
 export interface ExtensionRuntimeBindings {
   registerCommand?(contribution: CommandContribution, handler: () => void): () => void;
   results?: ExtensionResultStore;
+  onResult?(handle: ResultHandle): void;
   addOverlayLine?(a: [number, number, number], b: [number, number, number]): number;
   removeOverlayLine?(id: number): void;
+  openFile?(accepts: readonly string[]): Promise<{ name: string; mimeType: string; text: string }>;
   exportFile?(name: string, data: string, mimeType: string): void;
+  createIssue?(input: ExtensionIssueInput): Promise<ExtensionIssueResult>;
 }
 
 const capabilityPermissions: Readonly<Record<string, readonly ExtensionPermission[]>> = {
@@ -33,6 +37,7 @@ const capabilityPermissions: Readonly<Record<string, readonly ExtensionPermissio
   clash: ["geometry.query"],
   distance: ["geometry.query", "view.control"],
   laser: ["geometry.query", "view.control"],
+  sectionContours: ["geometry.query", "view.control"],
   search: ["model.structure.read", "model.properties.read"],
   selection: ["view.read"],
   visibility: ["view.read"],
@@ -86,6 +91,7 @@ export function createExtensionContextV2(
   const permissions = new Set<ExtensionPermission>(manifest.permissions);
   const resultBindings = new Map<string, () => void>();
   const overlayBindings = new Map<string, () => void>();
+  let pickGuideCleanupBound = false;
   const storagePrefix = `ifcviewx.plug.${manifest.id}.`;
   let overlaySequence = 0;
   const requirePermission = (permission: ExtensionPermission): void => {
@@ -189,6 +195,24 @@ export function createExtensionContextV2(
           linked.dispose();
         }
       },
+      sectionContours: async (axis, offset, options = {}) => {
+        requirePermission("geometry.query");
+        const linked = linkedSignal(scope.signal, options.signal);
+        try {
+          return await legacy.sectionContours(axis, offset, { ...options, signal: linked.signal });
+        } finally {
+          linked.dispose();
+        }
+      },
+      signatures: async (ids, options = {}) => {
+        requirePermission("geometry.query");
+        const linked = linkedSignal(scope.signal, options.signal);
+        try {
+          return await legacy.geometrySignatures(ids, { ...options, signal: linked.signal });
+        } finally {
+          linked.dispose();
+        }
+      },
     },
     view: {
       select: (ids) => {
@@ -202,6 +226,14 @@ export function createExtensionContextV2(
       lastPick: () => {
         requirePermission("view.read");
         return legacy.lastPick();
+      },
+      pickGuide: (on) => {
+        requirePermission("view.control");
+        if (on && !pickGuideCleanupBound) {
+          pickGuideCleanupBound = true;
+          scope.onDispose(() => legacy.setPickGuide(false));
+        }
+        legacy.setPickGuide(on);
       },
       isVisible: (id) => {
         requirePermission("view.read");
@@ -378,6 +410,15 @@ export function createExtensionContextV2(
       },
     },
     files: {
+      open: async (importer) => {
+        requirePermission("file.open");
+        const declared = manifest.contributes.importers?.find((entry) => entry.id === importer);
+        if (!declared) throw new Error(`${manifest.name} did not declare importer ${importer}`);
+        if (!bindings.openFile) throw new Error("This host cannot open extension files");
+        const opened = await bindings.openFile(declared.accepts);
+        if (scope.signal.aborted) throw new DOMException("Extension closed", "AbortError");
+        return opened;
+      },
       export: (exporter, name, data, mimeType) => {
         requirePermission("file.export");
         const declared = manifest.contributes.exporters?.find((entry) => entry.id === exporter);
@@ -385,6 +426,14 @@ export function createExtensionContextV2(
         if (!declared.mimeTypes.includes(mimeType)) throw new Error(`${manifest.name} did not declare MIME type ${mimeType}`);
         if (!bindings.exportFile) throw new Error("This host cannot export extension files");
         bindings.exportFile(name, data, mimeType);
+      },
+    },
+    issues: {
+      create: async (input) => {
+        requirePermission("review.issue.create");
+        requirePermission("viewport.capture");
+        if (!bindings.createIssue) throw new Error("This host cannot create review issues");
+        return bindings.createIssue(input);
       },
     },
     results: {
@@ -396,6 +445,7 @@ export function createExtensionContextV2(
           ...options,
           revision: options.revision ?? legacy.model().key,
         });
+        bindings.onResult?.(handle);
         const remove = scope.bind("resultViews", resultView, () => {
           bindings.results?.dispose(manifest.id, handle.id);
           resultBindings.delete(handle.id);

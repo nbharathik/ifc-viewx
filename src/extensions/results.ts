@@ -9,8 +9,9 @@ const OWNER_HANDLE_LIMIT = 16;
 const OWNER_ITEM_LIMIT = 10_000;
 
 export class ExtensionResultStore {
-  private readonly store = new ResultStore();
   private readonly owners = new Map<string, string>();
+
+  constructor(private readonly store = new ResultStore()) {}
 
   create<T>(owner: string, kind: string, items: readonly T[], options: ResultOptions = {}): ResultHandle {
     this.prune();

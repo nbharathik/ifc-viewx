@@ -275,9 +275,11 @@ export class PluginBrowser {
       if (this.expanded.has(plugin.id)) this.expanded.delete(plugin.id);
       else this.expanded.add(plugin.id);
       this.renderList();
-      this.list.querySelector(`[data-plugin="${plugin.id}"]`)?.scrollIntoView({ block: "nearest" });
+      const next = this.list.querySelector<HTMLElement>(`[data-plugin="${plugin.id}"]`);
+      next?.scrollIntoView({ block: "nearest" });
+      next?.querySelector<HTMLButtonElement>(".plug-info")?.focus();
     }, "icon-btn sm plug-info");
-    info.setAttribute("aria-pressed", String(open));
+    info.setAttribute("aria-expanded", String(open));
 
     wrap.append(card, info);
     if (open) wrap.appendChild(this.details(plugin, live, running));
