@@ -4,8 +4,8 @@
 // after a takeoff costs nothing. Only a page of rows is rendered; the filter,
 // the viewport actions and the CSV all work on the whole match set.
 import {
-  bar, button, copyTable, emptyState, grid, h, iconButton, note, page, progress, saveCsv, select,
-  type ElementRow, type ExtensionContextV2, type GridRow, type Value,
+  bar, button, copyTable, emptyState, grid, h, iconButton, note, page, progress, select, toCsv,
+  type ElementRow, type ExtensionContext, type GridRow, type Value,
 } from "@ifcviewx/sdk";
 
 const PAGE = 400;
@@ -24,7 +24,7 @@ const BASE: Column[] = [
   { key: "globalId", label: "GlobalId", read: (row) => row.globalId },
 ];
 
-export function mount(host: HTMLElement, ctx: ExtensionContextV2): void {
+export function mount(host: HTMLElement, ctx: ExtensionContext): void {
   let rows: ElementRow[] = [];
   let extra: string[] = ctx.storage.read<string[]>("columns", []);
   let query = "";
@@ -200,11 +200,11 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): void {
     const cols = columns();
     const found = filtered();
     if (found.length === 0) return void ctx.feedback.log("Nothing to export", "error");
-    saveCsv(
-      `elements-${ctx.session.model().name || "model"}.csv`,
+    const csv = toCsv(
       cols.map((column) => column.label),
       found.map((row) => cols.map((column) => column.read(row))),
     );
+    ctx.files.export("explorer.csv", `elements-${ctx.session.model().name || "model"}.csv`, `\uFEFF${csv}`, "text/csv");
   };
 
   ctx.events.on("model", () => {

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { fitBounds, scaleStep } from "../src/plugins/section-workspace/panel.js";
+import {
+  contourSelection, fitBounds, hasSectionDrawing, scaleStep, withWorkspacePlane,
+} from "../src/plugins/section-workspace/panel.js";
 import type { SectionContourResult } from "../src/geometry/section.js";
 
 function result(min: [number, number], max: [number, number]): SectionContourResult {
@@ -41,5 +43,36 @@ describe("Section Workspace viewport", () => {
     expect(scaleStep(60, 600)).toBe(5);
     expect(scaleStep(24, 600)).toBe(2);
     expect(scaleStep(12, 600)).toBe(1);
+  });
+});
+
+describe("Section Workspace interaction state", () => {
+  it("replaces its axis while preserving section planes on other axes", () => {
+    expect(withWorkspacePlane([
+      { axis: "x", offset: 2, flip: false },
+      { axis: "z", offset: 7, flip: true },
+    ], { axis: "x", offset: 4, flip: true })).toEqual([
+      { axis: "z", offset: 7, flip: true },
+      { axis: "x", offset: 4, flip: true },
+    ]);
+
+    expect(withWorkspacePlane([
+      { axis: "x", offset: 2, flip: false },
+      { axis: "z", offset: 7, flip: true },
+    ], { axis: "y", offset: 4, flip: false }, "x")).toEqual([
+      { axis: "z", offset: 7, flip: true },
+      { axis: "y", offset: 4, flip: false },
+    ]);
+  });
+
+  it("replaces selection normally and toggles it with a modifier", () => {
+    expect(contourSelection([1, 2], 3, false)).toEqual([3]);
+    expect(contourSelection([1, 2], 2, true)).toEqual([1]);
+    expect(contourSelection([1, 2], 3, true)).toEqual([1, 2, 3]);
+  });
+
+  it("does not report a built but empty contour result as downloadable", () => {
+    expect(hasSectionDrawing(result([0, 0], [1, 1]))).toBe(true);
+    expect(hasSectionDrawing({ ...result([0, 0], [1, 1]), bounds: null })).toBe(false);
   });
 });

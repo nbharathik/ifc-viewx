@@ -1,4 +1,4 @@
-import type { ExtensionManifestV2, ExtensionPermission } from "../../sdk/v2/contributions.js";
+import type { ExtensionManifest, ExtensionPermission } from "../../sdk/contributions.js";
 
 export interface InstalledVersionRecord {
   version: string;
@@ -6,7 +6,7 @@ export interface InstalledVersionRecord {
   packageFile: string;
   packageSize: number;
   installedAt: number;
-  manifest: ExtensionManifestV2;
+  manifest: ExtensionManifest;
   grantedPermissions: ExtensionPermission[];
 }
 
@@ -22,7 +22,7 @@ export interface InstalledExtensionView extends InstalledExtensionRecord {
 }
 
 export interface PreparedExtensionPackage {
-  manifest: ExtensionManifestV2;
+  manifest: ExtensionManifest;
   hash: string;
   bytes: Uint8Array;
   files: ReadonlyMap<string, Uint8Array>;

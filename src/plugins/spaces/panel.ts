@@ -4,8 +4,8 @@
 // footprint stands in and the row says so, because an area schedule quoted from
 // an estimate without knowing it is worse than one with gaps in it.
 import {
-  bar, button, copyTable, emptyState, grid, h, hint, note, page, progress, saveCsv, search, select, stats,
-  type ElementRow, type GridRow, type PluginContext,
+  bar, button, copyTable, emptyState, grid, h, hint, note, page, progress, search, select, stats, toCsv,
+  type ElementRow, type ExtensionContext, type GridRow,
 } from "@ifcviewx/sdk";
 
 /** Quantity names in priority order; the first one present wins. */
@@ -66,8 +66,8 @@ const pickText = (row: ElementRow, names: string[]): string => {
   return "";
 };
 
-export function mount(host: HTMLElement, ctx: PluginContext): void {
-  let groupBy = ctx.read<GroupBy>("groupBy", "storey");
+export function mount(host: HTMLElement, ctx: ExtensionContext): void {
+  let groupBy = ctx.storage.read<GroupBy>("groupBy", "storey");
   let query = "";
   let rows: ElementRow[] = [];
   let busy = false;
@@ -85,13 +85,13 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
    * area, and a poor one for anything sloped, which is why it is labelled.
    */
   const boxArea = (id: number): number => {
-    const bounds = ctx.bounds(id);
+    const bounds = ctx.model.bounds(id);
     if (!bounds) return 0;
     return Math.abs((bounds.max.x - bounds.min.x) * (bounds.max.y - bounds.min.y));
   };
 
   const boxHeight = (id: number): number => {
-    const bounds = ctx.bounds(id);
+    const bounds = ctx.model.bounds(id);
     return bounds ? Math.abs(bounds.max.z - bounds.min.z) : 0;
   };
 
@@ -156,9 +156,9 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
 
   const load = async (force = false): Promise<void> => {
     if (busy) return;
-    const index = ctx.index();
+    const index = ctx.model.index();
     if (force) index.invalidate();
-    if (!ctx.model().loaded) {
+    if (!ctx.session.model().loaded) {
       table.replaceChildren(emptyState("cube", "No model loaded", "Open an IFC file to read its spaces."));
       return;
     }
@@ -240,15 +240,15 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
   /** Spaces are not in the default geometry stream, so showing one loads it. */
   const show = async (id: number): Promise<void> => {
     try {
-      if (!ctx.viewer.isCategoryVisible("IfcSpace")) {
-        ctx.log("Loading space geometry");
-        await ctx.viewer.setCategoryVisible("IfcSpace", true);
+      if (!ctx.view.categoryVisible("IfcSpace")) {
+        ctx.feedback.log("Loading space geometry");
+        await ctx.view.setCategoryVisible("IfcSpace", true);
       }
-      ctx.isolate([id], "Room");
-      ctx.select(id);
-      ctx.frame(id);
+      ctx.view.isolate([id], "Room");
+      ctx.view.select(id);
+      ctx.view.frame(id);
     } catch (err) {
-      ctx.log(err instanceof Error ? err.message : String(err), "error");
+      ctx.feedback.log(err instanceof Error ? err.message : String(err), "error");
     }
   };
 
@@ -270,8 +270,9 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
 
   const exportCsv = (): void => {
     const list = roomsOf();
-    if (list.length === 0) return void ctx.log("Nothing to export yet", "error");
-    saveCsv(`rooms-${ctx.model().name || "model"}.csv`, REPORT, reportRows());
+    if (list.length === 0) return void ctx.feedback.log("Nothing to export yet", "error");
+    const csv = toCsv(REPORT, reportRows());
+    ctx.files.export("spaces.csv", `rooms-${ctx.session.model().name || "model"}.csv`, `\uFEFF${csv}`, "text/csv");
   };
 
   root.append(
@@ -281,7 +282,7 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
         groupBy,
         (value) => {
           groupBy = value as GroupBy;
-          ctx.write("groupBy", groupBy);
+          ctx.storage.write("groupBy", groupBy);
           paint();
         },
       ),
@@ -290,9 +291,9 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
         paint();
       }),
       button("Rebuild", () => void load(true)),
-      button("Show all", () => ctx.showAll()),
+      button("Show all", () => ctx.view.showAll()),
       button("CSV", () => exportCsv()),
-      button("Copy", () => (roomsOf().length ? copyTable(REPORT, reportRows()) : ctx.log("Nothing to copy yet", "error"))),
+      button("Copy", () => (roomsOf().length ? copyTable(REPORT, reportRows()) : ctx.feedback.log("Nothing to copy yet", "error"))),
     ),
     hint(
       "info",
@@ -303,7 +304,7 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
     table,
   );
 
-  ctx.on("model", () => {
+  ctx.events.on("model", () => {
     models += 1;
     rows = [];
     void load();

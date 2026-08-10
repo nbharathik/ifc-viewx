@@ -8,14 +8,19 @@
 import { h, icon, iconButton, toast } from "../../ui/kit.js";
 import { emptyState } from "../../ui/shell.js";
 import { download, PropertyIndex } from "../../sdk/data.js";
-import { createContext, type ContextDeps } from "./context.js";
+import { createHostContext, type ContextDeps, type PythonRunner } from "./context.js";
 import { CATALOG, findPlugin, isBuiltIn, isLive } from "../registry.js";
 import type { CatalogPlugin } from "../registry.js";
-import type { PluginCapabilities, PluginInstance, PluginModule, PluginPython } from "../../sdk/types.js";
-import type { ExtensionIssueInput, ExtensionIssueResult, ExtensionModuleV2 } from "../../sdk/v2/types.js";
-import type { CommandContribution } from "../../sdk/v2/contributions.js";
+import type {
+  ExtensionCapabilities,
+  ExtensionInstance,
+  ExtensionIssueInput,
+  ExtensionIssueResult,
+  ExtensionModule,
+} from "../../sdk/types.js";
+import type { CommandContribution } from "../../sdk/contributions.js";
 import { ExtensionContributionRegistry, ExtensionScope } from "../../extensions/contributions.js";
-import { createExtensionContextV2 } from "../../extensions/context.js";
+import { createExtensionContext } from "../../extensions/context.js";
 import { ExtensionResultStore } from "../../extensions/results.js";
 import type { ResultStore } from "../../capabilities/results.js";
 import type { Viewer } from "../../viewer-core/viewer.js";
@@ -83,7 +88,7 @@ export interface HostActions {
   setActiveResult(id: string): void;
   modelKey(): string;
   modelName(): string;
-  python: PluginPython;
+  python: PythonRunner;
   /** Something opened or closed; repaint the status toggle. */
   changed(): void;
 }
@@ -91,7 +96,7 @@ export interface HostActions {
 interface Running {
   manifest: CatalogPlugin;
   host: HTMLElement;
-  instance: PluginInstance | null;
+  instance: ExtensionInstance | null;
   release: () => void;
   /** Handed to mount() when the payload arrived before the module did. */
   pending?: unknown;
@@ -125,7 +130,7 @@ export class PluginHost {
     container: HTMLElement,
     private readonly viewer: Viewer,
     private readonly service: ServiceClient,
-    private readonly capabilities: PluginCapabilities,
+    private readonly capabilities: ExtensionCapabilities,
     private readonly actions: HostActions,
     private readonly browse: (id?: string) => void,
     sharedResults?: ResultStore,
@@ -257,7 +262,7 @@ export class PluginHost {
       return;
     }
     const host = h("div", { class: "plug-host" });
-    const scoped = createContext(manifest, this.deps());
+    const scoped = createHostContext(manifest, this.deps());
     const extensionScope = manifest.extension
       ? new ExtensionScope(manifest.id, this.contributions)
       : null;
@@ -278,21 +283,18 @@ export class PluginHost {
       // Closed and reopened while the module was importing: this entry is the
       // old one, and mounting into its detached host would be invisible.
       if (this.running.get(id) !== entry) return void entry.release();
-      if (manifest.extension && extensionScope) {
-        const context = createExtensionContextV2(manifest.extension, scoped.ctx, extensionScope, {
-          registerCommand: (contribution, run) => this.actions.registerCommand(contribution, run),
-          results: this.results,
-          onResult: (handle) => this.actions.setActiveResult(handle.id),
-          addOverlayLine: (a, b) => this.viewer.addMeasurement(a, b).id,
-          removeOverlayLine: (measurementId) => this.viewer.removeMeasurement(measurementId),
-          openFile: (accepts) => openExtensionFile(accepts),
-          exportFile: (name, data, mimeType) => download(name, data, mimeType),
-          createIssue: (input) => this.actions.createIssue(input),
-        });
-        entry.instance = (module as ExtensionModuleV2).mount(host, context, entry.pending ?? payload) ?? null;
-      } else {
-        entry.instance = (module as PluginModule).mount(host, scoped.ctx, entry.pending ?? payload) ?? null;
-      }
+      if (!manifest.extension || !extensionScope) throw new Error(`${manifest.name} has no extension manifest`);
+      const context = createExtensionContext(manifest.extension, scoped.ctx, extensionScope, {
+        registerCommand: (contribution, run) => this.actions.registerCommand(contribution, run),
+        results: this.results,
+        onResult: (handle) => this.actions.setActiveResult(handle.id),
+        addOverlayLine: (a, b) => this.viewer.addMeasurement(a, b).id,
+        removeOverlayLine: (measurementId) => this.viewer.removeMeasurement(measurementId),
+        openFile: (accepts) => openExtensionFile(accepts),
+        exportFile: (name, data, mimeType) => download(name, data, mimeType),
+        createIssue: (input) => this.actions.createIssue(input),
+      });
+      entry.instance = (module as ExtensionModule).mount(host, context, entry.pending ?? payload) ?? null;
       entry.pending = undefined;
     } catch (err) {
       if (this.running.get(id) !== entry) return void entry.release();

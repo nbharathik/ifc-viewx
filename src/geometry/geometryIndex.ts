@@ -21,6 +21,17 @@ interface StoredElement {
   type: string;
   geometryIDs: number[];
   matrices: Float64Array[];
+  baseBounds?: CachedBaseBounds;
+}
+
+interface BaseBounds {
+  min: [number, number, number];
+  max: [number, number, number];
+}
+
+interface CachedBaseBounds {
+  revision: number;
+  value: BaseBounds | null;
 }
 
 export interface GeometryBounds {
@@ -102,6 +113,7 @@ export class GeometryIndex {
       }
       element.geometryIDs.push(chunk.geometryOf[i]);
       element.matrices.push(chunk.matrices.subarray(i * 16, i * 16 + 16));
+      element.baseBounds = undefined;
     }
   }
 
@@ -264,6 +276,25 @@ export class GeometryIndex {
     const element = this.elements.get(id);
     const table = this.geometries.get(modelOf(id));
     if (!element || !table) return null;
+    const base = this.baseBounds(element, table);
+    if (!base) return null;
+    return {
+      id,
+      min: [
+        base.min[0] - origin[0] + offset[0],
+        base.min[1] - origin[1] + offset[1],
+        base.min[2] - origin[2] + offset[2],
+      ],
+      max: [
+        base.max[0] - origin[0] + offset[0],
+        base.max[1] - origin[1] + offset[1],
+        base.max[2] - origin[2] + offset[2],
+      ],
+    };
+  }
+
+  private baseBounds(element: StoredElement, table: Map<number, StoredGeometry>): BaseBounds | null {
+    if (element.baseBounds?.revision === this.version) return element.baseBounds.value;
     const min: [number, number, number] = [Infinity, Infinity, Infinity];
     const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
     let any = false;
@@ -276,9 +307,9 @@ export class GeometryIndex {
         const lx = corner & 1 ? b[3] : b[0];
         const ly = corner & 2 ? b[4] : b[1];
         const lz = corner & 4 ? b[5] : b[2];
-        const x = m[0] * lx + m[4] * ly + m[8] * lz + m[12] - origin[0] + offset[0];
-        const y = m[1] * lx + m[5] * ly + m[9] * lz + m[13] - origin[1] + offset[1];
-        const z = m[2] * lx + m[6] * ly + m[10] * lz + m[14] - origin[2] + offset[2];
+        const x = m[0] * lx + m[4] * ly + m[8] * lz + m[12];
+        const y = m[1] * lx + m[5] * ly + m[9] * lz + m[13];
+        const z = m[2] * lx + m[6] * ly + m[10] * lz + m[14];
         if (x < min[0]) min[0] = x;
         if (y < min[1]) min[1] = y;
         if (z < min[2]) min[2] = z;
@@ -288,6 +319,8 @@ export class GeometryIndex {
         any = true;
       }
     }
-    return any ? { id, min, max } : null;
+    const value = any ? { min, max } : null;
+    element.baseBounds = { revision: this.version, value };
+    return value;
   }
 }

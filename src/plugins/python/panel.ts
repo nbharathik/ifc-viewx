@@ -7,7 +7,7 @@
 // LLM wrote; what you type here is your own, and running natively the service
 // applies its own guard regardless of who wrote it.
 import { h, icon, iconButton, toast } from "@ifcviewx/sdk";
-import type { PluginContext, PluginInstance } from "@ifcviewx/sdk";
+import type { ExtensionContext, ExtensionInstance } from "@ifcviewx/sdk";
 
 const START = `# The model is available as \`model\` (ifcopenshell.file).
 # Assign to \`result\` to display a value.
@@ -28,7 +28,7 @@ const SNIPPETS: Array<[string, string]> = [
   ],
 ];
 
-export function mount(host: HTMLElement, ctx: PluginContext, payload?: unknown): PluginInstance {
+export function mount(host: HTMLElement, ctx: ExtensionContext, payload?: unknown): ExtensionInstance {
   const code = h("textarea", { class: "code", spellcheck: "false" });
   const output = h("pre", { class: "output" });
   const status = h("div", { class: "status-line" });
@@ -44,7 +44,7 @@ export function mount(host: HTMLElement, ctx: PluginContext, payload?: unknown):
     title: "Execute on a copy and stage the result",
   });
 
-  code.value = typeof payload === "string" && payload.trim() ? payload : ctx.read("code", START);
+  code.value = typeof payload === "string" && payload.trim() ? payload : ctx.storage.read("code", START);
 
   const setStatus = (text: string, isError = false): void => {
     status.textContent = text;
@@ -69,7 +69,7 @@ export function mount(host: HTMLElement, ctx: PluginContext, payload?: unknown):
 
   const run = (mode: "query" | "edit"): void => {
     if (busy) return;
-    ctx.write("code", code.value);
+    ctx.storage.write("code", code.value);
     setBusy(true);
     setStatus(mode === "edit" ? "Executing the edit on a copy" : "Running query");
     const call =
@@ -91,7 +91,7 @@ export function mount(host: HTMLElement, ctx: PluginContext, payload?: unknown):
 
   runBtn.addEventListener("click", () => run("query"));
   editBtn.addEventListener("click", () => run("edit"));
-  code.addEventListener("change", () => ctx.write("code", code.value));
+  code.addEventListener("change", () => ctx.storage.write("code", code.value));
   code.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
@@ -119,7 +119,7 @@ export function mount(host: HTMLElement, ctx: PluginContext, payload?: unknown):
   });
 
   syncTier();
-  ctx.on("service", syncTier);
+  ctx.events.on("service", syncTier);
   host.appendChild(
     h("div", { class: "page" }, [
       code,
@@ -147,7 +147,7 @@ export function mount(host: HTMLElement, ctx: PluginContext, payload?: unknown):
       code.focus();
     },
     dispose() {
-      ctx.write("code", code.value);
+      ctx.storage.write("code", code.value);
     },
   };
 }

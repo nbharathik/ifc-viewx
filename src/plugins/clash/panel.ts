@@ -5,7 +5,7 @@ import {
 } from "@ifcviewx/sdk";
 import type {
   ClashDecision, ClashElementIdentity, ClashGroupMode, ClashIgnoreRule, ClashPair,
-  ClashReviewRow, ExtensionContextV2, PluginInstance, ReportFinding, SweepResult,
+  ClashReviewRow, ExtensionContext, ExtensionInstance, ReportFinding, SweepResult,
 } from "@ifcviewx/sdk";
 
 const PRESETS: Array<[string, string[], string[]]> = [
@@ -100,7 +100,7 @@ function encodeHistory(definitionId: string, rows: readonly ClashReviewRow[], li
   };
 }
 
-export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstance {
+export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstance {
   const migratedTolerance = ctx.storage.read("tolerance", 10);
   const migratedClearance = ctx.storage.read("clearance", 0);
   const loadedDefinitions = ctx.storage.read<unknown[]>("definitions", []).filter(validDefinition);

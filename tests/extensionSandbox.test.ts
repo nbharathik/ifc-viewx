@@ -1,16 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import { ExtensionContributionRegistry, ExtensionScope } from "../src/extensions/contributions.js";
-import { createExtensionContextV2 } from "../src/extensions/context.js";
+import { createExtensionContext } from "../src/extensions/context.js";
 import { ExtensionAuditLog } from "../src/extensions/installed/audit.js";
 import {
   SANDBOX_MESSAGE_BYTES,
   SandboxRuntime,
   sandboxDocument,
 } from "../src/extensions/installed/sandbox.js";
-import type { ExtensionManifestV2 } from "../src/sdk/v2/contributions.js";
-import type { PluginContext } from "../src/sdk/types.js";
+import type { ExtensionManifest } from "../src/sdk/contributions.js";
+import type { HostContext } from "../src/plugins/runtime/context.js";
 
-function manifest(): ExtensionManifestV2 {
+function manifest(): ExtensionManifest {
   return {
     manifestVersion: 2,
     id: "org.example.hostile",
@@ -37,17 +37,17 @@ function manifest(): ExtensionManifestV2 {
 function context() {
   const isolate = vi.fn();
   const off = vi.fn();
-  const legacy = {
+  const host = {
     capabilities: { list: () => [], execute: vi.fn() },
     on: vi.fn(() => off),
     selection: vi.fn(() => []),
     sections: vi.fn(() => []),
     isolate,
-  } as unknown as PluginContext;
+  } as unknown as HostContext;
   const definition = manifest();
   const scope = new ExtensionScope(definition.id, new ExtensionContributionRegistry());
   scope.registerManifest(definition.contributes);
-  return { definition, scope, isolate, value: createExtensionContextV2(definition, legacy, scope) };
+  return { definition, scope, isolate, value: createExtensionContext(definition, host, scope) };
 }
 
 describe("installed extension sandbox", () => {
@@ -61,6 +61,7 @@ describe("installed extension sandbox", () => {
     expect(documentText).toContain("geometry.sectionContours");
     expect(documentText).toContain("geometry.signatures");
     expect(documentText).toContain("view.pickGuide");
+    expect(documentText).toContain("view.setCategoryVisible");
     expect(documentText).toContain("view.addMeasurement");
     expect(documentText).toContain("issues.create");
     expect(documentText).toContain("files.open");

@@ -63,7 +63,7 @@ a result handle. The assistant can then use:
 - `result.select` and `result.isolate` to act on referenced elements;
 - `issue.stage` in Edit mode to prepare a BCF issue payload for review.
 
-Bundled and installed SDK v2 extensions use the same bounded result store.
+Bundled and installed extensions use the same bounded SDK result store.
 When an extension such as Model Compare creates a result, that handle becomes
 the active viewer result and the same page, group, open and selection follow-ups
 work without rescanning the model.

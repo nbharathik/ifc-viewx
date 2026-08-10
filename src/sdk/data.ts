@@ -170,7 +170,7 @@ export function toCsv(headers: string[], rows: Array<Array<Value | undefined>>):
 
 /** Written with a BOM, which is what a spreadsheet needs to read it as UTF-8. */
 export function saveCsv(name: string, headers: string[], rows: Array<Array<Value | undefined>>): void {
-  download(name, `﻿${toCsv(headers, rows)}`, "text/csv;charset=utf-8");
+  download(name, `\uFEFF${toCsv(headers, rows)}`, "text/csv;charset=utf-8");
 }
 
 /** Tab separated, which is what a spreadsheet expects from the clipboard. */

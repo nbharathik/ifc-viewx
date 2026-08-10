@@ -44,6 +44,7 @@ export interface ControlHandlers {
   onHandleUp?: () => void;
   /** Pointer moved with no button down; used for hover feedback. */
   onHover?: (ndcX: number, ndcY: number, clientX: number, clientY: number) => void;
+  onCameraChange?: () => void;
 }
 
 export type ViewPreset = 'top' | 'front' | 'right' | 'iso';
@@ -116,6 +117,7 @@ export class ViewerControls {
       this.interacting = true;
     });
     this.orbit.addEventListener('change', () => {
+      this.handlers.onCameraChange?.();
       this.requestRender();
       this.adaptResolution();
     });

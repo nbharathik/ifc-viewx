@@ -1,6 +1,6 @@
-import type { ExtensionModuleV2 } from "../../sdk/v2/types.js";
-import type { ExtensionPermission } from "../../sdk/v2/contributions.js";
-import { validateManifestV2 } from "../manifest.js";
+import type { ExtensionModule } from "../../sdk/types.js";
+import type { ExtensionPermission } from "../../sdk/contributions.js";
+import { validateManifest } from "../manifest.js";
 import { ExtensionAuditLog } from "./audit.js";
 import {
   browserExtensionStore,
@@ -91,7 +91,7 @@ export class InstalledExtensionManager {
       try {
         if (this.reservedIds.has(record.id)) throw new Error("id conflicts with a bundled extension");
         const current = active(record);
-        const validation = validateManifestV2(current.manifest, { runtime: "sandboxed" });
+        const validation = validateManifest(current.manifest, { runtime: "sandboxed" });
         if (!validation.valid || validation.manifest?.id !== record.id) throw new Error("stored manifest is invalid");
         this.records.set(record.id, record);
       } catch (error) {
@@ -234,7 +234,7 @@ export class InstalledExtensionManager {
     this.emit({ id, kind: "session-disabled" });
   }
 
-  async loadModule(id: string): Promise<ExtensionModuleV2> {
+  async loadModule(id: string): Promise<ExtensionModule> {
     const record = this.records.get(id);
     if (!record || !record.enabled) throw new Error(`${id} is disabled`);
     const sessionReason = this.sessionDisabled.get(id);

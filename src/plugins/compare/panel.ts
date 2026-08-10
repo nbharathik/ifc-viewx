@@ -2,8 +2,8 @@ import {
   bar, button, compareSnapshots, elementsOf, emptyState, h, hint, note, openSideModel, page, progress, stats, toCsv,
 } from "@ifcviewx/sdk";
 import type {
-  CompareEntry, CompareKind, CompareResult, CompareSnapshot, ElementRow, ExtensionContextV2,
-  PluginInstance, SideModel, Value,
+  CompareEntry, CompareKind, CompareResult, CompareSnapshot, ElementRow, ExtensionContext,
+  ExtensionInstance, SideModel, Value,
 } from "@ifcviewx/sdk";
 
 type Filter = "changed" | "geometry" | "placement" | "containment" | "properties" | "added" | "removed" | "unchanged";
@@ -59,7 +59,7 @@ function matchesFilter(entry: CompareEntry, filter: Filter): boolean {
   return entry.kind === filter;
 }
 
-export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstance {
+export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstance {
   let side: SideModel | null = null;
   let controller: AbortController | null = null;
   let result: CompareResult | null = null;

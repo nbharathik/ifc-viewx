@@ -1,93 +1,30 @@
-// The contract between the app and a plugin.
-//
-// A plugin folder is allowed to know about this file and nothing else in the
-// app, which is what lets core be reorganised without breaking anyone's work.
-// Everything here is either a plain description of a plugin or a narrow view
-// of the viewer, so the surface stays small enough to document on one page.
-import type { PropertyIndex } from "./data.js";
+import type { ElementRow, PropertyIndex } from "./data.js";
 import type { ClashOptions, SweepResult } from "../ifc/clash.js";
 import type { DistanceOptions, DistanceResult } from "../geometry/distance.js";
 import type { LaserOptions, LaserResult } from "../geometry/laser.js";
 import type { SectionAxis, SectionContourOptions, SectionContourResult } from "../geometry/section.js";
 import type { GeometrySignatureOptions, GeometrySignatureResult } from "../geometry/signatures.js";
+import type { ResultHandle, ResultOptions, ResultPage } from "../capabilities/results.js";
 import type { ReportFinding } from "../ui/report.js";
-import type { ServiceClient } from "../bridge/serviceClient.js";
 import type {
-  FederatedModel,
+  CameraPose,
   ItemProperties,
+  LazyCategory,
   Measurement,
   ModelBounds,
+  PickResult,
   SectionBox,
   SectionState,
   SpatialNode,
-  Viewer,
   ViewPreset,
-  CameraPose,
-  PickResult,
 } from "../viewer-core/viewer.js";
+import type {
+  ContributionFor,
+  ContributionKind,
+  ExtensionManifest,
+} from "./contributions.js";
 
-/**
- * Where a plugin runs. `web` is a panel this tab mounts, `local` needs the
- * Local Studio service, `core` is a tool the app already carries and the
- * catalog only points at.
- */
-export type PluginTier = "web" | "local" | "core";
-
-export interface PluginManifest {
-  /** Folder name, and the id everything else refers to. */
-  id: string;
-  name: string;
-  /** One line, shown under the name in the catalog. */
-  tagline: string;
-  /** A paragraph on what it does and why it works the way it does. */
-  about: string;
-  /** Any name from the app's icon set; `blocks` is the safe default. */
-  icon: string;
-  category: string;
-  tier: PluginTier;
-  /** Extra search terms, space separated. */
-  keywords: string;
-  /** Bullets shown when the entry is expanded. */
-  does: string[];
-  /** Who wrote it. Absent means it ships with the app. */
-  author?: string;
-  /** Home page or repository, linked from the catalog. */
-  url?: string;
-  /** `local`: the service capability that has to be present. */
-  capability?: string;
-  /** `local` and `core`: the command that opens it. */
-  command?: string;
-  /**
-   * The panel. Left out, the registry wires it to `./panel.js` in the same
-   * folder, so a plugin only sets this when its panel lives somewhere else.
-   */
-  load?: () => Promise<PluginModule>;
-  /** Described but not built. Never offers an action. */
-  soon?: boolean;
-}
-
-export interface PluginModule {
-  mount: PluginMount;
-}
-
-/**
- * Called once when the plugin opens. Return an object to be told when it
- * closes or is handed something; return nothing if there is nothing to clean
- * up. Subscriptions made through `ctx.on` are released either way.
- */
-export type PluginMount = (
-  host: HTMLElement,
-  ctx: PluginContext,
-  payload?: unknown,
-) => PluginInstance | void;
-
-export interface PluginInstance {
-  dispose?(): void;
-  /** Opened again while already running, with something to work on. */
-  receive?(payload: unknown): void;
-}
-
-export type PluginEvent =
+export type ExtensionEvent =
   | "model"
   | "selection"
   | "visibility"
@@ -95,27 +32,20 @@ export type PluginEvent =
   | "measure"
   | "service";
 
-/** Identity of what is loaded. `key` changes whenever the model does. */
 export interface ModelInfo {
   key: string;
   name: string;
   loaded: boolean;
 }
 
-/**
- * The edit pipeline. Both calls route through the same tier choice the
- * assistant uses, and an edit is always staged for approval, never applied.
- */
-export interface PluginPython {
-  /** True when the local service runs this, not this tab. */
-  runsNatively(): boolean;
-  /** Read-only run; resolves with the text output. */
-  query(code: string, onStatus?: (text: string) => void): Promise<string>;
-  /** Runs on a copy and stages the result; resolves with the report. */
-  propose(code: string, onStatus?: (text: string) => void): Promise<string>;
+export interface ModelElement {
+  id: number;
+  type: string;
+  name: string;
+  storey: string;
 }
 
-export interface PluginCapabilitySummary {
+export interface ExtensionCapabilitySummary {
   id: string;
   title: string;
   description: string;
@@ -124,114 +54,191 @@ export interface PluginCapabilitySummary {
   parallelSafe: boolean;
 }
 
-export interface PluginCapabilities {
-  /** Capabilities this bundled plugin is allowed to invoke. */
-  list(): PluginCapabilitySummary[];
+export interface ExtensionCapabilities {
+  list(): ExtensionCapabilitySummary[];
   execute<T = unknown>(id: string, input?: Record<string, unknown>, signal?: AbortSignal): Promise<T>;
 }
 
-/** One placed element, taken from the spatial tree. */
-export interface ModelElement {
-  id: number;
-  type: string;
-  name: string;
-  storey: string;
+export interface ExtensionSessionService {
+  model(): ModelInfo;
 }
 
-/**
- * What a plugin is given. The helpers cover what panels actually do; `viewer`
- * and `service` are underneath them for the cases they do not, and using those
- * is the one thing that can break when core moves.
- */
-export interface PluginContext {
-  readonly viewer: Viewer;
-  readonly service: ServiceClient;
-  readonly python: PluginPython;
-  readonly capabilities: PluginCapabilities;
-
-  model(): ModelInfo;
-
-  // -- reading the model -----------------------------------------------------
-  /** Every placed element with its class, name and storey. Cached. */
+export interface ExtensionModelService {
   elements(): ModelElement[];
-  /** Element counts per IFC class, largest first. */
   classes(): Array<[string, number]>;
-  /** The full property index, built once and shared by every plugin. */
-  index(): PropertyIndex;
-  properties(expressID: number): Promise<ItemProperties | null>;
+  properties(id: number): Promise<ItemProperties | null>;
   tree(): SpatialNode | null;
-  /** Element ids under a spatial node. */
-  subtree(expressID: number): number[];
-  bounds(expressID: number): ModelBounds | null;
-  /**
-   * Triangle-level clash detection between two sets of element ids, run in a
-   * worker over the geometry already loaded. Hard clashes come from real mesh
-   * intersection; set `clearanceMm` to also catch pairs that pass too close.
-   */
-  clash(a: number[], b: number[], options?: ClashOptions): Promise<SweepResult>;
-  /** Exact shortest mesh distance and the closest point on each element. */
-  distance(a: number, b: number, options?: DistanceOptions): Promise<DistanceResult>;
-  /** Axis-aligned distances from a picked surface to the next visible meshes. */
-  laser(origin: [number, number, number], options?: LaserOptions): Promise<LaserResult>;
-  /** Element-owned mesh contours where an axis-aligned plane cuts visible geometry. */
-  sectionContours(axis: SectionAxis, offset: number, options?: SectionContourOptions): Promise<SectionContourResult>;
-  /** Compact shape, placement and world-bounds fingerprints for revision comparison. */
-  geometrySignatures(ids: number[], options?: GeometrySignatureOptions): Promise<GeometrySignatureResult>;
+  subtree(id: number): number[];
+  bounds(id: number): ModelBounds | null;
+  index(): PropertyIndex;
+  modelOf(id: number): number;
+  expressOf(id: number): number;
+}
 
-  // -- driving the viewport --------------------------------------------------
+export interface ExtensionGeometryService {
+  clash(a: number[], b: number[], options?: ClashOptions): Promise<SweepResult>;
+  distance(a: number, b: number, options?: DistanceOptions): Promise<DistanceResult>;
+  laser(origin: [number, number, number], options?: LaserOptions): Promise<LaserResult>;
+  sectionContours(axis: SectionAxis, offset: number, options?: SectionContourOptions): Promise<SectionContourResult>;
+  signatures(ids: number[], options?: GeometrySignatureOptions): Promise<GeometrySignatureResult>;
+}
+
+export interface ExtensionViewService {
   select(ids: number | number[] | null): void;
   selection(): number[];
   lastPick(): PickResult | null;
-  /** Show precise face, edge and vertex feedback while the extension expects a viewport pick. */
-  setPickGuide(on: boolean): void;
+  measuring(): boolean;
+  pickGuide(on: boolean): void;
   isVisible(id: number): boolean;
+  categoryVisible(category: LazyCategory): boolean;
+  setCategoryVisible(category: LazyCategory, visible: boolean): Promise<void>;
   isolate(ids: number[], label?: string): void;
   hide(ids: number[]): void;
   showAll(): void;
-  /** Frame one element, or the whole model when no id is given. */
-  frame(expressID?: number): void;
-  /** Frame a point in space, such as where two elements collide. */
+  frame(id?: number): void;
   frameAt(point: [number, number, number], radius?: number): void;
   viewFrom(view: ViewPreset): void;
   camera(): CameraPose;
   setCamera(pose: CameraPose): void;
   sections(): SectionState[];
   setSections(states: SectionState[]): void;
-  /** Six planes at once. Replaces any per-axis section, and vice versa. */
   sectionBox(): SectionBox | null;
   setSectionBox(box: SectionBox | null): void;
-  /** A padded box around these elements, or null when none has geometry. */
   boxAround(ids: number[], pad?: number): SectionBox | null;
-  /** Colour elements by group; an empty map takes the colouring back off. */
   colorBy(assignment: Map<number, number>, colors: Array<[number, number, number]>): void;
   measurements(): Measurement[];
   addMeasurement(a: [number, number, number], b: [number, number, number]): Measurement;
   removeMeasurement(id: number): void;
+}
 
-  // -- federated models ------------------------------------------------------
-  /**
-   * Every open model. Element ids carry their model, so `modelOf(id)` names
-   * the file an id came from and a plugin can work per discipline.
-   */
-  models(): FederatedModel[];
-  setModelVisible(index: number, visible: boolean): void;
-  /** Which model an element id belongs to, and its raw STEP line number. */
-  modelOf(id: number): number;
-  expressOf(id: number): number;
+export interface ExtensionEventService {
+  on(event: ExtensionEvent, handler: () => void): () => void;
+}
 
-  // -- app -------------------------------------------------------------------
-  /** Released when the plugin closes, so there is nothing to unsubscribe. */
-  on(event: PluginEvent, handler: () => void): () => void;
-  /** Contribute to the offline report. Publishing again replaces the last set. */
-  publishFindings(summary: string, findings: ReportFinding[]): void;
-  /** A line in the activity log. */
-  log(text: string, kind?: "info" | "success" | "error"): void;
-  /** A transient message over the viewport. */
-  toast(text: string, kind?: "info" | "success" | "error"): void;
-  /** Run one of the app's commands by id, such as `file.check`. */
-  run(commandId: string): void;
-  /** Per-plugin storage, namespaced by id and survives a reload. */
+export interface ExtensionStorageService {
   read<T>(key: string, fallback: T): T;
   write(key: string, value: unknown): void;
+}
+
+export interface ExtensionFeedbackService {
+  publishFindings(summary: string, findings: ReportFinding[]): void;
+  log(text: string, kind?: "info" | "success" | "error"): void;
+  toast(text: string, kind?: "info" | "success" | "error"): void;
+}
+
+export interface ExtensionCommandService {
+  run(id: string): void;
+  register(id: string, handler: () => void): () => void;
+}
+
+export interface ExtensionContributionService {
+  register<Kind extends ContributionKind>(
+    kind: Kind,
+    contribution: ContributionFor<Kind>,
+    cleanup?: () => void,
+  ): () => void;
+}
+
+export interface ExtensionOverlayService {
+  line(
+    overlay: string,
+    a: [number, number, number],
+    b: [number, number, number],
+  ): string;
+  remove(id: string): boolean;
+  clear(): void;
+}
+
+export interface ExtensionFileService {
+  open(importer: string): Promise<{ name: string; mimeType: string; text: string }>;
+  export(exporter: string, name: string, data: string, mimeType: string): void;
+}
+
+export type ExtensionIssuePriority = "Low" | "Normal" | "High" | "Critical";
+
+export interface ExtensionIssueInput {
+  title: string;
+  description?: string;
+  elementIds?: number[];
+  point?: [number, number, number];
+  priority?: ExtensionIssuePriority;
+  metadata?: Record<string, string | number | boolean>;
+}
+
+export interface ExtensionIssueResult {
+  id: string;
+  title: string;
+  status: "Open";
+  snapshot: "pending";
+}
+
+export interface ExtensionIssueService {
+  create(input: ExtensionIssueInput): Promise<ExtensionIssueResult>;
+}
+
+export interface ExtensionResultService {
+  create<T>(resultView: string, items: readonly T[], options?: ResultOptions): ResultHandle;
+  get(id: string): ResultHandle | null;
+  page<T>(id: string, offset?: number, limit?: number): ResultPage<T>;
+  dispose(id: string): boolean;
+}
+
+export interface ExtensionLocalStatus {
+  state: "available" | "offline" | "missing" | "incompatible";
+  providerId: string;
+  expectedVersion: string;
+  installedVersion?: string;
+  trustedNative: true;
+}
+
+export interface ExtensionLocalService {
+  status(): ExtensionLocalStatus;
+  capabilities(): string[];
+  invoke<T>(capability: string, input?: Record<string, unknown>, signal?: AbortSignal): Promise<T>;
+}
+
+export interface ExtensionPythonService {
+  runsNatively(): boolean;
+  query(code: string, onStatus?: (text: string) => void): Promise<string>;
+  propose(code: string, onStatus?: (text: string) => void): Promise<string>;
+}
+
+export interface ExtensionInstance {
+  dispose?(): void;
+  receive?(payload: unknown): void;
+}
+
+export interface ExtensionContext {
+  readonly manifest: ExtensionManifest;
+  readonly signal: AbortSignal;
+  readonly session: ExtensionSessionService;
+  readonly model: ExtensionModelService;
+  readonly geometry: ExtensionGeometryService;
+  readonly view: ExtensionViewService;
+  readonly events: ExtensionEventService;
+  readonly storage: ExtensionStorageService;
+  readonly feedback: ExtensionFeedbackService;
+  readonly commands: ExtensionCommandService;
+  readonly capabilities: ExtensionCapabilities;
+  readonly contributions: ExtensionContributionService;
+  readonly overlays: ExtensionOverlayService;
+  readonly files: ExtensionFileService;
+  readonly issues: ExtensionIssueService;
+  readonly results: ExtensionResultService;
+  readonly local: ExtensionLocalService;
+  readonly python: ExtensionPythonService;
   close(): void;
 }
+
+export type ExtensionPanelMount = (
+  host: HTMLElement,
+  context: ExtensionContext,
+  payload?: unknown,
+) => ExtensionInstance | void;
+
+export interface ExtensionModule {
+  mount: ExtensionPanelMount;
+}
+
+export type { ElementRow };
+export type { ResultHandle, ResultOptions, ResultPage };

@@ -60,7 +60,7 @@ file path, session token, or native provider object.
 | Local precise | Local Studio | Tightly tessellated IFC product shapes | Higher-precision clearance review |
 
 Both routes return explicit fidelity and engine metadata. The assistant,
-browser MCP bridge, SDK v2 extensions, and the panel use the same typed
+browser MCP bridge, SDK extensions, and the panel use the same typed
 `distance` and `laser` capabilities.
 
 The built-in local route reports `native-mesh`, not `exact`. A provider backed

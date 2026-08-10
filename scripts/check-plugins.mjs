@@ -19,19 +19,17 @@ const folders = entries.filter((e) => e.isDirectory() && !NOT_A_PLUGIN.has(e.nam
 for (const id of folders) {
   const dir = join(PLUGINS, id);
   const files = await readdir(dir);
-  const hasV1 = files.includes("manifest.ts");
-  const hasV2 = files.includes("extension.json");
+  const hasManifest = files.includes("extension.json");
 
-  if (!hasV1 && !hasV2) {
-    fail(dir, "no manifest.ts or extension.json, so nothing will discover this folder");
+  if (!hasManifest) {
+    fail(dir, "no extension.json, so nothing will discover this folder");
     continue;
   }
-  if (hasV1 && hasV2) fail(dir, "has both manifest.ts and extension.json; keep one manifest version");
   if (!/^[a-z][a-z0-9-]*$/.test(id)) {
     fail(dir, "folder name must be lowercase letters, digits and dashes");
   }
 
-  if (hasV2) {
+  if (hasManifest) {
     const path = join(dir, "extension.json");
     let manifest;
     try {
@@ -62,15 +60,6 @@ for (const id of folders) {
       }
       if (!files.includes("panel.ts")) fail(dir, "no panel.ts, so opening it would do nothing");
     }
-  } else {
-    const path = join(dir, "manifest.ts");
-    const manifest = await readFile(path, "utf8");
-    const declared = /\bid:\s*["']([^"']+)["']/.exec(manifest)?.[1];
-    if (declared !== id) fail(path, `declares id "${declared ?? "?"}" but the folder is "${id}"`);
-    if (!manifest.includes("definePlugin(")) fail(path, "should export default definePlugin({...})");
-    if (!/tier:\s*["']local["']/.test(manifest) && !files.includes("panel.ts")) {
-      fail(dir, "no panel.ts, so opening it would do nothing");
-    }
   }
 
   for (const file of files.filter((f) => f.endsWith(".ts"))) {
@@ -83,10 +72,12 @@ for (const id of folders) {
       if (local && !escapes) continue;
       fail(path, `imports "${specifier}"; plugins may only import "@ifcviewx/sdk" and their own files`);
     }
-    if (hasV2 && file === "panel.ts") {
-      if (/\bPluginContext\b/.test(source)) fail(path, "SDK v2 panels must use ExtensionContextV2");
-      for (const escape of source.matchAll(/\bctx\.(viewer|service|python)\b/g)) {
-        fail(path, `uses ctx.${escape[1]}; SDK v2 panels must use a declared domain service`);
+    if (file === "panel.ts") {
+      if (/\b(?:PluginContext|ExtensionContextV2)\b/.test(source)) {
+        fail(path, "panels must use the current ExtensionContext");
+      }
+      for (const escape of source.matchAll(/\bctx\.(viewer|service)\b/g)) {
+        fail(path, `uses ctx.${escape[1]}; extensions must use a declared domain service`);
       }
     }
   }

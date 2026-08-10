@@ -2,7 +2,7 @@ import {
   button, emptyState, field, h, hint, icon, iconButton, number, page, select,
 } from "@ifcviewx/sdk";
 import type {
-  ExtensionContextV2, PluginInstance, SectionAxis, SectionContourResult, SectionPolyline, SpatialNode,
+  ExtensionContext, ExtensionInstance, SectionAxis, SectionContourResult, SectionPolyline, SectionState, SpatialNode,
 } from "@ifcviewx/sdk";
 
 type Box2 = { x: number; y: number; width: number; height: number };
@@ -63,7 +63,29 @@ export function scaleStep(worldWidth: number, pixelWidth: number, targetPixels =
   return (scaled >= 5 ? 5 : scaled >= 2 ? 2 : 1) * power;
 }
 
-export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstance {
+export function withWorkspacePlane(
+  states: readonly SectionState[],
+  plane: SectionState,
+  previousAxis: SectionAxis | null = plane.axis,
+): SectionState[] {
+  return [...states.filter((state) => state.axis !== plane.axis && state.axis !== previousAxis), plane];
+}
+
+export function contourSelection(current: readonly number[], id: number, toggle: boolean): number[] {
+  if (!toggle) return [id];
+  const next = new Set(current);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  return [...next];
+}
+
+export function hasSectionDrawing(
+  result: SectionContourResult | null | undefined,
+): result is SectionContourResult & { bounds: NonNullable<SectionContourResult["bounds"]> } {
+  return result?.bounds !== null && result?.bounds !== undefined;
+}
+
+export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstance {
   let axis = ctx.storage.read<SectionAxis>("axis", "y");
   let offset = ctx.storage.read("offset", 0);
   let flip = ctx.storage.read("flip", false);
@@ -75,9 +97,11 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
   let result: SectionContourResult | null = null;
   let viewport = fitBounds(null);
   let controller: AbortController | null = null;
+  let runRequest = 0;
   let generation = 0;
   let running = false;
   let syncing = false;
+  let workspaceAxis: SectionAxis | null = null;
   let rerunTimer = 0;
   let resultHandle = "";
   let hoverId: number | null = null;
@@ -336,14 +360,16 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
         if (hoverId === id) hoverId = null;
         hover.textContent = identifyText();
       });
-      path.addEventListener("click", () => {
+      path.addEventListener("click", (event) => {
         if (blockContourClick) return;
-        ctx.view.select(id);
+        const toggle = event.ctrlKey || event.metaKey || event.shiftKey;
+        ctx.view.select(contourSelection(ctx.view.selection(), id, toggle));
       });
       path.addEventListener("keydown", (event) => {
         if (event.key !== "Enter" && event.key !== " ") return;
         event.preventDefault();
-        ctx.view.select(id);
+        const toggle = event.ctrlKey || event.metaKey || event.shiftKey;
+        ctx.view.select(contourSelection(ctx.view.selection(), id, toggle));
       });
       path.addEventListener("dblclick", () => ctx.view.frame(id));
       fragment.append(path);
@@ -383,6 +409,12 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
   const paintStatus = (): void => {
     root.classList.toggle("updating", running);
     if (!result) return void status.replaceChildren(hint("info", running ? "Building the first drawing…" : "Set a plane to build the drawing."));
+    if (!result.bounds) {
+      status.replaceChildren(hint("info", running
+        ? "Rebuilding this empty cut..."
+        : "No visible geometry crosses this plane."));
+      return;
+    }
     const elementCount = contourGroups.size;
     status.replaceChildren(
       h("div", { class: "sw-metrics", role: "status", "aria-live": "polite" }, [
@@ -404,28 +436,55 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
 
   const applyPlane = (): void => {
     syncing = true;
-    ctx.view.setSections([{ axis, offset, flip }]);
-    syncing = false;
+    try {
+      ctx.view.setSections(withWorkspacePlane(ctx.view.sections(), { axis, offset, flip }, workspaceAxis));
+      workspaceAxis = axis;
+      ctx.storage.write("axis", axis);
+      ctx.storage.write("offset", offset);
+      ctx.storage.write("flip", flip);
+    } finally {
+      syncing = false;
+    }
+  };
+
+  const stopCurrentRun = (): void => {
+    controller?.abort();
+    controller = null;
+    runRequest += 1;
+    running = false;
   };
 
   const run = async (updatePlane = true): Promise<void> => {
     controller?.abort();
+    const request = ++runRequest;
     const localGeneration = generation;
+    const requestAxis = axis;
+    const requestOffset = offset;
+    const requestFlip = flip;
+    const requestMaxSegments = maxSegments;
     const next = new AbortController();
     controller = next;
     running = true;
     if (updatePlane) applyPlane();
     syncControls();
     paintStatus();
+    const isCurrent = (): boolean => generation === localGeneration
+      && request === runRequest
+      && controller === next
+      && !next.signal.aborted
+      && axis === requestAxis
+      && offset === requestOffset
+      && flip === requestFlip
+      && maxSegments === requestMaxSegments;
     try {
-      const nextResult = await ctx.geometry.sectionContours(axis, offset, {
-        maxSegments,
+      const nextResult = await ctx.geometry.sectionContours(requestAxis, requestOffset, {
+        maxSegments: requestMaxSegments,
         signal: next.signal,
       });
-      if (generation !== localGeneration) return;
+      if (!isCurrent()) return;
       result = nextResult;
-      if (axis === "y") {
-        const floorIndex = storeys.findIndex((storey) => Math.abs(storey.offset - offset) < 1e-5);
+      if (requestAxis === "y") {
+        const floorIndex = storeys.findIndex((storey) => Math.abs(storey.offset - requestOffset) < 1e-5);
         if (floorIndex >= 0) {
           floorPlans.set(floorIndex, nextResult);
           paintFloorLibrary();
@@ -444,11 +503,12 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
         result.truncated ? [{ severity: "warning", title: "Section output is partial", detail: "Raise the segment limit or reduce visible geometry." }] : [],
       );
     } catch (error) {
+      if (!isCurrent()) return;
       if (!(error instanceof DOMException && error.name === "AbortError")) {
         ctx.feedback.log(error instanceof Error ? error.message : String(error), "error");
       }
     } finally {
-      if (controller === next) {
+      if (controller === next && request === runRequest) {
         controller = null;
         running = false;
         if (generation === localGeneration) {
@@ -491,7 +551,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
   const filePart = (value: string): string => value.trim().replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "floor";
 
   const exportSvg = (): void => {
-    if (!result?.bounds) return void ctx.feedback.toast("Build a section before exporting", "info");
+    if (!hasSectionDrawing(result)) return void ctx.feedback.toast("Build a section before exporting", "info");
     const content = svgContent(result, `IFCViewX mesh section ${axis.toUpperCase()}=${offset.toFixed(4)} m`);
     const name = `section-${axis}-${offset.toFixed(3).replace("-", "m")}.svg`;
     ctx.files.export("section-workspace.svg", name, content, "image/svg+xml");
@@ -500,7 +560,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
   const exportFloor = (index: number): void => {
     const storey = storeys[index];
     const plan = floorPlans.get(index);
-    if (!storey || !plan?.bounds) return void ctx.feedback.toast("That floor plan is still building", "info");
+    if (!storey || !hasSectionDrawing(plan)) return void ctx.feedback.toast("Build this floor plan before downloading it", "info");
     ctx.files.export(
       "section-workspace.svg",
       `plan-${filePart(storey.name)}.svg`,
@@ -510,8 +570,8 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
   };
 
   const exportFloorBook = (): void => {
-    const ready = [...floorPlans].filter(([, plan]) => plan.bounds !== null);
-    if (!ready.length) return void ctx.feedback.toast("Floor plans are still building", "info");
+    const ready = [...floorPlans].filter(([, plan]) => hasSectionDrawing(plan));
+    if (!ready.length) return void ctx.feedback.toast("Build at least one floor plan before downloading the set", "info");
     const sheets = ready.map(([index, plan]) => {
       const storey = storeys[index];
       return `<section><header><h1>${escapeMarkup(storey.name)}</h1><span>Cut at ${storey.offset.toFixed(3)} m</span></header>${svgContent(plan, `IFCViewX floor plan ${storey.name}`)}</section>`;
@@ -520,17 +580,30 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
     ctx.files.export("section-workspace.booklet", "ifc-floor-plans.html", html, "text/html");
   };
 
+  const stopFloorBuild = (clearCache: boolean): void => {
+    const active = floorController;
+    active?.abort();
+    if (floorController === active) {
+      floorController = null;
+      floorBuilding = false;
+      floorProgress = -1;
+    }
+    if (clearCache) floorPlans.clear();
+    paintFloorLibrary();
+  };
+
   const showFloor = async (index: number): Promise<void> => {
     const storey = storeys[index];
     if (!storey) return;
+    if (floorBuilding) stopFloorBuild(false);
     axis = "y";
     offset = storey.offset;
     flip = false;
     const cached = floorPlans.get(index);
     if (!cached) {
       await run();
-      if (result) floorPlans.set(index, result);
     } else {
+      stopCurrentRun();
       result = cached;
       applyPlane();
       indexContours();
@@ -546,11 +619,15 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
 
   const buildAllFloorPlans = async (rebuild = false): Promise<void> => {
     if (!storeys.length || floorBuilding) return;
-    floorController?.abort();
     const localGeneration = generation;
     const next = new AbortController();
     floorController = next;
     if (rebuild) floorPlans.clear();
+    if (floorPlans.size >= storeys.length) {
+      floorController = null;
+      paintFloorLibrary();
+      return;
+    }
     floorBuilding = true;
     floorProgress = -1;
     paintFloorLibrary();
@@ -564,10 +641,11 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
           maxSegments,
           signal: next.signal,
         });
-        if (generation !== localGeneration) return;
+        if (generation !== localGeneration || floorController !== next || next.signal.aborted) return;
         floorPlans.set(index, plan);
       }
     } catch (error) {
+      if (generation !== localGeneration || floorController !== next || next.signal.aborted) return;
       if (!(error instanceof DOMException && error.name === "AbortError")) {
         ctx.feedback.log(error instanceof Error ? error.message : String(error), "error");
       }
@@ -586,38 +664,66 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
       floorLibrary.replaceChildren(hint("info", "No IfcBuildingStorey levels were found. Use the plane offset for a manual cut."));
       return;
     }
-    const ready = floorPlans.size;
-    const downloadAll = button("Download set", exportFloorBook, "accent");
+    const built = floorPlans.size;
+    const ready = [...floorPlans.values()].filter(hasSectionDrawing).length;
+    const empty = built - ready;
+    const complete = built === storeys.length;
+    const downloadAll = button(complete ? `Download set (${ready})` : `Download ready (${ready})`, exportFloorBook, "accent");
     downloadAll.disabled = ready === 0;
-    const rebuild = button(floorBuilding ? "Building" : "Rebuild all", () => void buildAllFloorPlans(true));
-    rebuild.disabled = floorBuilding;
+    const buildLabel = floorBuilding ? "Stop build" : complete ? "Rebuild all" : built ? "Build remaining" : "Build all";
+    const build = button(buildLabel, () => {
+      if (floorBuilding) stopFloorBuild(false);
+      else void buildAllFloorPlans(complete);
+    });
     const rows = storeys.map((storey, index) => {
       const plan = floorPlans.get(index);
+      const builtPlan = floorPlans.has(index);
+      const drawable = hasSectionDrawing(plan);
       const current = axis === "y" && Math.abs(offset - storey.offset) < 1e-5;
+      const floorState = drawable
+        ? "Ready"
+        : builtPlan
+          ? "Empty"
+          : floorProgress === index
+            ? "Building now"
+            : floorBuilding
+              ? "Waiting to build"
+              : "Not built";
       const open = h("button", {
         class: "sw-floor-open",
         type: "button",
         "aria-current": current ? "true" : "false",
+        "aria-label": `${storey.name}, ${storey.offset.toFixed(2)} metres, ${floorState.toLowerCase()}`,
       }, [
         h("span", { text: storey.name }),
         h("small", { text: `${storey.offset.toFixed(2)} m` }),
       ]);
       open.addEventListener("click", () => void showFloor(index));
       const download = iconButton("download", `Download ${storey.name} SVG`, () => exportFloor(index), "icon-btn sm");
-      download.disabled = !plan;
+      download.disabled = !drawable;
       return h("div", { class: "sw-floor-row" }, [
-        h("span", { class: `sw-floor-state${plan ? " ready" : floorProgress === index ? " building" : ""}`, title: plan ? "Ready" : floorProgress === index ? "Building" : "Queued" }),
+        h("span", {
+          class: `sw-floor-state${drawable ? " ready" : builtPlan ? " empty" : floorProgress === index ? " building" : ""}`,
+          title: floorState,
+        }),
         open,
         download,
       ]);
     });
+    const summary = floorBuilding
+      ? `Building ${Math.max(1, floorProgress + 1)} of ${storeys.length}`
+      : built === 0
+        ? "Not built"
+        : complete
+          ? empty ? `${ready} ready / ${empty} empty` : `${ready} ready`
+          : `${built}/${storeys.length} built`;
     floorLibrary.replaceChildren(h("details", { class: "sw-floors", open: "" }, [
       h("summary", {}, [
         icon("layers", 13),
         h("span", { text: "Floor plans" }),
-        h("small", { text: floorBuilding ? `${ready}/${storeys.length} building` : `${ready}/${storeys.length} ready` }),
+        h("small", { text: summary }),
       ]),
-      h("div", { class: "sw-floor-actions" }, [rebuild, downloadAll]),
+      h("div", { class: "sw-floor-actions" }, [build, downloadAll]),
       h("div", { class: "sw-floor-list" }, rows),
     ]));
   };
@@ -633,17 +739,21 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
       flipControl.title = flip ? "Keep geometry above the plane" : "Keep geometry below the plane";
     }
     if (runControl) {
-      runControl.textContent = running ? "Stop" : "Rebuild";
+      runControl.textContent = running ? "Stop" : workspaceAxis === null ? "Apply plane" : "Rebuild";
       runControl.classList.toggle("stop", running);
       runControl.classList.toggle("primary", !running);
-      runControl.setAttribute("aria-label", running ? "Stop rebuilding the drawing" : "Rebuild the drawing");
+      runControl.setAttribute(
+        "aria-label",
+        running ? "Stop rebuilding the drawing" : workspaceAxis === null ? "Apply the section plane" : "Rebuild the drawing",
+      );
     }
   };
 
   const paintControls = (): void => {
     axisControl = select([["x", "Section / X"], ["y", "Plan / Y"], ["z", "Section / Z"]], axis, (value) => {
       axis = value as SectionAxis;
-      const box = ctx.view.boxAround([...elements.keys()], 0);
+      const selected = ctx.view.selection();
+      const box = ctx.view.boxAround(selected.length ? selected : [...elements.keys()], 0);
       if (box) {
         const index = axis === "x" ? 0 : axis === "y" ? 1 : 2;
         offset = (box.min[index] + box.max[index]) / 2;
@@ -670,16 +780,15 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
     detailControl = select([["25000", "Fast · 25k"], ["100000", "Balanced · 100k"], ["250000", "Detailed · 250k"]], String(maxSegments), (value) => {
       maxSegments = Number(value);
       ctx.storage.write("maxSegments", maxSegments);
-      floorController?.abort();
-      floorController = null;
-      floorBuilding = false;
-      floorPlans.clear();
-      void run(false).then(() => void buildAllFloorPlans());
+      stopFloorBuild(true);
+      void run(workspaceAxis === null);
     });
     flipControl = button("", () => { flip = !flip; syncControls(); void run(); });
     runControl = button("", () => {
-      if (running) controller?.abort();
-      else void run(false);
+      if (!running) return void run(workspaceAxis === null);
+      stopCurrentRun();
+      syncControls();
+      paintStatus();
     });
     runControl.classList.add("sw-rebuild");
     const align = button("Align 3D", () => ctx.view.viewFrom(axis === "y" ? "top" : axis === "x" ? "right" : "front"));
@@ -707,7 +816,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
 
   const initialise = (): void => {
     generation += 1;
-    controller?.abort();
+    stopCurrentRun();
     floorController?.abort();
     floorController = null;
     floorBuilding = false;
@@ -716,22 +825,28 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
     elements.clear();
     for (const element of ctx.model.elements()) elements.set(element.id, element);
     storeys = collectStoreys();
-    const active = ctx.view.sections()[0];
-    const box = ctx.view.boxAround([...elements.keys()], 0);
+    const sections = ctx.view.sections();
+    const active = sections.find((state) => state.axis === axis) ?? sections[0];
+    const selected = ctx.view.selection();
+    const box = ctx.view.boxAround(selected.length ? selected : [...elements.keys()], 0);
     if (active) {
       axis = active.axis;
       offset = active.offset;
       flip = active.flip;
+      workspaceAxis = active.axis;
     } else if (box) {
+      workspaceAxis = null;
       const index = axis === "x" ? 0 : axis === "y" ? 1 : 2;
       offset = (box.min[index] + box.max[index]) / 2;
+    } else {
+      workspaceAxis = null;
     }
     result = null;
     contourGroups.clear();
     if (resultHandle) ctx.results.dispose(resultHandle);
     resultHandle = "";
     paintControls();
-    if (ctx.session.model().loaded) void run().then(() => void buildAllFloorPlans());
+    if (ctx.session.model().loaded) void run();
     else {
       contourLayer.replaceChildren();
       status.replaceChildren(emptyState("section", "No model loaded", "Open an IFC model to build a synchronized section."));
@@ -801,22 +916,31 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
   ctx.events.on("selection", syncSelection);
   ctx.events.on("section", () => {
     if (syncing) return;
-    const active = ctx.view.sections()[0];
+    const sections = ctx.view.sections();
+    const active = sections.find((state) => state.axis === axis) ?? sections[0];
     if (!active) {
       window.clearTimeout(rerunTimer);
-      controller?.abort();
+      stopCurrentRun();
       result = null;
+      workspaceAxis = null;
       contourGroups.clear();
       contourLayer.replaceChildren();
       syncControls();
       paintStatus();
       return;
     }
+    if (active.axis === axis && active.offset === offset && active.flip === flip) return;
+    stopCurrentRun();
     axis = active.axis;
     offset = active.offset;
     flip = active.flip;
+    workspaceAxis = active.axis;
     syncControls();
     scheduleRun();
+  });
+  ctx.events.on("visibility", () => {
+    stopFloorBuild(true);
+    if (ctx.session.model().loaded && workspaceAxis !== null) void run(false);
   });
   ctx.events.on("model", initialise);
   ctx.commands.register("section-workspace.open", syncControls);
@@ -831,7 +955,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
       window.clearTimeout(rerunTimer);
       if (viewportFrame) cancelAnimationFrame(viewportFrame);
       resizeObserver?.disconnect();
-      controller?.abort();
+      stopCurrentRun();
       floorController?.abort();
       if (resultHandle) ctx.results.dispose(resultHandle);
     },

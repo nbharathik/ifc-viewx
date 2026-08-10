@@ -51,7 +51,7 @@
     "keywords": "measure distance gap clearance laser axis room witness surface precise",
     "does": [
       "Shortest surface distance with witness points between two selected elements",
-      "Configurable clearance threshold with a clear pass or fail result",
+      "Configurable clearance threshold with distinct pass, fail and unavailable results",
       "Six-direction X, Y and Z laser from the last clicked surface",
       "Perpendicular camera alignment using the picked face normal",
       "Persistent measurement spans stored with saved viewpoints",

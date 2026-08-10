@@ -38,8 +38,8 @@ import { buildMenu, busyRow, CommandPalette, confirmAction, h, icon, lightDismis
 import { ageLabel, clearChats, readChats, saveChat, type Conversation } from "./llm/chatStore.js";
 import { sampleModel, SAMPLE_NAME } from "./ui/sample.js";
 import { download } from "./sdk/data.js";
-import type { PluginPython } from "./sdk/types.js";
-import type { ExtensionIssueInput, ExtensionIssueResult } from "./sdk/v2/types.js";
+import type { ExtensionIssueInput, ExtensionIssueResult } from "./sdk/types.js";
+import type { PythonRunner } from "./plugins/runtime/context.js";
 import { PluginHost } from "./plugins/runtime/host.js";
 import { PluginBrowser } from "./plugins/runtime/browser.js";
 import { CATALOG, setInstalledExtensions } from "./plugins/registry.js";
@@ -819,6 +819,11 @@ function toggleMeasure(): void {
   syncTools();
 }
 
+function openSmartMeasure(): void {
+  viewer.setMeasuring(false);
+  void plugins.open("smart-measure");
+}
+
 // The rail, the ribbon and Esc can all start or stop measuring, so the mode is
 // mirrored from the viewer. Only the mode: the measurement itself changes on
 // every hover frame, and repainting the ribbon that often would be wasteful.
@@ -847,6 +852,15 @@ function toggleSectionBox(): void {
         : "Section box on. Drag the sliders in the Section tool to close it in.",
     );
   }
+  syncTools();
+}
+
+function sectionBoxAroundSelection(): void {
+  const selected = viewer.getSelectedIds();
+  const box = viewer.boxAround(selected, 0.08);
+  if (!box) return void toast("Select one or more elements first", "info");
+  viewer.setSectionBox(box);
+  shell.log(`Section box fitted to ${selected.length} selected element(s).`);
   syncTools();
 }
 
@@ -1160,7 +1174,7 @@ function deleteSelection(): void {
 }
 
 /** The guarded pipeline, as handed to plugins. The console is one of them. */
-const pythonFacet: PluginPython = {
+const pythonFacet: PythonRunner = {
   runsNatively: () => service.runsNatively(),
   query: (code, onStatus) => withPyStatus(onStatus, () => runQuery(code)),
   propose: (code, onStatus) => withPyStatus(onStatus, () => proposeEdit(code, "user")),
@@ -1887,6 +1901,13 @@ registry.add([
   { id: "tool.plan", label: "2D plan", icon: "layers", section: "Tools", shortcut: "G", hint: "Floorplan inset, cut by the horizontal section. Click it to select in 3D", enabled: hasModel, pressed: () => viewer.isPlanView(), run: togglePlan },
   { id: "tool.hud", label: "Perf HUD", icon: "gauge", section: "Tools", pressed: () => settings.hud, run: () => setHud(!settings.hud) },
 
+  { id: "analysis.smart-measure", label: "Smart measure", icon: "ruler", section: "Analyze", hint: "Shortest clearance between two elements or a six-axis surface scan", enabled: hasModel, run: openSmartMeasure },
+  { id: "analysis.section-workspace", label: "Section drawing", icon: "section", section: "Analyze", hint: "Synchronized plans and sections from the active cut", enabled: hasModel, run: () => void plugins.open("section-workspace") },
+  { id: "analysis.clash", label: "Clash detection", icon: "alert", section: "Analyze", hint: "Find mesh intersections and clearance failures", enabled: hasModel, run: () => void plugins.open("clash") },
+  { id: "analysis.health", label: "Model health", icon: "shield", section: "Analyze", hint: "Check identity, geometry and model quality", enabled: hasModel, run: () => void plugins.open("model-health") },
+  { id: "analysis.compare", label: "Compare models", icon: "compare", section: "Analyze", hint: "Classify geometry and property changes", enabled: hasModel, run: () => void plugins.open("compare") },
+  { id: "analysis.takeoff", label: "Takeoff", icon: "calculator", section: "Analyze", hint: "Extract quantities from the model", enabled: hasModel, run: () => void plugins.open("takeoff") },
+
   { id: "panel.tree", label: "Structure", icon: "panel-left-close", section: "Panels", shortcut: "Ctrl+B", pressed: () => shell.isPanelOpen("outliner"), run: () => { shell.togglePanel("outliner"); ribbon.sync(); } },
   { id: "panel.insp", label: "Inspector", icon: "panel-right-close", section: "Panels", shortcut: "\\", pressed: () => shell.isPanelOpen("inspector"), run: () => { shell.togglePanel("inspector"); ribbon.sync(); } },
   { id: "panel.props", label: "Properties", icon: "info", section: "Panels", shortcut: "P", run: () => shell.selectTab("properties") },
@@ -1938,9 +1959,8 @@ const RIBBON: RibbonTab[] = [
       ] },
     ],
   },
-  // Each command has one ribbon home. Home follows the everyday loop from
-  // selection to visibility, measurement and editing. The other tabs hold
-  // role-specific controls without repeating that loop.
+  // Each command has one ribbon home. Everyday selection and edits stay on
+  // Home, while geometry work has one dedicated Analyze tab.
   {
     id: "home",
     label: "Home",
@@ -1963,9 +1983,6 @@ const RIBBON: RibbonTab[] = [
       { label: "Find", items: [
         { kind: "cmd", id: "vis.filters" },
         { kind: "cmd", id: "vis.clear", size: "sm" },
-      ] },
-      { label: "Measure", items: [
-        { kind: "cmd", id: "tool.measure" },
       ] },
       { label: "Edit", items: [
         { kind: "cmd", id: "edit.undo", size: "sm" },
@@ -1994,20 +2011,37 @@ const RIBBON: RibbonTab[] = [
         { kind: "cmd", id: "vis.spaces", size: "sm" },
         { kind: "cmd", id: "vis.openings", size: "sm" },
       ] },
-      { label: "Section", items: [
-        { kind: "cmd", id: "tool.section" },
-        { kind: "cmd", id: "tool.box" },
-        { kind: "cmd", id: "tool.plan", size: "sm" },
-      ] },
       { label: "Render", items: [
         { kind: "control", build: buildScaleControl },
         { kind: "cmd", id: "tool.hud", size: "sm" },
         { kind: "cmd", id: "app.theme", size: "sm" },
       ] },
-      { label: "Workspace", items: [
-        { kind: "cmd", id: "panel.tree", size: "sm" },
-        { kind: "cmd", id: "panel.insp", size: "sm" },
-        { kind: "cmd", id: "panel.log", size: "sm" },
+    ],
+  },
+  {
+    id: "analyze",
+    label: "Analyze",
+    groups: [
+      { label: "Measure", items: [
+        { kind: "cmd", id: "tool.measure" },
+        { kind: "cmd", id: "analysis.smart-measure" },
+      ] },
+      { label: "Cut", items: [
+        { kind: "cmd", id: "tool.section" },
+        { kind: "cmd", id: "tool.box" },
+        { kind: "cmd", id: "tool.plan", size: "sm" },
+        { kind: "cmd", id: "analysis.section-workspace", size: "sm" },
+      ] },
+      { label: "Inspect", items: [
+        { kind: "cmd", id: "cam.fitsel" },
+        { kind: "cmd", id: "vis.isolate", size: "sm" },
+        { kind: "cmd", id: "panel.props", size: "sm" },
+      ] },
+      { label: "Geometry", items: [
+        { kind: "cmd", id: "analysis.clash" },
+        { kind: "cmd", id: "analysis.health", size: "sm" },
+        { kind: "cmd", id: "analysis.compare", size: "sm" },
+        { kind: "cmd", id: "analysis.takeoff", size: "sm" },
       ] },
     ],
   },
@@ -2094,8 +2128,8 @@ const palette = new CommandPalette(() => [
 
 // ---------------------------------------------------------------------------
 // Plugins. The panel is the catalog until something is running, and the status
-// bar toggle opens the full browser. Plugin tools stay out of the ribbon; what
-// is on the rail is one entry, like every other panel.
+// bar toggle opens the full browser. First-party analysis workflows also have
+// direct commands so they are discoverable without browsing the catalog.
 /** A refused command explains itself; a silent chip teaches nothing. */
 function runCommandOrExplain(id: string): void {
   if (registry.run(id)) return;
@@ -2160,6 +2194,9 @@ const pluginBrowser = new PluginBrowser(plugins, service, {
   runCommand: runCommandOrExplain,
   openConnection: () => connection.open(),
 }, installedExtensions);
+
+dock.onOpenSmartMeasure = openSmartMeasure;
+dock.onOpenSectionWorkspace = () => void plugins.open("section-workspace");
 
 const installedCommands = new Map<string, () => void>();
 
@@ -2310,6 +2347,10 @@ shell.viewerHost.addEventListener("contextmenu", (e) => {
       { label: "Frame element", run: () => viewer.fitToElement(pick.expressID) },
       { label: `Isolate${scope}`, run: () => viewer.isolateSelected() },
       { label: `Hide${scope}`, run: () => viewer.hideSelected() },
+      { separator: true },
+      ...(count === 2 ? [{ label: "Measure shortest clearance", run: openSmartMeasure }] : []),
+      { label: `Section box around selection${scope}`, run: sectionBoxAroundSelection },
+      { label: "Open section drawing", run: () => void plugins.open("section-workspace") },
       { separator: true },
       { label: `Isolate all ${type}`, run: () => isolateByType(type) },
       { label: "Show all", run: () => viewer.showAll() },

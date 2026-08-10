@@ -2,7 +2,7 @@
 
 IFCViewX supports reviewed extensions bundled with the app and local packages installed at runtime. This page covers bundled TypeScript extensions. See [installed browser extensions](installed.md) for the isolated package format, permissions, CLI, and development bridge.
 
-An SDK v2 extension is one lazy-loaded folder with a serializable manifest and a panel module.
+An extension is one lazy-loaded folder with a serializable manifest and a panel module.
 
 ```text
 src/plugins/my-tool/
@@ -52,9 +52,9 @@ The manifest is data, so it can be validated without executing extension code:
 The panel receives grouped services rather than the renderer or service client:
 
 ```ts
-import { grid, page, type ExtensionContextV2, type PluginInstance } from "@ifcviewx/sdk";
+import { grid, page, type ExtensionContext, type ExtensionInstance } from "@ifcviewx/sdk";
 
-export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstance {
+export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstance {
   const body = document.createElement("div");
   host.appendChild(page(body));
 
@@ -76,18 +76,18 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
 
 The host checks every service call against `permissions`. Missing permissions fail with the extension name and required permission. Closing the panel aborts `ctx.signal`, removes event listeners and contributions, cancels linked geometry jobs, and calls `dispose()`.
 
-## The boundary
+## One SDK boundary
 
-Import `@ifcviewx/sdk` and files inside your own extension folder. Do not import viewer internals. SDK v2 does not expose `ctx.viewer`, `ctx.service`, or `ctx.python`.
+Import `@ifcviewx/sdk` and files inside your own extension folder. Do not import viewer internals. The SDK has one permission-scoped `ExtensionContext` and does not expose `ctx.viewer` or `ctx.service`. Python is a declared service available only to reviewed bundled extensions with `automation.python`.
 
 ```ts
-import { page, grid, type ExtensionContextV2 } from "@ifcviewx/sdk";
+import { page, grid, type ExtensionContext } from "@ifcviewx/sdk";
 ```
 
 `npm run check` validates the manifest, import boundary, SDK context, types, and tests.
 
-## SDK v1 compatibility
+The manifest keeps `manifestVersion: 2` as its file-format marker, while the
+public API has no v1 or v2 split. Every bundled extension uses `extension.json`
+and the current SDK.
 
-Existing bundled plugins with `manifest.ts` and `PluginContext` remain supported through an adapter. New extensions should use v2. A folder must not contain both manifest versions.
-
-See the [installed extension guide](installed.md), the [SDK v2 reference](api-v2.md), the [SDK v1 compatibility reference](api.md), and the [catalog](catalog.md).
+See the [installed extension guide](installed.md), the [SDK reference](api.md), and the [catalog](catalog.md).

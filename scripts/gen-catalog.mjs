@@ -8,23 +8,14 @@ import { transform } from "esbuild";
 
 const PLUGINS = join("src", "plugins");
 const OUT = join("docs", "plugins", "catalog.md");
-const STUB = "const definePlugin = (m) => m;";
-
-/** Strips the types and swaps the SDK import for a definePlugin that is identity. */
 async function evaluate(source) {
   const { code } = await transform(source, { loader: "ts", format: "esm" });
-  const js = code.replace(/import\s*\{[^}]*\}\s*from\s*["']@ifcviewx\/sdk["'];?/g, STUB);
-  return import(`data:text/javascript,${encodeURIComponent(js)}`);
+  return import(`data:text/javascript,${encodeURIComponent(code)}`);
 }
 
 const found = [];
 for (const entry of await readdir(PLUGINS, { withFileTypes: true })) {
   if (!entry.isDirectory() || entry.name === "runtime") continue;
-  const source = await readFile(join(PLUGINS, entry.name, "manifest.ts"), "utf8").catch(() => null);
-  if (source) {
-    found.push((await evaluate(source)).default);
-    continue;
-  }
   const manifestText = await readFile(join(PLUGINS, entry.name, "extension.json"), "utf8").catch(() => null);
   if (!manifestText) continue;
   const manifest = JSON.parse(manifestText);
@@ -73,10 +64,10 @@ const section = ([tier, title, blurb]) => {
 };
 
 const page = [
-  "# Plugin catalog",
+  "# Extension catalog",
   "",
-  "Everything in the viewer's plugin browser, generated from the manifests.",
-  "Yours belongs here too: see [writing a plugin](index.md).",
+  "Everything in the viewer's plugin browser, generated from extension manifests.",
+  "Yours belongs here too: see [writing an extension](index.md).",
   "",
   ...TIERS.map(section).filter(Boolean),
 ].join("\n");

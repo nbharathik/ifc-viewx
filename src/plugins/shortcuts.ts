@@ -1,4 +1,4 @@
-// Catalog entries for tools that are not plugin folders.
+// Catalog entries for tools that are not extension folders.
 //
 // Two kinds live here. `core` entries are panels the app already carries on
 // its own rail, so the catalog points at them rather than mounting a second
@@ -8,11 +8,13 @@
 // honest catalog is worth more than a tidy rule.
 //
 // Everything else, including anything you write, is a folder. See docs/plugins.
-import { definePlugin } from "@ifcviewx/sdk";
-import type { PluginManifest } from "../sdk/types.js";
+import type { CatalogPlugin } from "./registry.js";
 
-export const SHORTCUTS: PluginManifest[] = [
-  definePlugin({
+type CatalogShortcut = Omit<CatalogPlugin, "extension" | "installation" | "load">;
+const defineShortcut = (shortcut: CatalogShortcut): CatalogShortcut => shortcut;
+
+export const SHORTCUTS: CatalogShortcut[] = [
+  defineShortcut({
     id: "ids",
     name: "IDS Validation",
     tagline: "Check the model against a buildingSMART specification",
@@ -30,7 +32,7 @@ export const SHORTCUTS: PluginManifest[] = [
       "Nothing uploaded: the .ids file is parsed in this tab",
     ],
   }),
-  definePlugin({
+  defineShortcut({
     id: "bcf",
     name: "Issue Tracker",
     tagline: "Capture issues on the model and export them as BCF",
@@ -48,7 +50,7 @@ export const SHORTCUTS: PluginManifest[] = [
       "Export a BCF 2.1 zip for other tools",
     ],
   }),
-  definePlugin({
+  defineShortcut({
     id: "filters",
     name: "Smart Filters",
     tagline: "Rule based visibility that you can stack and undo",
@@ -65,7 +67,7 @@ export const SHORTCUTS: PluginManifest[] = [
       "Isolate or hide, with a live chip in the viewport",
     ],
   }),
-  definePlugin({
+  defineShortcut({
     id: "checks",
     name: "Model Checks",
     tagline: "Structural QA over the whole file",
@@ -82,7 +84,7 @@ export const SHORTCUTS: PluginManifest[] = [
       "Severity counts feed straight into the model summary",
     ],
   }),
-  definePlugin({
+  defineShortcut({
     id: "schedules",
     name: "Element Schedules",
     tagline: "Tabular exports with resolved property columns",
@@ -100,7 +102,7 @@ export const SHORTCUTS: PluginManifest[] = [
       "CSV export of the whole table",
     ],
   }),
-  definePlugin({
+  defineShortcut({
     id: "edits",
     name: "Model Edits",
     tagline: "Rename, set properties and delete, with a measured diff",
@@ -119,7 +121,7 @@ export const SHORTCUTS: PluginManifest[] = [
     ],
   }),
 
-  definePlugin({
+  defineShortcut({
     id: "convert",
     name: "IfcOpenShell Converter",
     tagline: "Exact solids and instant reopens",
@@ -137,7 +139,7 @@ export const SHORTCUTS: PluginManifest[] = [
       "Reopens become instant for that model",
     ],
   }),
-  definePlugin({
+  defineShortcut({
     id: "native-python",
     name: "Native Python",
     tagline: "Full IfcOpenShell scripting with no runtime download",
@@ -155,7 +157,7 @@ export const SHORTCUTS: PluginManifest[] = [
       "Edits are executed on a copy and staged for approval",
     ],
   }),
-  definePlugin({
+  defineShortcut({
     id: "mcp",
     name: "MCP Bridge",
     tagline: "Let Claude and other AI clients drive this viewer",
@@ -173,7 +175,7 @@ export const SHORTCUTS: PluginManifest[] = [
       "Works with Claude Desktop and Claude Code",
     ],
   }),
-  definePlugin({
+  defineShortcut({
     id: "llm-proxy",
     name: "Assistant Key Vault",
     tagline: "Keep the provider key off the browser",

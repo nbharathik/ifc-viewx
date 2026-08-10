@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { ExtensionContributionRegistry, ExtensionScope } from "../src/extensions/contributions.js";
-import { createExtensionContextV2 } from "../src/extensions/context.js";
+import { createExtensionContext } from "../src/extensions/context.js";
 import { ExtensionResultStore } from "../src/extensions/results.js";
-import type { ExtensionManifestV2 } from "../src/sdk/v2/contributions.js";
-import type { PluginContext } from "../src/sdk/types.js";
+import type { ExtensionManifest } from "../src/sdk/contributions.js";
+import type { HostContext } from "../src/plugins/runtime/context.js";
 
 const summary = (id: string, effect: "read" | "view" | "propose") => ({
   id,
@@ -14,7 +14,7 @@ const summary = (id: string, effect: "read" | "view" | "propose") => ({
   parallelSafe: true,
 });
 
-function manifest(permissions: ExtensionManifestV2["permissions"]): ExtensionManifestV2 {
+function manifest(permissions: ExtensionManifest["permissions"]): ExtensionManifest {
   return {
     manifestVersion: 2,
     id: "sample",
@@ -43,7 +43,7 @@ function manifest(permissions: ExtensionManifestV2["permissions"]): ExtensionMan
   };
 }
 
-function legacy() {
+function hostContext() {
   const off = vi.fn();
   const clash = vi.fn((_a: number[], _b: number[], options?: { signal?: AbortSignal }) =>
     new Promise<never>((_resolve, reject) => {
@@ -54,7 +54,14 @@ function legacy() {
   const sectionContours = vi.fn(async () => ({ polylines: [], fidelity: "mesh" }));
   const geometrySignatures = vi.fn(async () => ({ signatures: [], fidelity: "mesh" }));
   const setPickGuide = vi.fn();
+  const isMeasuring = vi.fn(() => true);
+  const isCategoryVisible = vi.fn(() => true);
+  const setCategoryVisible = vi.fn(async () => undefined);
+  const query = vi.fn(async () => "query result");
+  const propose = vi.fn(async () => "proposal result");
   const value = {
+    viewer: { isMeasuring, isCategoryVisible, setCategoryVisible },
+    python: { runsNatively: vi.fn(() => false), query, propose },
     capabilities: {
       list: () => [summary("counts", "read"), summary("clash", "read"), summary("select", "view"), summary("danger", "propose")],
       execute,
@@ -80,21 +87,24 @@ function legacy() {
     run: vi.fn(),
     read: vi.fn((_key: string, fallback: unknown) => fallback),
     write: vi.fn(),
-  } as unknown as PluginContext;
-  return { value, off, clash, laser, sectionContours, geometrySignatures, setPickGuide, execute };
+  } as unknown as HostContext;
+  return {
+    value, off, clash, laser, sectionContours, geometrySignatures, setPickGuide,
+    isMeasuring, isCategoryVisible, setCategoryVisible, query, propose, execute,
+  };
 }
 
-describe("SDK v2 extension context", () => {
+describe("extension SDK context", () => {
   it("exposes no raw host escape hatch and enforces domain permissions", async () => {
-    const old = legacy();
+    const old = hostContext();
     const scope = new ExtensionScope("sample", new ExtensionContributionRegistry());
     const definition = manifest(["model.structure.read"]);
     scope.registerManifest(definition.contributes);
-    const ctx = createExtensionContextV2(definition, old.value, scope);
+    const ctx = createExtensionContext(definition, old.value, scope);
 
     expect("viewer" in ctx).toBe(false);
     expect("service" in ctx).toBe(false);
-    expect("python" in ctx).toBe(false);
+    expect(() => ctx.python.runsNatively()).toThrow(/requires permission automation\.python/);
     expect(ctx.model.elements()).toHaveLength(1);
     expect(() => ctx.view.hide([1])).toThrow(/requires permission view\.control/);
     expect(ctx.capabilities.list().map((entry) => entry.id)).toEqual(["counts"]);
@@ -102,8 +112,23 @@ describe("SDK v2 extension context", () => {
     await expect(ctx.capabilities.execute("counts")).resolves.toBe("ok");
   });
 
+  it("scopes lazy categories and reviewed Python automation", async () => {
+    const old = hostContext();
+    const scope = new ExtensionScope("sample", new ExtensionContributionRegistry());
+    const definition = manifest(["view.read", "view.control", "automation.python", "edit.propose"]);
+    scope.registerManifest(definition.contributes);
+    const ctx = createExtensionContext(definition, old.value, scope);
+
+    expect(ctx.view.categoryVisible("IfcSpace")).toBe(true);
+    await ctx.view.setCategoryVisible("IfcSpace", true);
+    expect(old.isCategoryVisible).toHaveBeenCalledWith("IfcSpace");
+    expect(old.setCategoryVisible).toHaveBeenCalledWith("IfcSpace", true);
+    await expect(ctx.python.query("result = 1")).resolves.toBe("query result");
+    await expect(ctx.python.propose("def edit(model): pass")).resolves.toBe("proposal result");
+  });
+
   it("removes events, commands, overlays and pending geometry on close", async () => {
-    const old = legacy();
+    const old = hostContext();
     const registry = new ExtensionContributionRegistry();
     const scope = new ExtensionScope("sample", registry);
     const definition = manifest([
@@ -116,7 +141,7 @@ describe("SDK v2 extension context", () => {
     const removeOverlayLine = vi.fn();
     const results = new ExtensionResultStore();
     const onResult = vi.fn();
-    const ctx = createExtensionContextV2(definition, old.value, scope, {
+    const ctx = createExtensionContext(definition, old.value, scope, {
       registerCommand,
       results,
       onResult,
@@ -149,11 +174,11 @@ describe("SDK v2 extension context", () => {
   });
 
   it("mediates geometry, surface pick, camera, visibility and persistent measurements", async () => {
-    const old = legacy();
+    const old = hostContext();
     const scope = new ExtensionScope("sample", new ExtensionContributionRegistry());
     const definition = manifest(["geometry.query", "view.read", "view.control"]);
     scope.registerManifest(definition.contributes);
-    const ctx = createExtensionContextV2(definition, old.value, scope);
+    const ctx = createExtensionContext(definition, old.value, scope);
 
     await ctx.geometry.laser([1, 2, 3], { source: 1, maxDistance: 12 });
     expect(old.laser).toHaveBeenCalledWith([1, 2, 3], expect.objectContaining({
@@ -169,6 +194,8 @@ describe("SDK v2 extension context", () => {
     await ctx.geometry.signatures([1]);
     expect(old.geometrySignatures).toHaveBeenCalledWith([1], expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(ctx.view.lastPick()).toEqual({ expressID: 1, point: [1, 2, 3] });
+    expect(ctx.view.measuring()).toBe(true);
+    expect(old.isMeasuring).toHaveBeenCalledOnce();
     ctx.view.pickGuide(true);
     expect(old.setPickGuide).toHaveBeenCalledWith(true);
     expect(ctx.view.isVisible(1)).toBe(true);
@@ -180,21 +207,21 @@ describe("SDK v2 extension context", () => {
   });
 
   it("rejects undeclared commands and runtime contributions", () => {
-    const old = legacy();
+    const old = hostContext();
     const scope = new ExtensionScope("sample", new ExtensionContributionRegistry());
     const definition = manifest(["view.overlay"]);
     scope.registerManifest(definition.contributes);
-    const ctx = createExtensionContextV2(definition, old.value, scope, { registerCommand: vi.fn() });
+    const ctx = createExtensionContext(definition, old.value, scope, { registerCommand: vi.fn() });
     expect(() => ctx.commands.run("other.run")).toThrow(/did not declare command/);
     expect(() => ctx.contributions.register("overlays", { id: "other.overlay", title: "Other" })).toThrow(/did not declare/);
   });
 
   it("creates review issues only with explicit issue and viewport permissions", async () => {
-    const old = legacy();
+    const old = hostContext();
     const deniedScope = new ExtensionScope("sample", new ExtensionContributionRegistry());
     const deniedDefinition = manifest(["review.issue.create"]);
     deniedScope.registerManifest(deniedDefinition.contributes);
-    const denied = createExtensionContextV2(deniedDefinition, old.value, deniedScope, {
+    const denied = createExtensionContext(deniedDefinition, old.value, deniedScope, {
       createIssue: vi.fn(async () => ({
         id: "issue-1", title: "Clash", status: "Open" as const, snapshot: "pending" as const,
       })),
@@ -207,7 +234,7 @@ describe("SDK v2 extension context", () => {
     const createIssue = vi.fn(async () => ({
       id: "issue-1", title: "Wall and pipe", status: "Open" as const, snapshot: "pending" as const,
     }));
-    const ctx = createExtensionContextV2(definition, old.value, scope, { createIssue });
+    const ctx = createExtensionContext(definition, old.value, scope, { createIssue });
     await expect(ctx.issues.create({
       title: "Wall and pipe",
       elementIds: [11, 22],
@@ -220,12 +247,12 @@ describe("SDK v2 extension context", () => {
   });
 
   it("opens only files declared by an importer contribution", async () => {
-    const old = legacy();
+    const old = hostContext();
     const scope = new ExtensionScope("sample", new ExtensionContributionRegistry());
     const definition = manifest(["file.open"]);
     scope.registerManifest(definition.contributes);
     const openFile = vi.fn(async () => ({ name: "rules.json", mimeType: "application/json", text: "{}" }));
-    const ctx = createExtensionContextV2(definition, old.value, scope, { openFile });
+    const ctx = createExtensionContext(definition, old.value, scope, { openFile });
 
     await expect(ctx.files.open("sample.rules")).resolves.toMatchObject({ name: "rules.json", text: "{}" });
     expect(openFile).toHaveBeenCalledWith(["application/json"]);
@@ -234,11 +261,11 @@ describe("SDK v2 extension context", () => {
   });
 
   it("namespaces and caps extension storage", () => {
-    const old = legacy();
+    const old = hostContext();
     const scope = new ExtensionScope("sample", new ExtensionContributionRegistry());
     const definition = manifest(["storage.extension"]);
     scope.registerManifest(definition.contributes);
-    const ctx = createExtensionContextV2(definition, old.value, scope);
+    const ctx = createExtensionContext(definition, old.value, scope);
     ctx.storage.write("choice", { unit: "mm" });
     expect(ctx.storage.read("choice", null)).toEqual({ unit: "mm" });
     expect(localStorage.getItem("ifcviewx.plug.sample.choice")).toBe('{"unit":"mm"}');
@@ -248,11 +275,11 @@ describe("SDK v2 extension context", () => {
   });
 
   it("binds local invocation to the declared companion", async () => {
-    const old = legacy();
+    const old = hostContext();
     const definition = manifest(["local.invoke"]);
     definition.localCompanion = { id: "org.example.native", version: "^1.2", required: true };
     const invokeLocal = vi.fn(async () => ({ rows: 3 }));
-    (old.value as unknown as { service: PluginContext["service"] }).service = {
+    (old.value as unknown as { service: HostContext["service"] }).service = {
       matchCompanion: vi.fn(() => ({
         status: "available",
         provider: {
@@ -262,10 +289,10 @@ describe("SDK v2 extension context", () => {
         },
       })),
       invokeLocal,
-    } as unknown as PluginContext["service"];
+    } as unknown as HostContext["service"];
     const scope = new ExtensionScope("sample", new ExtensionContributionRegistry());
     scope.registerManifest(definition.contributes);
-    const ctx = createExtensionContextV2(definition, old.value, scope);
+    const ctx = createExtensionContext(definition, old.value, scope);
 
     expect(ctx.local.status()).toMatchObject({ state: "available", installedVersion: "1.4.0" });
     expect(ctx.local.capabilities()).toEqual(["geometry.exact"]);

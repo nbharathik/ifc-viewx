@@ -6,14 +6,14 @@ import { zipSync } from "fflate";
 import { InstalledExtensionManager } from "../src/extensions/installed/manager.js";
 import { prepareExtensionPackage } from "../src/extensions/installed/package.js";
 import { MemoryExtensionStore } from "../src/extensions/installed/store.js";
-import type { ExtensionManifestV2, ExtensionPermission } from "../src/sdk/v2/contributions.js";
+import type { ExtensionManifest, ExtensionPermission } from "../src/sdk/contributions.js";
 
 beforeAll(() => vi.stubGlobal("DOMParser", new JSDOM("").window.DOMParser));
 
 function manifest(
   version = "1.0.0",
   permissions: ExtensionPermission[] = ["model.structure.read"],
-): ExtensionManifestV2 {
+): ExtensionManifest {
   return {
     manifestVersion: 2,
     id: "org.example.sandbox",
@@ -37,7 +37,7 @@ function manifest(
   };
 }
 
-function archive(value: ExtensionManifestV2, html = "<!doctype html><html><head></head><body><script>IFCViewX.ready()</script></body></html>"): Uint8Array {
+function archive(value: ExtensionManifest, html = "<!doctype html><html><head></head><body><script>IFCViewX.ready()</script></body></html>"): Uint8Array {
   const encode = (text: string): Uint8Array => new TextEncoder().encode(text);
   return zipSync({
     "extension.json": encode(JSON.stringify(value)),

@@ -1,7 +1,7 @@
-# Plugin catalog
+# Extension catalog
 
-Everything in the viewer's plugin browser, generated from the manifests.
-Yours belongs here too: see [writing a plugin](index.md).
+Everything in the viewer's plugin browser, generated from extension manifests.
+Yours belongs here too: see [writing an extension](index.md).
 
 ## In the browser
 
@@ -94,7 +94,7 @@ A console for real IfcOpenShell code: queries return a value, edits run on a dis
 
 *Volumes, areas and counts rolled up by class and storey*
 
-Reads the base quantities authored in the file (Qto_*, plus quantity-shaped properties) for every placed element and aggregates them. Where an element carries no quantities the bounding box fills the gap, and each row says how much of the total is authored rather than estimated.
+Reads the base quantities authored in the file for every placed element and aggregates them. Where an element carries no quantities the bounding box fills the gap, and each row says how much of the total is authored rather than estimated.
 
 - Group by class, by storey, or by both
 - Net and gross volume, area, length and count
@@ -124,7 +124,8 @@ Builds element-owned 2D contours from the same retained geometry shown in the vi
 
 - Synchronized 2D contours from the active X, Y or Z section plane
 - Element selection shared between the drawing and 3D viewer
-- Storey cut presets plus precise plane offset and flip controls
+- Automatic floor plan creation for every IfcBuildingStorey
+- Individual SVG downloads and a print-ready floor plan set
 - Pan, zoom, fit and coordinate grid for drafting review
 - Selection focus, keyboard navigation and a screen-stable scale rail
 - Open-contour and partial-geometry diagnostics
@@ -139,7 +140,7 @@ Builds element-owned 2D contours from the same retained geometry shown in the vi
 Measures the shortest gap between two selected meshes and casts six rays from a picked surface to the next visible geometry. The live laser stays lightweight and reversible; chosen spans become ordinary viewer measurements that travel with saved viewpoints. Loaded geometry remains in the browser unless the optional local precise route is explicitly selected.
 
 - Shortest surface distance with witness points between two selected elements
-- Configurable clearance threshold with a clear pass or fail result
+- Configurable clearance threshold with distinct pass, fail and unavailable results
 - Six-direction X, Y and Z laser from the last clicked surface
 - Perpendicular camera alignment using the picked face normal
 - Persistent measurement spans stored with saved viewpoints

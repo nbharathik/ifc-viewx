@@ -1,0 +1,35 @@
+{
+  "manifestVersion": 2,
+  "id": "takeoff",
+  "name": "Quantity Takeoff",
+  "version": "1.0.0",
+  "sdk": ">=2.0.0 <3",
+  "description": "Roll up authored quantities and geometry estimates by class and storey.",
+  "runtime": { "kind": "bundled", "entry": "panel.ts" },
+  "activationEvents": ["onPanel:takeoff"],
+  "permissions": [
+    "model.summary.read",
+    "model.index.build",
+    "geometry.query",
+    "view.control",
+    "storage.extension",
+    "file.export"
+  ],
+  "contributes": {
+    "panels": [{ "id": "takeoff", "title": "Quantity Takeoff", "icon": "calculator" }],
+    "exporters": [{ "id": "takeoff.csv", "title": "Quantity takeoff CSV", "mimeTypes": ["text/csv"] }]
+  },
+  "catalog": {
+    "tagline": "Volumes, areas and counts rolled up by class and storey",
+    "about": "Reads the base quantities authored in the file for every placed element and aggregates them. Where an element carries no quantities the bounding box fills the gap, and each row says how much of the total is authored rather than estimated.",
+    "icon": "calculator",
+    "category": "Data",
+    "keywords": "qto quantities volume area boq bill of quantities cost estimate",
+    "does": [
+      "Group by class, by storey, or by both",
+      "Net and gross volume, area, length and count",
+      "Coverage column: how much of the group carries real quantities",
+      "Click a row to isolate the group; export the table as CSV"
+    ]
+  }
+}

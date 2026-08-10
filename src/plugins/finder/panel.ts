@@ -5,8 +5,8 @@
 // are free; property values cost a full property read, so they are opt in and
 // the panel says which of the two it is searching.
 import {
-  bar, buildIndex, button, emptyState, grid, h, hint, note, page, progress, saveCsv, search,
-  type Bm25Index, type ElementRow, type GridRow, type ModelElement, type PluginContext, type SearchHit,
+  bar, buildIndex, button, emptyState, grid, h, hint, note, page, progress, search, toCsv,
+  type Bm25Index, type ElementRow, type ExtensionContext, type GridRow, type ModelElement, type SearchHit,
 } from "@ifcviewx/sdk";
 
 /** Rows on screen. Past this the list stops being a list and becomes a wall. */
@@ -16,7 +16,7 @@ const PROP_CHARS = 400;
 
 const REPORT = ["Express id", "Class", "Name", "Storey", "Score"];
 
-export function mount(host: HTMLElement, ctx: PluginContext): void {
+export function mount(host: HTMLElement, ctx: ExtensionContext): void {
   let query = "";
   let index: Bm25Index | null = null;
   /** Which text the current index was built from, so the label cannot lie. */
@@ -48,7 +48,7 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
   };
 
   const rebuild = (withProperties: boolean, rows: ElementRow[] = []): void => {
-    const elements: ModelElement[] = ctx.elements();
+    const elements: ModelElement[] = ctx.model.elements();
     const extra = withProperties ? propText(rows) : null;
     index = buildIndex(elements, extra ? (element) => extra.get(element.id) : undefined);
     deep = withProperties;
@@ -90,8 +90,8 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
       cells: [String(hit.id), hit.type.replace(/^Ifc/, ""), hit.name || "(unnamed)", hit.storey || "-", hit.score.toFixed(2)],
       title: `Select and frame ${hit.name || hit.type}`,
       pick: () => {
-        ctx.select(hit.id);
-        ctx.frame(hit.id);
+        ctx.view.select(hit.id);
+        ctx.view.frame(hit.id);
       },
     }));
     results.replaceChildren(grid(REPORT, rows));
@@ -102,14 +102,14 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
     building = true;
     withProperties.disabled = true;
     status.set(0, 1, "Reading properties");
-    void ctx.index()
+    void ctx.model.index()
       .build((done, total) => status.set(done, total, `Reading ${done.toLocaleString()} of ${total.toLocaleString()}`))
       .then((rows) => {
         rebuild(true, rows);
         withProperties.textContent = "Property values indexed";
       })
       .catch((error: Error) => {
-        ctx.toast(error.message, "error");
+        ctx.feedback.toast(error.message, "error");
         withProperties.disabled = false;
       })
       .finally(() => {
@@ -120,11 +120,11 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
 
   const box = button("Box results", () => {
     const found = ids();
-    if (!found.length) return ctx.toast("Search for something first", "info");
-    const fitted = ctx.boxAround(found);
-    if (!fitted) return ctx.toast("None of those has geometry to box", "info");
-    ctx.setSectionBox(fitted);
-    ctx.log(`Section box around ${found.length} search result(s)`);
+    if (!found.length) return ctx.feedback.toast("Search for something first", "info");
+    const fitted = ctx.view.boxAround(found);
+    if (!fitted) return ctx.feedback.toast("None of those has geometry to box", "info");
+    ctx.view.setSectionBox(fitted);
+    ctx.feedback.log(`Section box around ${found.length} search result(s)`);
   });
 
   root.append(
@@ -135,20 +135,17 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
       }),
       button("Select all", () => {
         const found = ids();
-        if (found.length) ctx.select(found);
+        if (found.length) ctx.view.select(found);
       }),
       button("Isolate", () => {
         const found = ids();
-        if (found.length) ctx.isolate(found, `Search: ${query.trim().slice(0, 40)}`);
+        if (found.length) ctx.view.isolate(found, `Search: ${query.trim().slice(0, 40)}`);
       }),
       box,
       withProperties,
       button("CSV", () => {
-        saveCsv(
-          "search-results.csv",
-          REPORT,
-          hits.map((hit) => [hit.id, hit.type, hit.name, hit.storey, hit.score]),
-        );
+        const csv = toCsv(REPORT, hits.map((hit) => [hit.id, hit.type, hit.name, hit.storey, hit.score]));
+        ctx.files.export("finder.csv", "search-results.csv", `\uFEFF${csv}`, "text/csv");
       }),
     ),
     status.root,
@@ -158,7 +155,7 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
   );
   host.appendChild(root);
 
-  ctx.on("model", () => {
+  ctx.events.on("model", () => {
     query = "";
     withProperties.disabled = false;
     withProperties.textContent = "Add property values";

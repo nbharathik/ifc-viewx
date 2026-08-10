@@ -2,7 +2,7 @@ import {
   bar, button, emptyState, field, formatLength, h, hint, number, page,
 } from "@ifcviewx/sdk";
 import type {
-  DistanceResult, ExtensionContextV2, LaserAxisResult, LaserResult, PluginInstance,
+  DistanceResult, ExtensionContext, ExtensionInstance, LaserAxisResult, LaserResult,
 } from "@ifcviewx/sdk";
 
 type Point = [number, number, number];
@@ -10,17 +10,33 @@ type Point = [number, number, number];
 type SmartDistanceResult = Omit<DistanceResult, "fidelity" | "engine"> & { fidelity: string; engine: string };
 
 interface DistanceState {
+  a: number;
+  b: number;
   result: SmartDistanceResult;
   measurementId: number | null;
 }
 
 const mm = (metres: number | null): string => metres === null ? "-" : `${Math.round(metres * 1000).toLocaleString()} mm`;
 
-export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstance {
+export function exactSelectionPair(selected: readonly number[]): [number, number] | null {
+  if (selected.length !== 2 || selected[0] === selected[1]) return null;
+  return [selected[0], selected[1]];
+}
+
+export function clearanceStatus(
+  distance: number | null,
+  intersecting: boolean,
+  thresholdMm: number,
+): "pass" | "fail" | "unknown" {
+  if (distance === null) return "unknown";
+  return !intersecting && distance * 1_000 >= thresholdMm ? "pass" : "fail";
+}
+
+export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstance {
   let a: number | null = null;
   let b: number | null = null;
   let thresholdMm = ctx.storage.read("thresholdMm", 50);
-  let maxDistanceM = ctx.storage.read("maxDistanceM", 30);
+  let scanRangeM = ctx.storage.read("maxDistanceM", 30);
   let precise = ctx.storage.read("precise", false);
   let distance: DistanceState | null = null;
   let laser: LaserResult | null = null;
@@ -31,13 +47,23 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
   let controller: AbortController | null = null;
   let resultHandle = "";
   let generation = 0;
+  let requestSequence = 0;
+  let elementNames = new Map(ctx.model.elements().map((element) => [element.id, element.name || element.type]));
   const root = page();
   root.classList.add("smart-measure");
 
-  const names = (): Map<number, string> => new Map(ctx.model.elements().map((element) => [element.id, element.name || element.type]));
   const label = (id: number | null): string => {
     if (id === null) return "not set";
-    return `${names().get(id) ?? "Element"}  #${ctx.model.expressOf(id)}`;
+    return `${elementNames.get(id) ?? "Element"}  #${ctx.model.expressOf(id)}`;
+  };
+
+  const pairFromSelection = (): [number, number] | null => exactSelectionPair(ctx.view.selection());
+  const syncPairFromSelection = (): boolean => {
+    const pair = pairFromSelection();
+    if (!pair || (a === pair[0] && b === pair[1])) return false;
+    [a, b] = pair;
+    if (running === "distance") controller?.abort();
+    return true;
   };
 
   const clearLiveLaser = (): void => {
@@ -45,19 +71,22 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
   };
 
   const setPairFromSelection = (): void => {
-    const selected = ctx.view.selection();
-    if (selected.length < 2) return void ctx.feedback.toast("Select two elements first", "error");
-    [a, b] = selected.slice(-2) as [number, number];
+    const pair = pairFromSelection();
+    if (!pair) return void ctx.feedback.toast("Select exactly two different elements", "error");
+    [a, b] = pair;
     paint();
   };
 
   const selectWorkflow = (next: "gap" | "laser"): void => {
+    if (workflow !== next) controller?.abort();
     workflow = next;
     ctx.storage.write("workflow", workflow);
     if (workflow !== "laser" && armed) {
       armed = false;
       ctx.view.pickGuide(false);
     }
+    if (workflow === "laser" && laser) drawLaser(laser);
+    else clearLiveLaser();
     paint();
   };
 
@@ -78,19 +107,24 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
   const runDistance = async (): Promise<void> => {
     if (!a || !b || a === b) return void ctx.feedback.toast("Set two different elements", "error");
     controller?.abort();
-    if (distance?.measurementId) ctx.view.removeMeasurement(distance.measurementId);
-    distance = null;
     const localGeneration = generation;
+    const request = ++requestSequence;
+    const requestA = a;
+    const requestB = b;
+    const requestPrecise = precise;
     const next = new AbortController();
     controller = next;
     running = "distance";
     armed = false;
     paint();
+    const ownsRequest = (): boolean => request === requestSequence && generation === localGeneration;
+    const pairIsCurrent = (): boolean => ownsRequest() && !next.signal.aborted && a === requestA && b === requestB;
     try {
-      const mesh = await ctx.geometry.distance(a, b, { signal: next.signal });
+      const mesh = await ctx.geometry.distance(requestA, requestB, { signal: next.signal });
+      if (!pairIsCurrent()) return;
       let result: DistanceState["result"] = mesh;
-      if (precise) {
-        if (ctx.model.modelOf(a) !== 0 || ctx.model.modelOf(b) !== 0) {
+      if (requestPrecise) {
+        if (ctx.model.modelOf(requestA) !== 0 || ctx.model.modelOf(requestB) !== 0) {
           throw new Error("Local precise distance currently supports two elements from the primary IFC source");
         }
         const native = await ctx.local.invoke<{
@@ -99,9 +133,11 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
           fidelity: string;
           engine: string;
         }>("geometry.precise-distance", {
-          a: ctx.model.expressOf(a),
-          b: ctx.model.expressOf(b),
-          maxDistance: Math.max(maxDistanceM, mesh.distance ?? 0),
+          a: ctx.model.expressOf(requestA),
+          b: ctx.model.expressOf(requestB),
+          maxDistance: mesh.distance === null
+            ? 1_000_000
+            : Math.max(1, mesh.distance * 1.25),
         }, next.signal);
         result = {
           ...mesh,
@@ -111,34 +147,50 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
           engine: native.engine,
         };
       }
-      if (generation !== localGeneration) return;
+      if (!pairIsCurrent()) return;
       let measurementId: number | null = null;
       if (result.pointA && result.pointB && result.distance !== null) {
         measurementId = ctx.view.addMeasurement(result.pointA, result.pointB).id;
-        ctx.view.select([a, b]);
-        if (result.point) ctx.view.frameAt(result.point, Math.max(0.5, (result.distance || 0.2) * 2.5));
       }
-      distance = { result, measurementId };
+      if (distance?.measurementId) ctx.view.removeMeasurement(distance.measurementId);
+      distance = { a: requestA, b: requestB, result, measurementId };
       const distanceMm = result.distance === null ? null : Number((result.distance * 1000).toFixed(2));
+      const status = clearanceStatus(result.distance, result.intersecting, thresholdMm);
+      const passed = status === "pass";
       storeResult("distance", [{
-        a, b, distanceMm, pointA: result.pointA, pointB: result.pointB,
-        thresholdMm, pass: distanceMm !== null && !result.intersecting && distanceMm >= thresholdMm,
+        a: requestA, b: requestB, distanceMm, pointA: result.pointA, pointB: result.pointB,
+        thresholdMm, pass: distanceMm === null ? null : passed,
         fidelity: result.fidelity, engine: result.engine,
       }], { thresholdMm, geometryRevision: result.geometryRevision });
-      const failed = result.distance === null || result.intersecting || result.distance * 1000 < thresholdMm;
+      const unavailable = status === "unknown";
+      const failed = status === "fail";
       ctx.feedback.publishFindings(
-        result.distance === null ? "The selected pair has no retained mesh distance." : `Shortest distance: ${mm(result.distance)}.`,
-        failed ? [{ severity: "warning", title: "Clearance below the requested threshold", detail: `${thresholdMm} mm required` }] : [],
+        unavailable ? "The selected pair has no available geometry distance." : `Shortest distance: ${mm(result.distance)}.`,
+        unavailable
+          ? [{
+              severity: "warning",
+              title: "Clearance could not be determined",
+              detail: result.missing
+                ? `${result.missing} selected element${result.missing === 1 ? " has" : "s have"} no retained geometry.`
+                : "The selected geometry did not return a distance.",
+            }]
+          : failed
+            ? [{ severity: "warning", title: "Clearance below the requested threshold", detail: `${thresholdMm} mm required` }]
+            : [],
       );
-      ctx.feedback.log(result.distance === null ? "No distance was available" : `Measured ${mm(result.distance)}`, failed ? "info" : "success");
+      ctx.feedback.log(unavailable ? "Clearance could not be determined" : `Measured ${mm(result.distance)}`, failed || unavailable ? "info" : "success");
+      ctx.view.select([requestA, requestB]);
+      if (result.point) ctx.view.frameAt(result.point, Math.max(0.5, (result.distance || 0.2) * 2.5));
     } catch (error) {
-      if (!(error instanceof DOMException && error.name === "AbortError")) {
+      if (pairIsCurrent() && !(error instanceof DOMException && error.name === "AbortError")) {
         ctx.feedback.log(error instanceof Error ? error.message : String(error), "error");
       }
     } finally {
-      if (controller === next) controller = null;
-      running = null;
-      if (generation === localGeneration) paint();
+      if (ownsRequest()) {
+        if (controller === next) controller = null;
+        running = null;
+        paint();
+      }
     }
   };
 
@@ -155,19 +207,25 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
     if (!pick) return void ctx.feedback.toast("Click a model surface first", "error");
     controller?.abort();
     const localGeneration = generation;
+    const request = ++requestSequence;
+    const origin = [...pick.point] as Point;
+    const source = pick.expressID;
+    const requestMaxDistance = scanRangeM;
     const next = new AbortController();
     controller = next;
     running = "laser";
     armed = false;
     ctx.view.pickGuide(false);
     paint();
+    const ownsRequest = (): boolean => request === requestSequence && generation === localGeneration;
+    const isCurrent = (): boolean => ownsRequest() && !next.signal.aborted;
     try {
-      const result = await ctx.geometry.laser(pick.point, {
-        source: pick.expressID,
-        maxDistance: maxDistanceM,
+      const result = await ctx.geometry.laser(origin, {
+        source,
+        maxDistance: requestMaxDistance,
         signal: next.signal,
       });
-      if (generation !== localGeneration) return;
+      if (!isCurrent()) return;
       laser = result;
       drawLaser(result);
       const rows = result.axes.flatMap((axis) => [axis.negative, axis.positive]
@@ -184,13 +242,15 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
       });
       ctx.feedback.log(`Laser found ${rows.length} of 6 axis surfaces`, rows.length === 6 ? "success" : "info");
     } catch (error) {
-      if (!(error instanceof DOMException && error.name === "AbortError")) {
+      if (isCurrent() && !(error instanceof DOMException && error.name === "AbortError")) {
         ctx.feedback.log(error instanceof Error ? error.message : String(error), "error");
       }
     } finally {
-      if (controller === next) controller = null;
-      running = null;
-      if (generation === localGeneration) paint();
+      if (ownsRequest()) {
+        if (controller === next) controller = null;
+        running = null;
+        paint();
+      }
     }
   };
 
@@ -260,12 +320,18 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
       precise = false;
       ctx.storage.write("precise", false);
     }
-    const distanceValue = distance?.result.distance ?? null;
-    const distancePass = distanceValue !== null && !distance?.result.intersecting && distanceValue * 1000 >= thresholdMm;
-    const distanceResult = distance ? h("div", { class: `sm-reading ${distancePass ? "pass" : "fail"}` }, [
-      h("span", { class: "sm-reading-kicker", text: distancePass ? "CLEARANCE PASSES" : "CLEARANCE CHECK" }),
+    const currentDistance = distance?.a === a && distance.b === b ? distance : null;
+    const distanceValue = currentDistance?.result.distance ?? null;
+    const currentStatus = currentDistance
+      ? clearanceStatus(distanceValue, currentDistance.result.intersecting, thresholdMm)
+      : null;
+    const distanceResult = currentDistance ? h("div", { class: `sm-reading ${currentStatus}` }, [
+      h("span", {
+        class: "sm-reading-kicker",
+        text: currentStatus === "unknown" ? "CLEARANCE UNKNOWN" : currentStatus === "pass" ? "CLEARANCE PASSES" : "CLEARANCE CHECK",
+      }),
       h("strong", { text: mm(distanceValue) }),
-      h("span", { text: distanceValue === null ? "No geometry result" : `${thresholdMm} mm required  |  ${distance?.result.fidelity ?? "mesh"}` }),
+      h("span", { text: distanceValue === null ? "No geometry result" : `${thresholdMm} mm required  |  ${currentDistance.result.fidelity ?? "mesh"}` }),
     ]) : h("div", { class: "sm-reading empty" }, [
       h("span", { class: "sm-reading-kicker", text: "OBJECT GAP" }),
       h("strong", { text: "-" }),
@@ -328,7 +394,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
           distanceResult,
           options,
         ]),
-        hint("info", distance?.measurementId
+        hint("info", currentDistance?.measurementId
           ? "The shortest witness is now a regular viewer measurement and stays with saved viewpoints."
           : "The result uses retained browser geometry unless Local IFC precision is selected."),
       );
@@ -343,11 +409,11 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
       ? laser.axes.map(axisRow)
       : [h("div", { class: "sm-laser-empty", text: armed ? "Click a visible face, edge or vertex in the model" : "Pick an origin to scan all six axis directions" })]);
     const laserOptions = h("details", { class: "sm-options" }, [
-      h("summary", {}, [h("span", { text: "Scan range" }), h("small", { text: `${maxDistanceM} m` })]),
+      h("summary", {}, [h("span", { text: "Scan range" }), h("small", { text: `${scanRangeM} m` })]),
       h("div", { class: "sm-options-body" }, [
-        field("Maximum distance m", number(maxDistanceM, (value) => {
-          maxDistanceM = Math.max(0.1, value);
-          ctx.storage.write("maxDistanceM", maxDistanceM);
+        field("Maximum distance m", number(scanRangeM, (value) => {
+          scanRangeM = Math.max(0.1, value);
+          ctx.storage.write("maxDistanceM", scanRangeM);
         }, 1, 0.1)),
       ]),
     ]);
@@ -382,15 +448,25 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
   };
 
   ctx.events.on("selection", () => {
+    syncPairFromSelection();
     if (armed && ctx.view.lastPick()) void runLaser();
     else paint();
+  });
+  ctx.events.on("measure", () => {
+    if (!armed || !ctx.view.measuring()) return;
+    armed = false;
+    paint();
   });
   ctx.events.on("service", paint);
   ctx.events.on("model", () => {
     generation += 1;
+    requestSequence += 1;
     controller?.abort();
+    controller = null;
+    running = null;
     clearLiveLaser();
     if (resultHandle) ctx.results.dispose(resultHandle);
+    elementNames = new Map(ctx.model.elements().map((element) => [element.id, element.name || element.type]));
     a = null;
     b = null;
     distance = null;
@@ -398,15 +474,20 @@ export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstanc
     resultHandle = "";
     armed = false;
     ctx.view.pickGuide(false);
+    syncPairFromSelection();
     paint();
   });
   ctx.commands.register("smart-measure.open", () => paint());
 
+  syncPairFromSelection();
   paint();
   host.appendChild(root);
   return {
     dispose: () => {
+      requestSequence += 1;
       controller?.abort();
+      controller = null;
+      running = null;
       ctx.view.pickGuide(false);
       clearLiveLaser();
     },

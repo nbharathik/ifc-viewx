@@ -47,9 +47,9 @@ const manifest = `${JSON.stringify({
   },
 }, null, 2)}\n`;
 
-const panel = `import { bar, button, note, page, stats, type ExtensionContextV2, type PluginInstance } from "@ifcviewx/sdk";
+const panel = `import { bar, button, note, page, stats, type ExtensionContext, type ExtensionInstance } from "@ifcviewx/sdk";
 
-export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstance {
+export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstance {
   const body = document.createElement("div");
   const root = page(bar(button("Count elements", () => run())), body);
 

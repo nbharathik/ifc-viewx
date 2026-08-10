@@ -49,8 +49,7 @@ nav:
   - Plugins:
       - Writing an extension: plugins/index.md
       - Installed browser extensions: plugins/installed.md
-      - SDK v2 reference: plugins/api-v2.md
-      - SDK v1 compatibility: plugins/api.md
+      - SDK reference: plugins/api.md
       - Catalog: plugins/catalog.md
   - Local Studio:
       - Overview: local-studio.md

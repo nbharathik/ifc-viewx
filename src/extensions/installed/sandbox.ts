@@ -1,6 +1,5 @@
-import type { PluginInstance } from "../../sdk/types.js";
-import type { ExtensionContextV2, ExtensionModuleV2 } from "../../sdk/v2/types.js";
-import type { ExtensionManifestV2 } from "../../sdk/v2/contributions.js";
+import type { ExtensionContext, ExtensionInstance, ExtensionModule } from "../../sdk/types.js";
+import type { ExtensionManifest } from "../../sdk/contributions.js";
 import type { SectionState } from "../../viewer-core/viewer.js";
 import type { ExtensionAuditLog } from "./audit.js";
 
@@ -77,8 +76,11 @@ const BOOTSTRAP = `(() => {
     view: {
       selection: () => call("view.selection"),
       lastPick: () => call("view.lastPick"),
+      measuring: () => call("view.measuring"),
       pickGuide: (on) => call("view.pickGuide", { on }),
       isVisible: (id) => call("view.isVisible", { id }),
+      categoryVisible: (category) => call("view.categoryVisible", { category }),
+      setCategoryVisible: (category, visible) => call("view.setCategoryVisible", { category, visible }),
       select: (ids) => call("view.select", { ids }),
       isolate: (ids, label) => call("view.isolate", { ids, label }),
       hide: (ids) => call("view.hide", { ids }),
@@ -207,6 +209,13 @@ function integer(value: unknown, name: string): number {
   return out;
 }
 
+function lazyCategory(value: unknown): "IfcSpace" | "IfcOpeningElement" {
+  if (value !== "IfcSpace" && value !== "IfcOpeningElement") {
+    throw new Error("category must be IfcSpace or IfcOpeningElement");
+  }
+  return value;
+}
+
 function textValue(value: unknown, name: string, max = 500): string {
   if (typeof value !== "string" || value.length > max) throw new Error(`${name} must be a string under ${max} characters`);
   return value;
@@ -228,7 +237,7 @@ function encodedSize(value: unknown): number {
   return new TextEncoder().encode(json).byteLength;
 }
 
-export class SandboxRuntime implements PluginInstance {
+export class SandboxRuntime implements ExtensionInstance {
   private readonly iframe: HTMLIFrameElement;
   private readonly nonce = crypto.randomUUID();
   private readonly controllers = new Map<string, AbortController>();
@@ -243,8 +252,8 @@ export class SandboxRuntime implements PluginInstance {
   constructor(
     host: HTMLElement,
     html: string,
-    private readonly manifest: ExtensionManifestV2,
-    private readonly context: ExtensionContextV2,
+    private readonly manifest: ExtensionManifest,
+    private readonly context: ExtensionContext,
     private readonly hooks: SandboxHooks,
     payload?: unknown,
   ) {
@@ -422,8 +431,14 @@ export class SandboxRuntime implements PluginInstance {
       });
       case "view.selection": return this.context.view.selection();
       case "view.lastPick": return this.context.view.lastPick();
+      case "view.measuring": return this.context.view.measuring();
       case "view.pickGuide": this.context.view.pickGuide(params.on === true); return null;
       case "view.isVisible": return this.context.view.isVisible(integer(params.id, "id"));
+      case "view.categoryVisible": return this.context.view.categoryVisible(lazyCategory(params.category));
+      case "view.setCategoryVisible": {
+        if (typeof params.visible !== "boolean") throw new Error("visible must be boolean");
+        return this.context.view.setCategoryVisible(lazyCategory(params.category), params.visible).then(() => null);
+      }
       case "view.select": this.context.view.select(params.ids === null ? null : ids(params.ids, "ids")); return null;
       case "view.isolate": this.context.view.isolate(ids(params.ids, "ids"), params.label === undefined ? undefined : textValue(params.label, "label", 100)); return null;
       case "view.hide": this.context.view.hide(ids(params.ids, "ids")); return null;
@@ -564,9 +579,9 @@ export class SandboxRuntime implements PluginInstance {
 
 export function sandboxExtensionModule(
   html: string,
-  manifest: ExtensionManifestV2,
+  manifest: ExtensionManifest,
   hooks: SandboxHooks,
-): ExtensionModuleV2 {
+): ExtensionModule {
   return {
     mount: (host, context, payload) => new SandboxRuntime(host, html, manifest, context, hooks, payload),
   };

@@ -1,5 +1,5 @@
 import { unzipSync } from "fflate";
-import { validateManifestV2 } from "../manifest.js";
+import { validateManifest } from "../manifest.js";
 import type { PreparedExtensionPackage } from "./types.js";
 
 export const PACKAGE_LIMITS = {
@@ -159,7 +159,7 @@ export async function prepareExtensionPackage(input: Uint8Array): Promise<Prepar
   } catch (error) {
     throw new ExtensionPackageError(`extension.json is invalid: ${error instanceof Error ? error.message : String(error)}`, "manifest");
   }
-  const validation = validateManifestV2(rawManifest, { runtime: "sandboxed" });
+  const validation = validateManifest(rawManifest, { runtime: "sandboxed" });
   if (!validation.manifest) {
     throw new ExtensionPackageError(
       `extension.json is invalid:\n${validation.issues.map((issue) => `- ${issue.path}: ${issue.message}`).join("\n")}`,

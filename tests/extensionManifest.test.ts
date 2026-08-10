@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { assertManifestV2, validateManifestV2 } from "../src/extensions/manifest.js";
-import type { ExtensionManifestV2 } from "../src/sdk/v2/contributions.js";
+import { assertManifest, validateManifest } from "../src/extensions/manifest.js";
+import type { ExtensionManifest } from "../src/sdk/contributions.js";
 
-function manifest(): ExtensionManifestV2 {
+function manifest(): ExtensionManifest {
   return {
     manifestVersion: 2,
     id: "sample.extension",
@@ -23,7 +23,7 @@ function manifest(): ExtensionManifestV2 {
     },
     catalog: {
       tagline: "A sample extension",
-      about: "Used to verify the SDK v2 manifest contract.",
+      about: "Used to verify the extension SDK manifest contract.",
       icon: "blocks",
       category: "Tests",
       keywords: "sample test",
@@ -32,9 +32,9 @@ function manifest(): ExtensionManifestV2 {
   };
 }
 
-describe("extension manifest v2", () => {
+describe("extension manifest", () => {
   it("accepts a compatible, linked, permission-complete manifest", () => {
-    const result = validateManifestV2(manifest());
+    const result = validateManifest(manifest());
     expect(result.valid).toBe(true);
     expect(result.manifest?.id).toBe("sample.extension");
   });
@@ -51,13 +51,13 @@ describe("extension manifest v2", () => {
       exporters: [{ id: "sample.csv", title: "CSV", mimeTypes: ["text/csv"] }],
     };
 
-    const result = validateManifestV2(value);
+    const result = validateManifest(value);
     expect(result.valid).toBe(false);
     expect(result.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining([
       "compatibility", "path", "unknown", "namespace", "reference", "permission",
     ]));
-    expect(() => assertManifestV2(value)).toThrow(/sample\.extension manifest is invalid/);
-    expect(() => assertManifestV2(value)).toThrow(/host SDK 2\.0\.0/);
+    expect(() => assertManifest(value)).toThrow(/sample\.extension manifest is invalid/);
+    expect(() => assertManifest(value)).toThrow(/host SDK 2\.0\.0/);
   });
 
   it("rejects duplicate contribution ids and unsupported activation events", () => {
@@ -67,7 +67,7 @@ describe("extension manifest v2", () => {
       { id: "sample.panel", title: "Two" },
     ];
     value.activationEvents = ["whenever:sample.panel"];
-    const result = validateManifestV2(value);
+    const result = validateManifest(value);
     expect(result.issues).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: "duplicate" }),
       expect.objectContaining({ code: "format" }),
@@ -81,7 +81,7 @@ describe("extension manifest v2", () => {
     value.runtime = { kind: "sandboxed", entry: "panel.html" };
     value.activationEvents = ["onStartup"];
     value.permissions.push("geometry.mesh.read");
-    const result = validateManifestV2(value, { runtime: "sandboxed" });
+    const result = validateManifest(value, { runtime: "sandboxed" });
     expect(result.issues).toEqual(expect.arrayContaining([
       expect.objectContaining({ path: "manifest.id", code: "format" }),
       expect.objectContaining({ path: "manifest.publisher.url", code: "format" }),
@@ -90,11 +90,25 @@ describe("extension manifest v2", () => {
     ]));
   });
 
+  it("keeps Python execution out of installed extensions", () => {
+    const value = manifest();
+    value.publisher = { name: "Sample" };
+    value.runtime = { kind: "sandboxed", entry: "panel.html" };
+    value.activationEvents = ["onPanel:sample.panel"];
+    value.permissions.push("automation.python");
+    const result = validateManifest(value, { runtime: "sandboxed" });
+    expect(result.issues).toContainEqual(expect.objectContaining({
+      path: "manifest.permissions",
+      code: "forbidden",
+      message: "installed extensions cannot execute Python",
+    }));
+  });
+
   it("requires a valid companion range for local invocation", () => {
     const value = manifest();
     value.permissions.push("local.invoke");
     value.localCompanion = { id: "org.example.native", version: "latest", required: true };
-    const result = validateManifestV2(value);
+    const result = validateManifest(value);
     expect(result.issues).toEqual(expect.arrayContaining([
       expect.objectContaining({ path: "manifest.localCompanion.version", code: "format" }),
     ]));

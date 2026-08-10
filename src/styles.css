@@ -869,6 +869,7 @@ body.is-resizing .resizer { pointer-events: auto; }
 .section-box-row label small { color: var(--fg-4); font: 500 calc(8.5px * var(--ui, 1)) var(--mono); text-transform: uppercase; }
 .section-box-row input { grid-column: 1 / -1; min-width: 0; }
 .section-box-value { color: var(--fg-2); font: 500 calc(9px * var(--ui, 1)) var(--mono); font-variant-numeric: tabular-nums; }
+.section-workspace-open { width: 100%; justify-content: center; margin-top: 2px; }
 @keyframes pop-in { from { opacity: 0; transform: translate(-50%, 5px); } }
 @keyframes pop-right { from { opacity: 0; transform: translate(-5px, -50%); } }
 
@@ -887,6 +888,8 @@ body.is-resizing .resizer { pointer-events: auto; }
   flex-direction: column;
   gap: 8px;
   padding: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--raised);
   border: 1px solid var(--line-hi);
   border-radius: var(--r3);
@@ -909,6 +912,19 @@ body.is-resizing .resizer { pointer-events: auto; }
 }
 .mc-head svg { color: var(--measure); }
 .mc-head .icon-btn { margin: -4px -4px -4px 0; }
+.mc-smart {
+  height: calc(22px * var(--ui, 1));
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--measure) 42%, var(--line));
+  border-radius: var(--pill);
+  background: color-mix(in srgb, var(--measure) 8%, transparent);
+  color: var(--measure);
+  font-size: calc(9px * var(--ui, 1));
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+.mc-smart:hover { background: color-mix(in srgb, var(--measure) 14%, transparent); border-color: var(--measure); }
 .mc-count {
   min-width: 20px;
   padding: 1px 6px;
@@ -920,7 +936,7 @@ body.is-resizing .resizer { pointer-events: auto; }
   text-align: center;
 }
 .mc-mode { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
-.mc-mode button { min-width: 0; padding: 0 5px; }
+.mc-mode button { min-width: 0; height: calc(29px * var(--ui, 1)); padding: 0 5px; }
 .mc-readout {
   min-height: 53px;
   padding: 7px 9px 6px;
@@ -1027,6 +1043,7 @@ body.is-resizing .resizer { pointer-events: auto; }
 .mc-disclosure[open] > summary::before { transform: rotate(45deg) translate(-1px, -1px); }
 .mc-summary-note { margin-left: auto; color: var(--fg-4); font: 500 calc(9px * var(--ui, 1)) var(--mono); }
 .mc-disclosure-body { display: flex; flex-direction: column; gap: 6px; padding: 2px 0 7px; }
+.mc-disclosure-body .mc-constraint-row { align-items: center; }
 .mc-ledger-actions { justify-content: flex-end; }
 .mc-ledger-actions .btn { flex: 0 0 auto; }
 /* Placed measurements, one row each, so any of them can be dropped alone. */
@@ -2574,6 +2591,7 @@ table.grid td.num { font-family: var(--mono); font-variant-numeric: tabular-nums
   background: var(--panel);
 }
 .sm-reading.pass { border-left-color: var(--ok); }
+.sm-reading.unknown { border-left-color: var(--fg-4); }
 .sm-reading.empty { border-left-color: var(--line-hi); }
 .sm-reading-kicker { grid-column: 1 / -1; color: var(--fg-4); font: 600 calc(9px * var(--ui)) / 1 var(--mono); letter-spacing: .08em; }
 .sm-reading strong { color: var(--fg); font: 650 calc(21px * var(--ui)) / 1.1 var(--mono); font-variant-numeric: tabular-nums; }
@@ -2841,21 +2859,20 @@ table.grid tr.warn td { color: var(--warn); }
 .plug-storey .n { font-family: var(--mono); font-size: calc(10px * var(--ui, 1)); color: var(--fg-3); flex: 0 0 auto; }
 
 
-/* Both side panels carry a fixed width, so under this the viewport is squeezed
-   to nothing and the rail is pushed off the edge. Collapse them and let the
-   rail bring them back one at a time. */
+/* Both side panels carry a fixed width. Below this width they become overlays,
+   keeping the viewport and its analysis instruments usable without hiding any
+   user panel state. */
 @media (max-width: 1120px) {
-  #workspace:has(#measure-card:not(.hidden)) #outliner,
-  #workspace:has(#measure-card:not(.hidden)) #inspector { display: none; }
-  #workspace:has(#measure-card:not(.hidden)) #viewer-host {
-    grid-column: 1 / span 3;
-    --dock-x: 26px;
-  }
+  #inspector { position: absolute; right: calc(38px * var(--ui, 1)); top: 0; bottom: 0; z-index: 9; box-shadow: var(--shadow); }
+  #outliner { position: absolute; left: 0; top: 0; bottom: 0; z-index: 9; box-shadow: var(--shadow); }
+  #viewer-host { grid-column: 1 / span 3; }
   #measure-card {
     top: auto;
+    left: auto;
     right: 12px;
     bottom: 12px;
     width: min(calc(520px * var(--ui, 1)), calc(100% - var(--dock-x) - 74px));
+    z-index: 11;
   }
 }
 @media (max-width: 900px) {
@@ -2874,10 +2891,21 @@ table.grid tr.warn td { color: var(--warn); }
   .ext-isolation { grid-column: 1; }
   .ext-manage-facts { grid-template-columns: 1fr; }
   .ext-audit-row { grid-template-columns: 1fr; gap: 2px; }
-  /* Over the viewport rather than beside it: 720px cannot hold three columns. */
-  #inspector { position: absolute; right: calc(38px * var(--ui, 1)); top: 0; bottom: 0; z-index: 9; box-shadow: var(--shadow); }
-  #outliner { position: absolute; left: 0; top: 0; bottom: 0; z-index: 9; box-shadow: var(--shadow); }
-  #viewer-host { grid-column: 1 / span 3; }
+  #measure-card {
+    right: 8px;
+    bottom: 8px;
+    left: calc(var(--dock-x) + 46px);
+    width: auto;
+    max-height: min(72%, 560px);
+  }
+}
+
+@media (pointer: coarse) {
+  .mc-mode button,
+  .mc-constraints button,
+  .mc-smart { min-height: 36px; }
+  #measure-card .icon-btn { min-width: 36px; min-height: 36px; }
+  .mc-copy { opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2987,6 +3015,7 @@ table.grid tr.warn td { color: var(--warn); }
 }
 .sw-floor-state { width: 6px; height: 6px; border-radius: var(--pill); background: var(--fg-4); }
 .sw-floor-state.ready { background: var(--ok); }
+.sw-floor-state.empty { box-sizing: border-box; border: 1px solid var(--fg-4); background: transparent; }
 .sw-floor-state.building { background: var(--measure); animation: pulse 1.2s ease-in-out infinite; }
 .sw-floor-open { display: flex; min-width: 0; flex-direction: column; padding: 2px; border: 0; background: transparent; text-align: left; }
 .sw-floor-open span { overflow: hidden; color: var(--fg-2); font-size: calc(10px * var(--ui)); text-overflow: ellipsis; white-space: nowrap; }

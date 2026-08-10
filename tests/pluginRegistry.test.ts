@@ -1,12 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { findPlugin } from "../src/plugins/registry.js";
 
-describe("plugin compatibility registry", () => {
-  it("discovers SDK v2 JSON manifests and keeps SDK v1 manifests", () => {
-    expect(findPlugin("storeys")).toMatchObject({ manifestVersion: 2 });
-    expect(findPlugin("explorer")).toMatchObject({ manifestVersion: 2 });
-    expect(findPlugin("clash")).toMatchObject({ manifestVersion: 2 });
-    expect(findPlugin("model-health")).toMatchObject({ manifestVersion: 2 });
-    expect(findPlugin("python")).toMatchObject({ manifestVersion: 1 });
+describe("extension registry", () => {
+  it("discovers every bundled tool through the current extension manifest", () => {
+    for (const id of ["storeys", "explorer", "clash", "model-health", "python", "finder", "spaces", "takeoff"]) {
+      expect(findPlugin(id)?.extension).toMatchObject({ manifestVersion: 2, id });
+    }
   });
 });

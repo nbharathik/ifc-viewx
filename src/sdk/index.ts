@@ -1,11 +1,12 @@
-// The whole plugin surface, in one import.
+// The whole extension surface, in one import.
 //
-//   import { definePlugin, page, bar, grid } from "@ifcviewx/sdk";
+//   import { defineExtension, page, bar, grid } from "@ifcviewx/sdk";
 //
-// A plugin that imports only from here keeps working across app releases.
+// An extension that imports only from here keeps working across app releases.
 // Anything reached around it is internal and may move without notice.
-export { definePlugin } from "./define.js";
-export * from "./v2/index.js";
+export { defineExtension } from "./define.js";
+export * from "./contributions.js";
+export * from "./types.js";
 export * from "./ui.js";
 export * from "./data.js";
 export * from "./parse.js";
@@ -71,23 +72,7 @@ export type { Bm25Index, SearchHit, TextSource } from "../llm/retrieval.js";
 // What `ctx.publishFindings` takes, so a panel's results land in the report.
 export type { ReportFinding } from "../ui/report.js";
 
-export type {
-  ModelElement,
-  ModelInfo,
-  PluginContext,
-  PluginCapabilities,
-  PluginCapabilitySummary,
-  PluginEvent,
-  PluginInstance,
-  PluginManifest,
-  PluginModule,
-  PluginMount,
-  PluginPython,
-  PluginTier,
-} from "./types.js";
-
-// Viewer types a panel needs to talk about what it found. The viewer itself is
-// on the context as an escape hatch; these describe what comes back from it.
+// Viewer data types used by the scoped SDK services.
 export type {
   CameraPose,
   IfcProperty,
@@ -106,4 +91,3 @@ export type {
   VisibilityRule,
 } from "../viewer-core/viewer.js";
 export { formatLength } from "../viewer-core/viewer.js";
-export type { ServiceClient } from "../bridge/serviceClient.js";

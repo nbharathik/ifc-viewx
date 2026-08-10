@@ -1,9 +1,9 @@
 import type {
   ContributionKind,
   ExtensionContributions,
-  ExtensionManifestV2,
+  ExtensionManifest,
   ExtensionPermission,
-} from "../sdk/v2/contributions.js";
+} from "../sdk/contributions.js";
 
 export interface ManifestIssue {
   path: string;
@@ -14,7 +14,7 @@ export interface ManifestIssue {
 export interface ManifestValidation {
   valid: boolean;
   issues: ManifestIssue[];
-  manifest?: ExtensionManifestV2;
+  manifest?: ExtensionManifest;
 }
 
 export interface ManifestValidationOptions {
@@ -26,7 +26,7 @@ const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const SHA256 = /^[a-f0-9]{64}$/i;
 const ACTIVATION = /^(?:onPanel|onCommand|onAssistantTool|onFile|onLocalCapability):[A-Za-z0-9._-]+$|^onModel$|^onStartup$/;
 
-export const SDK_V2_VERSION = "2.0.0";
+export const SDK_VERSION = "2.0.0";
 
 type Version = [number, number, number];
 
@@ -39,7 +39,7 @@ const compareVersion = (a: Version, b: Version): number =>
   a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 
 function sdkCompatibility(range: string): "compatible" | "incompatible" | "invalid" {
-  const current = parseVersion(SDK_V2_VERSION)!;
+  const current = parseVersion(SDK_VERSION)!;
   const tokens = range.trim().split(/\s+/);
   if (!range.trim() || range.includes("||")) return "invalid";
   let compatible = true;
@@ -89,6 +89,7 @@ export const EXTENSION_PERMISSIONS: readonly ExtensionPermission[] = [
   "view.overlay",
   "review.issue.create",
   "edit.propose",
+  "automation.python",
   "file.open",
   "file.export",
   "storage.extension",
@@ -322,7 +323,7 @@ function validateCatalog(value: unknown, issues: ManifestIssue[]): void {
   stringArray(value.does, "manifest.catalog.does", issues);
 }
 
-export function validateManifestV2(
+export function validateManifest(
   value: unknown,
   options: ManifestValidationOptions = {},
 ): ManifestValidation {
@@ -351,7 +352,7 @@ export function validateManifestV2(
     if (compatibility === "invalid") {
       issues.push({ path: "manifest.sdk", code: "format", message: "must be a supported semantic version range" });
     } else if (compatibility === "incompatible") {
-      issues.push({ path: "manifest.sdk", code: "compatibility", message: `does not include host SDK ${SDK_V2_VERSION}` });
+      issues.push({ path: "manifest.sdk", code: "compatibility", message: `does not include host SDK ${SDK_VERSION}` });
     }
   }
   requiredString(value, "description", "manifest", issues);
@@ -412,6 +413,9 @@ export function validateManifestV2(
     if (permissions.includes("geometry.mesh.read")) {
       issues.push({ path: "manifest.permissions", code: "forbidden", message: "installed extensions cannot read raw geometry" });
     }
+    if (permissions.includes("automation.python")) {
+      issues.push({ path: "manifest.permissions", code: "forbidden", message: "installed extensions cannot execute Python" });
+    }
   }
   validateCatalog(value.catalog, issues);
 
@@ -471,7 +475,7 @@ export function validateManifestV2(
 
   return issues.length
     ? { valid: false, issues }
-    : { valid: true, issues: [], manifest: value as unknown as ExtensionManifestV2 };
+    : { valid: true, issues: [], manifest: value as unknown as ExtensionManifest };
 }
 
 export class ManifestValidationError extends Error {
@@ -481,11 +485,11 @@ export class ManifestValidationError extends Error {
   }
 }
 
-export function assertManifestV2(
+export function assertManifest(
   value: unknown,
   options: ManifestValidationOptions = {},
-): ExtensionManifestV2 {
-  const validation = validateManifestV2(value, options);
+): ExtensionManifest {
+  const validation = validateManifest(value, options);
   if (!validation.manifest) {
     const id = isRecord(value) && typeof value.id === "string" ? value.id : "extension";
     throw new ManifestValidationError(validation.issues, id);
@@ -493,6 +497,6 @@ export function assertManifestV2(
   return validation.manifest;
 }
 
-export function contributionsOf(manifest: ExtensionManifestV2): ExtensionContributions {
+export function contributionsOf(manifest: ExtensionManifest): ExtensionContributions {
   return manifest.contributes;
 }

@@ -1,5 +1,5 @@
 import { bar, button, emptyState, grid, h, note, page, progress, stats } from "@ifcviewx/sdk";
-import type { ExtensionContextV2, PluginInstance } from "@ifcviewx/sdk";
+import type { ExtensionContext, ExtensionInstance } from "@ifcviewx/sdk";
 
 type Severity = "error" | "warning" | "info";
 
@@ -16,7 +16,7 @@ const CONTAINER_TYPES = new Set(["PROJECT", "SITE", "BUILDING", "BUILDINGSTOREY"
 const expectsDisplayGeometry = (type: string): boolean =>
   !CONTAINER_TYPES.has(type.replace(/^IFC/i, "").replaceAll("_", "").toUpperCase());
 
-export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstance {
+export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstance {
   const summary = h("div");
   const findings = h("div");
   const status = progress();

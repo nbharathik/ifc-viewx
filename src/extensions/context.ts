@@ -1,12 +1,17 @@
-import type { PluginCapabilities, PluginContext } from "../sdk/types.js";
-import type { ExtensionContextV2, ExtensionIssueInput, ExtensionIssueResult } from "../sdk/v2/types.js";
+import type {
+  ExtensionCapabilities,
+  ExtensionContext,
+  ExtensionIssueInput,
+  ExtensionIssueResult,
+} from "../sdk/types.js";
 import type {
   CommandContribution,
   ContributionFor,
   ContributionKind,
-  ExtensionManifestV2,
+  ExtensionManifest,
   ExtensionPermission,
-} from "../sdk/v2/contributions.js";
+} from "../sdk/contributions.js";
+import type { HostContext } from "../plugins/runtime/context.js";
 import type { ExtensionScope } from "./contributions.js";
 import type { ExtensionResultStore } from "./results.js";
 import type { ResultHandle } from "../capabilities/results.js";
@@ -82,12 +87,12 @@ function linkedSignal(primary: AbortSignal, secondary?: AbortSignal): {
   };
 }
 
-export function createExtensionContextV2(
-  manifest: ExtensionManifestV2,
-  legacy: PluginContext,
+export function createExtensionContext(
+  manifest: ExtensionManifest,
+  host: HostContext,
   scope: ExtensionScope,
   bindings: ExtensionRuntimeBindings = {},
-): ExtensionContextV2 {
+): ExtensionContext {
   const permissions = new Set<ExtensionPermission>(manifest.permissions);
   const resultBindings = new Map<string, () => void>();
   const overlayBindings = new Map<string, () => void>();
@@ -104,16 +109,16 @@ export function createExtensionContextV2(
     const required = capabilityPermissions[id];
     return required !== undefined && required.every((permission) => permissions.has(permission));
   };
-  const capabilities: PluginCapabilities = {
-    list: () => legacy.capabilities.list().filter((capability) => capabilityAllowed(capability.id, capability.effect)),
+  const capabilities: ExtensionCapabilities = {
+    list: () => host.capabilities.list().filter((capability) => capabilityAllowed(capability.id, capability.effect)),
     execute: async <T,>(id: string, input: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> => {
-      const capability = legacy.capabilities.list().find((entry) => entry.id === id);
+      const capability = host.capabilities.list().find((entry) => entry.id === id);
       if (!capability || !capabilityAllowed(capability.id, capability.effect)) {
         throw new Error(`${manifest.name} is not allowed to invoke capability ${id}`);
       }
       const linked = linkedSignal(scope.signal, signal);
       try {
-        return await legacy.capabilities.execute<T>(id, input, linked.signal);
+        return await host.capabilities.execute<T>(id, input, linked.signal);
       } finally {
         linked.dispose();
       }
@@ -126,45 +131,45 @@ export function createExtensionContextV2(
     session: {
       model: () => {
         requirePermission("model.summary.read");
-        return legacy.model();
+        return host.model();
       },
     },
     model: {
       elements: () => {
         requirePermission("model.structure.read");
-        return legacy.elements();
+        return host.elements();
       },
       classes: () => {
         requirePermission("model.structure.read");
-        return legacy.classes();
+        return host.classes();
       },
       properties: (id) => {
         requirePermission("model.properties.read");
-        return legacy.properties(id);
+        return host.properties(id);
       },
       tree: () => {
         requirePermission("model.structure.read");
-        return legacy.tree();
+        return host.tree();
       },
       subtree: (id) => {
         requirePermission("model.structure.read");
-        return legacy.subtree(id);
+        return host.subtree(id);
       },
       bounds: (id) => {
         requirePermission("geometry.query");
-        return legacy.bounds(id);
+        return host.bounds(id);
       },
       index: () => {
         requirePermission("model.index.build");
-        return legacy.index();
+        return host.index();
       },
       modelOf: (id) => {
         requirePermission("model.structure.read");
-        return legacy.modelOf(id);
+        return host.modelOf(id);
       },
       expressOf: (id) => {
         requirePermission("model.structure.read");
-        return legacy.expressOf(id);
+        return host.expressOf(id);
       },
     },
     geometry: {
@@ -172,7 +177,7 @@ export function createExtensionContextV2(
         requirePermission("geometry.query");
         const linked = linkedSignal(scope.signal, options.signal);
         try {
-          return await legacy.clash(a, b, { ...options, signal: linked.signal });
+          return await host.clash(a, b, { ...options, signal: linked.signal });
         } finally {
           linked.dispose();
         }
@@ -181,7 +186,7 @@ export function createExtensionContextV2(
         requirePermission("geometry.query");
         const linked = linkedSignal(scope.signal, options.signal);
         try {
-          return await legacy.distance(a, b, { ...options, signal: linked.signal });
+          return await host.distance(a, b, { ...options, signal: linked.signal });
         } finally {
           linked.dispose();
         }
@@ -190,7 +195,7 @@ export function createExtensionContextV2(
         requirePermission("geometry.query");
         const linked = linkedSignal(scope.signal, options.signal);
         try {
-          return await legacy.laser(origin, { ...options, signal: linked.signal });
+          return await host.laser(origin, { ...options, signal: linked.signal });
         } finally {
           linked.dispose();
         }
@@ -199,7 +204,7 @@ export function createExtensionContextV2(
         requirePermission("geometry.query");
         const linked = linkedSignal(scope.signal, options.signal);
         try {
-          return await legacy.sectionContours(axis, offset, { ...options, signal: linked.signal });
+          return await host.sectionContours(axis, offset, { ...options, signal: linked.signal });
         } finally {
           linked.dispose();
         }
@@ -208,7 +213,7 @@ export function createExtensionContextV2(
         requirePermission("geometry.query");
         const linked = linkedSignal(scope.signal, options.signal);
         try {
-          return await legacy.geometrySignatures(ids, { ...options, signal: linked.signal });
+          return await host.geometrySignatures(ids, { ...options, signal: linked.signal });
         } finally {
           linked.dispose();
         }
@@ -217,100 +222,112 @@ export function createExtensionContextV2(
     view: {
       select: (ids) => {
         requirePermission("view.control");
-        legacy.select(ids);
+        host.select(ids);
       },
       selection: () => {
         requirePermission("view.read");
-        return legacy.selection();
+        return host.selection();
       },
       lastPick: () => {
         requirePermission("view.read");
-        return legacy.lastPick();
+        return host.lastPick();
+      },
+      measuring: () => {
+        requirePermission("view.read");
+        return host.viewer.isMeasuring();
       },
       pickGuide: (on) => {
         requirePermission("view.control");
         if (on && !pickGuideCleanupBound) {
           pickGuideCleanupBound = true;
-          scope.onDispose(() => legacy.setPickGuide(false));
+          scope.onDispose(() => host.setPickGuide(false));
         }
-        legacy.setPickGuide(on);
+        host.setPickGuide(on);
       },
       isVisible: (id) => {
         requirePermission("view.read");
-        return legacy.isVisible(id);
+        return host.isVisible(id);
+      },
+      categoryVisible: (category) => {
+        requirePermission("view.read");
+        return host.viewer.isCategoryVisible(category);
+      },
+      setCategoryVisible: async (category, visible) => {
+        requirePermission("view.control");
+        await host.viewer.setCategoryVisible(category, visible);
       },
       isolate: (ids, label) => {
         requirePermission("view.control");
-        legacy.isolate(ids, label);
+        host.isolate(ids, label);
       },
       hide: (ids) => {
         requirePermission("view.control");
-        legacy.hide(ids);
+        host.hide(ids);
       },
       showAll: () => {
         requirePermission("view.control");
-        legacy.showAll();
+        host.showAll();
       },
       frame: (id) => {
         requirePermission("view.control");
-        legacy.frame(id);
+        host.frame(id);
       },
       frameAt: (point, radius) => {
         requirePermission("view.control");
-        legacy.frameAt(point, radius);
+        host.frameAt(point, radius);
       },
       viewFrom: (view) => {
         requirePermission("view.control");
-        legacy.viewFrom(view);
+        host.viewFrom(view);
       },
       camera: () => {
         requirePermission("view.read");
-        return legacy.camera();
+        return host.camera();
       },
       setCamera: (pose) => {
         requirePermission("view.control");
-        legacy.setCamera(pose);
+        host.setCamera(pose);
       },
       sections: () => {
         requirePermission("view.read");
-        return legacy.sections();
+        return host.sections();
       },
       setSections: (states) => {
         requirePermission("view.control");
-        legacy.setSections(states);
+        host.setSections(states);
       },
       sectionBox: () => {
         requirePermission("view.read");
-        return legacy.sectionBox();
+        return host.sectionBox();
       },
       setSectionBox: (box) => {
         requirePermission("view.control");
-        legacy.setSectionBox(box);
+        host.setSectionBox(box);
       },
       boxAround: (ids, pad) => {
         requirePermission("geometry.query");
-        return legacy.boxAround(ids, pad);
+        return host.boxAround(ids, pad);
       },
       colorBy: (assignment, colors) => {
         requirePermission("view.control");
-        legacy.colorBy(assignment, colors);
+        host.colorBy(assignment, colors);
       },
       measurements: () => {
         requirePermission("view.read");
-        return legacy.measurements();
+        return host.measurements();
       },
       addMeasurement: (a, b) => {
         requirePermission("view.control");
-        return legacy.addMeasurement(a, b);
+        return host.addMeasurement(a, b);
       },
       removeMeasurement: (id) => {
         requirePermission("view.control");
-        legacy.removeMeasurement(id);
+        host.removeMeasurement(id);
       },
     },
     events: {
       on: (event, handler) => {
-        const off = legacy.on(event, handler);
+        const off = host.on(event, handler);
         scope.onDispose(off);
         return off;
       },
@@ -348,15 +365,15 @@ export function createExtensionContextV2(
       },
     },
     feedback: {
-      publishFindings: (summary, findings) => legacy.publishFindings(summary, findings),
-      log: (text, kind) => legacy.log(text, kind),
-      toast: (text, kind) => legacy.toast(text, kind),
+      publishFindings: (summary, findings) => host.publishFindings(summary, findings),
+      log: (text, kind) => host.log(text, kind),
+      toast: (text, kind) => host.toast(text, kind),
     },
     commands: {
       run: (id) => {
         const declared = manifest.contributes.commands?.some((command) => command.id === id);
         if (!declared) throw new Error(`${manifest.name} did not declare command ${id}`);
-        legacy.run(id);
+        host.run(id);
       },
       register: (id, handler) => {
         const contribution = manifest.contributes.commands?.find((command) => command.id === id);
@@ -443,7 +460,7 @@ export function createExtensionContextV2(
         if (!bindings.results) throw new Error("This host cannot store extension results");
         const handle = bindings.results.create(manifest.id, resultView, items, {
           ...options,
-          revision: options.revision ?? legacy.model().key,
+          revision: options.revision ?? host.model().key,
         });
         bindings.onResult?.(handle);
         const remove = scope.bind("resultViews", resultView, () => {
@@ -472,7 +489,7 @@ export function createExtensionContextV2(
         requirePermission("local.invoke");
         const companion = manifest.localCompanion;
         if (!companion) throw new Error(`${manifest.name} did not declare a Local Studio companion`);
-        const match = legacy.service.matchCompanion(companion.id, companion.version);
+        const match = host.service.matchCompanion(companion.id, companion.version);
         return {
           state: match.status,
           providerId: companion.id,
@@ -485,7 +502,7 @@ export function createExtensionContextV2(
         requirePermission("local.invoke");
         const companion = manifest.localCompanion;
         if (!companion) throw new Error(`${manifest.name} did not declare a Local Studio companion`);
-        const match = legacy.service.matchCompanion(companion.id, companion.version);
+        const match = host.service.matchCompanion(companion.id, companion.version);
         return match.status === "available"
           ? match.provider.capabilities.filter((entry) => entry.available).map((entry) => entry.id)
           : [];
@@ -496,7 +513,7 @@ export function createExtensionContextV2(
         if (!companion) throw new Error(`${manifest.name} did not declare a Local Studio companion`);
         const linked = linkedSignal(scope.signal, signal);
         try {
-          return await legacy.service.invokeLocal<T>(
+          return await host.service.invokeLocal<T>(
             companion.id,
             companion.version,
             capability,
@@ -508,6 +525,21 @@ export function createExtensionContextV2(
         }
       },
     },
-    close: () => legacy.close(),
+    python: {
+      runsNatively: () => {
+        requirePermission("automation.python");
+        return host.python.runsNatively();
+      },
+      query: (code, onStatus) => {
+        requirePermission("automation.python");
+        return host.python.query(code, onStatus);
+      },
+      propose: (code, onStatus) => {
+        requirePermission("automation.python");
+        requirePermission("edit.propose");
+        return host.python.propose(code, onStatus);
+      },
+    },
+    close: () => host.close(),
   };
 }

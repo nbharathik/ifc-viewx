@@ -18,7 +18,7 @@ const LIMITS = {
 const KNOWN_PERMISSIONS = new Set([
   "model.summary.read", "model.structure.read", "model.properties.read", "model.index.build",
   "geometry.query", "geometry.mesh.read", "view.read", "view.control", "view.overlay",
-  "edit.propose", "file.open", "file.export", "storage.extension", "assistant.contribute",
+  "review.issue.create", "edit.propose", "automation.python", "file.open", "file.export", "storage.extension", "assistant.contribute",
   "local.invoke", "viewport.capture",
 ]);
 const CONTRIBUTIONS = new Set([
@@ -150,6 +150,7 @@ function validateManifest(manifest) {
   assert(new Set(manifest.permissions).size === manifest.permissions.length, "permissions must not contain duplicates");
   for (const permission of manifest.permissions) assert(KNOWN_PERMISSIONS.has(permission), `unknown permission ${permission}`);
   assert(!manifest.permissions.includes("geometry.mesh.read"), "installed extensions cannot request geometry.mesh.read");
+  assert(!manifest.permissions.includes("automation.python"), "installed extensions cannot request automation.python");
   assert(object(manifest.contributes), "contributes must be an object");
   for (const [kind, entries] of Object.entries(manifest.contributes)) {
     assert(CONTRIBUTIONS.has(kind), `unknown contribution point ${kind}`);

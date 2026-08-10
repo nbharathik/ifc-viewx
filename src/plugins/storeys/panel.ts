@@ -4,7 +4,7 @@
 // stepping up and down readable. The ceiling cut puts a horizontal section at
 // the level above so you look down into the storey instead of at its slab.
 import { bar, button, emptyState, h, iconButton, note, page } from "@ifcviewx/sdk";
-import type { ExtensionContextV2, PluginInstance, SpatialNode } from "@ifcviewx/sdk";
+import type { ExtensionContext, ExtensionInstance, SpatialNode } from "@ifcviewx/sdk";
 
 interface Storey {
   id: number;
@@ -14,7 +14,7 @@ interface Storey {
   top: number;
 }
 
-export function mount(host: HTMLElement, ctx: ExtensionContextV2): PluginInstance {
+export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstance {
   let storeys: Storey[] = [];
   let active = -1;
   let cut = ctx.storage.read("cut", false);

@@ -1,5 +1,5 @@
 import { h, icon, iconButton, lightDismiss } from "../../ui/kit.js";
-import type { ExtensionPermission } from "../../sdk/v2/contributions.js";
+import type { ExtensionPermission } from "../../sdk/contributions.js";
 import type { ExtensionAuditEntry, ExtensionInstallCandidate } from "./types.js";
 
 interface PermissionPresentation {
@@ -20,6 +20,7 @@ const PERMISSIONS: Record<ExtensionPermission, PermissionPresentation> = {
   "view.overlay": { title: "Draw review marks", detail: "Add host-owned lines and markers with quotas", impact: "control" },
   "review.issue.create": { title: "Create review issues", detail: "Add a BCF topic from the current view and chosen elements", impact: "sensitive" },
   "edit.propose": { title: "Propose model edits", detail: "Stage typed changes for your approval", impact: "sensitive" },
+  "automation.python": { title: "Python execution", detail: "Run user-authored Python. Installed extensions cannot receive this permission", impact: "sensitive" },
   "file.open": { title: "Open chosen files", detail: "Ask you to select declared file types", impact: "sensitive" },
   "file.export": { title: "Export files", detail: "Create a download through the viewer", impact: "control" },
   "storage.extension": { title: "Save extension settings", detail: "Use quota-limited storage under this extension ID", impact: "read" },

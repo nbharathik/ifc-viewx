@@ -60,12 +60,13 @@ from a broken run.
 ## Plugins
 
 Here are some of the plugins that ship with the viewer, and a few that need Local Studio. 
+Bundled and installable extensions share one permission-scoped SDK contract.
 
 | In the browser | Local Studio | Built into the app |
 | --- | --- | --- |
 | Clash Detection, Element Explorer, Model Compare, Python Console, Quantity Takeoff, Room Book, Storey Navigator | Assistant Key Vault, IfcOpenShell Converter, MCP Bridge, Native Python | Element Schedules, IDS Validation, Issue Tracker, Model Checks, Model Edits, Smart Filters |
 
-Want to build a plugin? See [Writing a plugin](https://nbharathik.github.io/ifc-viewx/docs/plugins/) and [working on the repo](https://nbharathik.github.io/ifc-viewx/docs/contributing/).
+Want to build an extension? See [Writing an extension](https://nbharathik.github.io/ifc-viewx/docs/plugins/), the [SDK reference](https://nbharathik.github.io/ifc-viewx/docs/plugins/api/), and [working on the repo](https://nbharathik.github.io/ifc-viewx/docs/contributing/).
 
 ## License
 

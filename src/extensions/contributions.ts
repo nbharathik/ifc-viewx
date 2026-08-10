@@ -2,7 +2,7 @@ import type {
   ContributionFor,
   ContributionKind,
   ExtensionContributions,
-} from "../sdk/v2/contributions.js";
+} from "../sdk/contributions.js";
 
 export interface RegisteredContribution<Kind extends ContributionKind = ContributionKind> {
   owner: string;

@@ -9,7 +9,7 @@ import { formatLength } from "../viewer-core/viewer.js";
 import type { PropertyIndex } from "../sdk/data.js";
 import type {
   CameraPose, LazyCategory, MeasureConstraint, MeasurementFormat, MeasurementObject, MeasurementState,
-  MeasureMode, SectionBox, SectionState, SnapMode, Viewer, ViewPreset,
+  MeasureMode, SectionBox, SectionState, ShapeMeasure, SnapMode, Viewer, ViewPreset,
 } from "../viewer-core/viewer.js";
 import {
   measurementTypeLabel,
@@ -158,11 +158,15 @@ export class Dock {
   private readonly measureCard: HTMLElement;
   private readonly measureValue = h("div", { class: "mc-value" });
   private readonly measureSplit = h("div", { class: "mc-split" });
-  private readonly measureList = h("div", { class: "mc-list hidden" });
+  private readonly measureList = h("div", { class: "mc-list" });
   private readonly measureHint = h("div", { class: "mc-hint" });
+  private readonly measureAccuracySummary = h("span", { class: "mc-summary-note", text: "Auto snap / Free / Auto" });
+  private readonly measureLedgerSummary = h("span", { class: "mc-summary-note", text: "0 saved" });
   /** Hover emits at frame rate; the ledger only rereads objects on a real revision. */
   private renderedMeasureRevision = -1;
   private renderedMeasureFormat = "";
+  private renderedShapeRevision = -1;
+  private latestShapes: ShapeMeasure[] = [];
   private readonly closeRing = h("button", { class: "btn sm grow hidden", type: "button", text: "Close ring" });
   private readonly finishPath = h("button", { class: "btn sm grow hidden", type: "button", text: "Finish path" });
   private readonly measureUnit = h("select", { class: "mc-unit", "aria-label": "Measurement units" });
@@ -183,6 +187,8 @@ export class Dock {
 
   /** Set by the app: opening a file picker is its business, not the dock's. */
   onAddModel: (() => void) | null = null;
+  onOpenSmartMeasure: (() => void) | null = null;
+  onOpenSectionWorkspace: (() => void) | null = null;
 
   constructor(host: HTMLElement, private readonly viewer: Viewer) {
     this.root = h("div", { id: "dock", role: "toolbar", "aria-label": "Viewport tools" });
@@ -424,9 +430,13 @@ export class Dock {
       }).catch((error: unknown) => toast(error instanceof Error ? error.message : "Could not import measurements", "error"));
     });
 
-    const precision = h("details", { class: "mc-disclosure" }, [
-      h("summary", {}, [h("span", { text: "Precision and units" }), h("span", { class: "mc-summary-note", text: "Auto snap" })]),
+    const accuracy = h("details", { class: "mc-disclosure" }, [
+      h("summary", {}, [h("span", { text: "Accuracy" }), this.measureAccuracySummary]),
       h("div", { class: "mc-disclosure-body" }, [
+        h("div", { class: "mc-constraint-row" }, [
+          h("span", { class: "mc-key", text: "Lock" }),
+          constraints,
+        ]),
         h("div", { class: "mc-settings" }, [
           h("label", {}, [h("span", { class: "mc-key", text: "Snap" }), snaps]),
           h("label", {}, [h("span", { class: "mc-key", text: "Units" }), this.measureUnit]),
@@ -434,7 +444,7 @@ export class Dock {
       ]),
     ]);
     const ledger = h("details", { class: "mc-disclosure mc-ledger" }, [
-      h("summary", {}, [h("span", { text: "Saved measurements" }), h("span", { class: "mc-summary-note", text: "Manage" })]),
+      h("summary", {}, [h("span", { text: "Saved measurements" }), this.measureLedgerSummary]),
       h("div", { class: "mc-disclosure-body" }, [
         h("div", { class: "mc-ledger-tools" }, [
           this.measureSearch,
@@ -447,23 +457,30 @@ export class Dock {
         h("div", { class: "mc-row mc-ledger-actions" }, [reset]),
       ]),
     ]);
+    const smart = h("button", {
+      class: "mc-smart",
+      type: "button",
+      text: "Smart",
+      title: "Open clearance and axis scan",
+    });
+    smart.addEventListener("click", () => {
+      this.viewer.setMeasuring(false);
+      this.onOpenSmartMeasure?.();
+    });
 
     return h("div", { id: "measure-card", class: "hidden" }, [
       h("div", { class: "mc-head" }, [
         icon("ruler", 12),
         h("span", { class: "grow", text: "Measure" }),
         this.measureCount,
+        smart,
         done,
       ]),
       modes,
       h("div", { class: "mc-readout" }, [this.measureValue, this.measureSplit]),
       this.measureHint,
-      h("div", { class: "mc-constraint-row" }, [
-        h("span", { class: "mc-key", text: "Constraint" }),
-        constraints,
-      ]),
       h("div", { class: "mc-row mc-finish" }, [this.closeRing, this.finishPath]),
-      precision,
+      accuracy,
       ledger,
       this.measureImport,
     ]);
@@ -487,6 +504,10 @@ export class Dock {
     for (const button of this.measureCard.querySelectorAll<HTMLButtonElement>("[data-constraint]")) {
       button.setAttribute("aria-pressed", String(button.dataset.constraint === constraint));
     }
+    const snapLabel = SNAPS.find(([value]) => value === snap)?.[1] ?? "Auto";
+    const constraintLabel = CONSTRAINTS.find(([value]) => value === constraint)?.[1] ?? "Free";
+    const unitLabel = UNIT_PRESETS.find(([id]) => id === this.measureUnit.value)?.[1] ?? "Auto";
+    this.measureAccuracySummary.textContent = `${snapLabel} snap / ${constraintLabel} / ${unitLabel}`;
     this.closeRing.classList.toggle("hidden", mode !== "area");
     this.finishPath.classList.toggle("hidden", mode !== "path");
     this.finishPath.disabled = this.viewer.getPendingPoints().length < 2;
@@ -507,20 +528,29 @@ export class Dock {
         }`
         : "";
 
-    const spans = this.viewer.getMeasurements();
     const pending = found !== null && !found.complete;
     this.measureHint.textContent = pending
       ? "Release or click on the second point"
-      : spans.length
+      : found?.complete
         ? `${measurementTypeLabel(found!)} · click starts the next one`
         : "Click or drag from the first point · X/Y/Z axis · P/L surface";
   }
 
   /** Shape tools read their finished object and say exactly what the next click does. */
   private syncShape(mode: Exclude<MeasureMode, "distance">): void {
-    const shapes = this.viewer.getShapeMeasures().filter((entry) => entry.kind === mode);
+    const revision = this.viewer.getMeasurementRevision();
+    if (revision !== this.renderedShapeRevision) {
+      this.renderedShapeRevision = revision;
+      this.latestShapes = this.viewer.getShapeMeasures();
+    }
     const pending = this.viewer.getPendingPoints();
-    const last = shapes[shapes.length - 1];
+    let last: ShapeMeasure | undefined;
+    for (let index = this.latestShapes.length - 1; index >= 0; index--) {
+      if (this.latestShapes[index].kind === mode) {
+        last = this.latestShapes[index];
+        break;
+      }
+    }
 
     if (mode === "path" && pending.length) {
       let total = 0;
@@ -628,6 +658,7 @@ export class Dock {
     const total = this.viewer.getMeasurementObjects().length;
     const items = this.listedMeasurements();
     this.measureCount.textContent = items.length === total ? String(total) : `${items.length}/${total}`;
+    this.measureLedgerSummary.textContent = `${total.toLocaleString()} saved`;
     const anyVisible = items.some((item) => item.visible);
     this.measureVisibility.setAttribute("aria-pressed", String(anyVisible));
     this.measureVisibility.title = anyVisible ? "Hide all measurements" : "Show all measurements";
@@ -824,6 +855,14 @@ export class Dock {
     });
     planePanel.appendChild(h("div", { class: "pop-row section-actions" }, [plan, off]));
     this.buildSectionBox(boxPanel, bounds);
+    const drawing = h("button", {
+      class: "btn section-workspace-open",
+      type: "button",
+      text: "Open plans and sections",
+      title: "Build a synchronized 2D drawing from the active cut",
+    });
+    drawing.addEventListener("click", () => this.onOpenSectionWorkspace?.());
+    pop.appendChild(drawing);
     setMode(this.viewer.getSectionBox() ? "box" : "planes");
   }
 

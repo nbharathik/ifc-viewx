@@ -1,4 +1,4 @@
-import type { JsonSchema } from "../../capabilities/types.js";
+import type { JsonSchema } from "../capabilities/types.js";
 
 export type ExtensionPermission =
   | "model.summary.read"
@@ -12,6 +12,7 @@ export type ExtensionPermission =
   | "view.overlay"
   | "review.issue.create"
   | "edit.propose"
+  | "automation.python"
   | "file.open"
   | "file.export"
   | "storage.extension"
@@ -117,7 +118,7 @@ export interface ExtensionCatalogMetadata {
   does: string[];
 }
 
-export interface ExtensionManifestV2 {
+export interface ExtensionManifest {
   manifestVersion: 2;
   id: string;
   name: string;

@@ -309,6 +309,27 @@ interface MeasureSpanRecord {
   shape?: number;
 }
 
+export interface MeasureLabelBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export function selectMeasureLabels<T extends MeasureLabelBox>(items: T[], limit = 80, gap = 5): T[] {
+  const kept: T[] = [];
+  for (const item of items) {
+    if (kept.length >= limit) break;
+    if (!Number.isFinite(item.x) || !Number.isFinite(item.y)) continue;
+    const overlaps = kept.some((other) =>
+      Math.abs(item.x - other.x) < (item.width + other.width) / 2 + gap
+      && Math.abs(item.y - other.y) < (item.height + other.height) / 2 + gap,
+    );
+    if (!overlaps) kept.push(item);
+  }
+  return kept;
+}
+
 const sameIds = (a: number[], b: number[]): boolean =>
   a.length === b.length && a.every((id, i) => id === b[i]);
 
@@ -795,6 +816,11 @@ class ViewerImpl implements Viewer {
           this.container.classList.toggle('ifc-over-handle', over);
         }
         if (this.measuring || this.pickGuide) this.queueMeasureHover(clientX, clientY);
+      },
+      onCameraChange: () => {
+        const at = this.hoverAt;
+        this.hoverAt = null;
+        if (at && (this.measuring || this.pickGuide)) this.queueMeasureHover(at[0], at[1]);
       },
     });
     this.axisGizmo = new AxisGizmo(this.container, this.scene.camera, {
@@ -1909,8 +1935,10 @@ class ViewerImpl implements Viewer {
   }
 
   setMeasuring(on: boolean): void {
+    if (on && this.pickGuide) this.setPickGuide(false);
     if (on === this.measuring) return;
     this.measuring = on;
+    this.hoverAt = null;
     this.container.classList.toggle('ifc-measuring', on);
     this.controls.setToolActive(on);
     // Placed measurements outlive the tool: they are part of the view, and the
@@ -1931,6 +1959,7 @@ class ViewerImpl implements Viewer {
     if (mode === this.snapMode) return;
     this.snapMode = mode;
     this.measureHover = null;
+    this.hoverAt = null;
     // pushMeasure, not emitMeasure: the scene still holds the old hover dot.
     this.pushMeasure();
   }
@@ -2182,6 +2211,7 @@ class ViewerImpl implements Viewer {
   }
 
   setPickGuide(on: boolean): void {
+    if (on && this.measuring) this.setMeasuring(false);
     if (on === this.pickGuide) return;
     this.pickGuide = on;
     this.container.classList.toggle('ifc-pick-guided', on);
@@ -2343,6 +2373,9 @@ class ViewerImpl implements Viewer {
     this.measureAKind = hit.kind;
     const [canvasX, canvasY] = this.controls.toCanvas(clientX, clientY);
     this.measureNormal = this.scene.surfaceNormalAt(canvasX, canvasY, hit.point);
+    if (!this.measureNormal && (this.measureConstraint === 'perpendicular' || this.measureConstraint === 'parallel')) {
+      this.measureConstraint = 'free';
+    }
     this.measureHover = null;
     this.measureOpening = true;
     this.pushMeasure();
@@ -2378,6 +2411,9 @@ class ViewerImpl implements Viewer {
     if (!last) {
       const [canvasX, canvasY] = this.controls.toCanvas(clientX, clientY);
       this.measureNormal = this.scene.surfaceNormalAt(canvasX, canvasY, point);
+      if (!this.measureNormal && (this.measureConstraint === 'perpendicular' || this.measureConstraint === 'parallel')) {
+        this.measureConstraint = 'free';
+      }
     }
     this.chain.push(point);
     if (this.measureMode === 'coordinate') {
@@ -2511,6 +2547,7 @@ class ViewerImpl implements Viewer {
     this.measureA = null;
     this.measureAKind = null;
     this.measureNormal = null;
+    this.hoverAt = null;
     this.pushMeasure();
   }
 
@@ -2581,6 +2618,8 @@ class ViewerImpl implements Viewer {
    * most, and no repaint unless the cursor found a different point.
    */
   private queueMeasureHover(clientX: number, clientY: number): void {
+    const previous = this.hoverPending ?? this.hoverAt;
+    if (previous && Math.hypot(previous[0] - clientX, previous[1] - clientY) < 0.75) return;
     this.hoverPending = [clientX, clientY];
     if (this.hoverFrame) return;
     this.hoverFrame = requestAnimationFrame(() => {
@@ -2632,10 +2671,14 @@ class ViewerImpl implements Viewer {
     const length = (a: [number, number, number], b: [number, number, number]): number =>
       Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
 
-    const entries: Array<{ text: string; at: [number, number, number] }> = [];
+    const entries: Array<{ text: string; at: [number, number, number]; order: number }> = [];
     for (const span of this.spans) {
-      if (span.visible === false) continue;
-      entries.push({ text: formatLength(length(span.a, span.b), this.measurementFormat), at: mid(span.a, span.b) });
+      if (span.visible === false || span.shape !== undefined) continue;
+      entries.push({
+        text: formatLength(length(span.a, span.b), this.measurementFormat),
+        at: mid(span.a, span.b),
+        order: span.id,
+      });
     }
     // The answer goes in the middle of the shape it answers for, so an angle
     // and a ring read off the model without a trip to the panel.
@@ -2653,20 +2696,46 @@ class ViewerImpl implements Viewer {
             : shape.kind === 'path' ? formatLength(shape.perimeter, this.measurementFormat)
               : formatCoordinate(shape.points[0], this.measurementFormat),
         at: shape.kind === 'angle' ? shape.points[1] : at,
+        order: shape.id,
       });
     }
     const end = this.measureHover?.point ?? null;
     const from = this.measureA ?? (this.measuring ? this.chain[this.chain.length - 1] ?? null : null);
     if (from && end && length(from, end) > 0) {
-      entries.push({ text: formatLength(length(from, end), this.measurementFormat), at: mid(from, end) });
+      entries.push({
+        text: formatLength(length(from, end), this.measurementFormat),
+        at: mid(from, end),
+        order: Number.MAX_SAFE_INTEGER,
+      });
     }
-    while (this.spanLabels.length < entries.length) {
+    entries.sort((a, b) => b.order - a.order);
+    const candidates: Array<MeasureLabelBox & {
+      text: string;
+      at: [number, number, number];
+      screen: { x: number; y: number; behind: boolean };
+    }> = [];
+    const width = this.container.clientWidth;
+    const height = this.container.clientHeight;
+    for (const entry of entries) {
+      const screen = this.scene.projectPoint(entry.at);
+      if (screen.behind || screen.x < -12 || screen.y < -12 || screen.x > width + 12 || screen.y > height + 12) continue;
+      candidates.push({
+        ...entry,
+        screen,
+        x: screen.x,
+        y: screen.y,
+        width: Math.max(52, Math.min(220, entry.text.length * 7.2 + 20)),
+        height: 24,
+      });
+    }
+    const visibleEntries = selectMeasureLabels(candidates);
+    while (this.spanLabels.length < visibleEntries.length) {
       const node = this.container.ownerDocument.createElement('div');
       node.className = 'ifc-measure-label';
       this.container.appendChild(node);
       this.spanLabels.push(node);
     }
-    this.spanLabels.forEach((node, index) => this.placeLabel(node, entries[index] ?? null));
+    this.spanLabels.forEach((node, index) => this.placeLabel(node, visibleEntries[index] ?? null));
 
     const hover = this.measuring || this.pickGuide ? this.measureHover : null;
     if (hover && !this.snapTag) {
@@ -2687,13 +2756,17 @@ class ViewerImpl implements Viewer {
   /** Park a label over a world point, or hide it when there is nothing to say. */
   private placeLabel(
     node: HTMLElement,
-    entry: { text: string; at: [number, number, number] } | null,
+    entry: {
+      text: string;
+      at: [number, number, number];
+      screen?: { x: number; y: number; behind: boolean };
+    } | null,
   ): void {
     if (!entry) {
       if (node.style.display !== 'none') node.style.display = 'none';
       return;
     }
-    const screen = this.scene.projectPoint(entry.at);
+    const screen = entry.screen ?? this.scene.projectPoint(entry.at);
     const display = screen.behind ? 'none' : 'block';
     if (node.style.display !== display) node.style.display = display;
     if (!screen.behind) {
