@@ -50,7 +50,6 @@ shared APIs to `src/sdk/`.
 - Use strict TypeScript.
 - Remove unused locals and parameters.
 - Write comments that explain why.
-- Do not use em dashes.
 
 `npm run check` enforces these rules.
 

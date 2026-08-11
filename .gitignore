@@ -20,5 +20,3 @@ CLAUDE.md
 assets/logo/*
 !assets/logo/lockup-dark.svg
 !assets/logo/lockup-light.svg
-benchmarks/modelCompare.bench.ts
-benchmarks/sectionContours.bench.ts
