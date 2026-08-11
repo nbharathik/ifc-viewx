@@ -17,23 +17,15 @@ Drop an IFC file on it. Nothing to install, nothing uploaded.
 
 ## What it does
 
-* Model tree, properties, quantities and schedules
-* Measure length, angle and area; section planes, 2D plans, saved viewpoints
-* Colour the model by class, storey or any property, with a legend
-* Ghost hidden elements instead of losing them, and undo any hide or isolate
-* Named selection sets, saved per model
-* Quality checks and IDS validation
-* One offline HTML report: checks, IDS, clashes and issues, print it to PDF
-* Editing with diffs, undo and redo
-* Triangle-level clash detection with clearance checking, quantity takeoff,
-  room book, model compare, BCF issues
-* Python console with real IfcOpenShell
-* Optional AI assistant, using your own Claude, OpenAI, OpenRouter or local
-  model, with streaming replies, native tool calling and saved conversations
+* Local-first IFC viewer: runs on your machine, with no uploads, no tracking, and no cloud dependency
+* Private by default: your models stay local, with secure local tools and offline reporting
+* Built for BIM workflows: model tree, measurements, sections, saved views, filters, legends, and selection sets
+* Quality and coordination: IDS validation, clash detection, model compare, quantity takeoff, and more
+* Extensible platform: plugin support for browser and local studio workflows, plus Python and IfcOpenShell tools
 
-No file to hand? Open the viewer and pick **try a sample building**.
+No file to hand? Open the viewer and pick **try a sample building** to check out the viewer and its tools.
 
-## Install it locally
+## Run it locally
 
 ```
 pip install ifcviewx
