@@ -1,28 +1,32 @@
-# Installed browser extensions
+# Installed extensions
 
-An installed extension is a local `.ifcviewx-extension` package. Its UI runs in an opaque-origin iframe and can reach the viewer only through a small, permission-checked message API.
+An installed extension is a local `.ifcviewx-extension` package. Its UI runs in
+an isolated iframe and reaches IFCViewX through a permission-checked API.
 
-Use an installed extension when the tool should be distributed without rebuilding IFCViewX and does not need direct renderer or native machine access. Use a [bundled extension](index.md) for reviewed first-party code that needs the full SDK surface. Exact BRep work, large batch jobs, format conversion, and trusted native automation belong in a separately installed [Local Studio provider](../local-providers.md).
+Use this format when users should install a tool without rebuilding IFCViewX.
+Use a [bundled extension](index.md) for reviewed first-party code, or a
+[native provider](../local-providers.md) for trusted machine access.
 
-## Install and manage
+## Install a package
 
-Open **Plugins**, select **Install file**, and choose a package. The review screen shows:
+1. Open **Plugins**.
+2. Select **Install file**.
+3. Choose the `.ifcviewx-extension` file.
+4. Review the publisher, hash, permissions, and runtime details.
+5. Confirm the installation.
 
-- publisher, version, package size, and SHA-256 hash;
-- every requested permission, including permissions added by an update;
-- the isolated runtime profile;
-- assistant data disclosure when assistant tools are declared;
-- optional or required Local Studio companion metadata.
+You can enable, disable, roll back, audit, or uninstall the package later.
+IFCViewX keeps two versions for rollback. New permissions always require
+another review.
 
-Confirming writes the validated package and state to OPFS. If OPFS is unavailable, the manager falls back to session-only memory and records that fallback in the audit log.
+Validated packages and settings are stored in browser OPFS. If OPFS is not
+available, IFCViewX uses session memory and records that fallback in the audit.
+Uninstalling removes both saved package versions and namespaced settings.
 
-Installed entries have controls for enable, disable, rollback, audit, and uninstall. Two package versions are retained, so the previous one can be restored. Disabling closes the iframe, aborts pending geometry calls, removes events, result handles, overlays, and commands, and leaves no extension runtime active. Uninstall also removes the package versions and namespaced saved settings.
-
-There is no URL installer, marketplace, automatic update, or signature trust decision in this release. Reinstalling or updating always begins with a local file. Added permissions require a new review.
+There is no URL installer, marketplace, automatic update, or automatic trust
+decision. Installation and updates always start from a local file.
 
 ## Package layout
-
-The initial package profile is deliberately small:
 
 ```text
 my-extension/
@@ -30,7 +34,8 @@ my-extension/
   panel.html
 ```
 
-`extension.json` uses SDK manifest version 2 with `runtime.kind` set to `sandboxed`. Installed IDs use reverse-domain notation. The package must declare exactly one panel and include its `onPanel:<id>` activation event.
+The package uses manifest version 2, a reverse-domain ID, one panel, and one
+self-contained HTML entry.
 
 ```json
 {
@@ -58,13 +63,16 @@ my-extension/
 }
 ```
 
-The first package format requires a self-contained HTML entry. Scripts and styles must be inline. Network script, stylesheet, media, and CSS imports are rejected. Frames, objects, forms, base URLs, refresh navigation, symbolic links, unsafe paths, encrypted ZIP entries, ZIP64, and unsupported compression profiles are also rejected.
+Scripts and styles must be inline. Network resources, imports, forms, frames,
+popups, navigation, and symbolic links are not allowed.
 
-Package limits are 5 MB compressed, 12 MB unpacked, 2 MB per file, 1 MB for the HTML entry, and 128 ZIP entries. The validator reads central-directory sizes before decompression to reject oversized or inconsistent archives early.
+The package is limited to 5 MB compressed, 12 MB unpacked, 2 MB per file,
+1 MB for `panel.html`, and 128 files. Encrypted ZIP files, ZIP64, unsafe paths,
+and unsupported compression formats are rejected before installation.
 
-## Authoring API
+## Write the panel
 
-IFCViewX injects a bootstrap before the package scripts. Wait for the dedicated message channel before calling the host:
+Wait for `IFCViewX.ready()` before calling the host:
 
 ```html
 <main class="ifcx-page">
@@ -75,84 +83,90 @@ IFCViewX injects a bootstrap before the package scripts. Wait for the dedicated 
   IFCViewX.ready().then(async (api) => {
     const paint = async () => {
       const classes = await api.model.classes();
-      document.getElementById("counts").textContent = `${classes.length} IFC classes`;
+      document.getElementById("counts").textContent =
+        `${classes.length} IFC classes`;
     };
+
     api.on("model", paint);
     await paint();
   });
 </script>
 ```
 
-The injected `IFCViewX` object provides:
+Available API groups:
 
-| Domain | Calls |
+| Group | Main calls |
 | --- | --- |
 | Session | `session.model()` |
-| Model | paged `model.elements()`, `classes()`, `properties(id)`, `bounds(id)` |
-| Geometry | distance, clash, axis laser, and bounded `sectionContours(axis, offset, options)` |
-| View | selection, select, isolate, hide, show all, frame, section reads and writes |
-| Storage | `storage.read(key, fallback)`, `storage.write(key, value)` |
-| Feedback | `feedback.log`, `feedback.toast` |
-| Commands | `commands.run(id)` for a declared command |
-| Overlays | declared line creation, removal, and clear |
-| Results | create, inspect, page, and dispose declared result views |
-| Files | open a user-selected text file through a declared importer; export through a declared exporter and MIME type |
-| Issues | create a BCF topic through `issues.create(input)` with issue and viewport permissions |
+| Model | Elements, classes, properties, and bounds |
+| Geometry | Distance, clash, laser, and section contours |
+| View | Read or change selection, visibility, camera, and sections |
+| Storage | Read and write namespaced settings |
+| Feedback | Logs and toast messages |
+| Commands and overlays | Run declared commands and manage declared lines |
+| Results | Create, page, inspect, and dispose result sets |
+| Files and issues | Use declared importers, exporters, and BCF issue creation |
 
-`IFCViewX.on(name, listener)` receives `model`, `selection`, `visibility`, `section`, `activation`, and `ready` events when the corresponding data permission permits them. The small `IFCViewX.ui.element()` helper creates elements inside the isolated document. Host design tokens and basic `.ifcx-*` layout classes are injected for visual consistency.
+Events include `model`, `selection`, `visibility`, `section`, `activation`, and
+`ready`. The host also injects design tokens and basic `.ifcx-*` layout classes.
+See `examples/extensions/hello-sandbox` for a complete example.
 
-The example at `examples/extensions/hello-sandbox` is a complete package source.
-
-## Runtime boundary
-
-The iframe has `sandbox="allow-scripts"` without `allow-same-origin`, forms, popups, navigation, or downloads. Its CSP denies connections, workers, child frames, objects, and all resources except inline code plus data or blob media. This prevents extension code from reading the parent DOM, the host origin's local storage or cookies, service credentials, model bytes, or Three.js objects.
-
-The window handshake validates the owned iframe, protocol version, and a random nonce. All later traffic uses a dedicated `MessagePort`. The host validates every method and parameter again, then the SDK context enforces the installed manifest permission at the operation boundary.
-
-There is no generic viewer, service, token, mesh, network, or host-global method. Handcrafted calls to undeclared or unpermitted operations fail without changing the viewer.
-
-Runtime limits include:
-
-- 256 KB per message or result;
-- four concurrent calls and 120 calls per ten seconds;
-- replay detection for request IDs;
-- 5,000 IDs per view or geometry input;
-- 1,000 result rows created per call, 10,000 live rows and 16 handles per owner;
-- 500 result rows per page;
-- declared overlay quotas, capped at 500 primitives;
-- user-selected text imports capped at 240 KB;
-- issue inputs capped at 16 KB, 200 element IDs, and 24 scalar metadata fields;
-- 64 KB per stored value, 64 keys, and 256 KB total per extension.
-
-Three malformed, oversized, replayed, or rate-limited protocol messages disable the extension for the session. Sensitive calls and failures are recorded in the local audit. Changing the model aborts pending geometry requests. Closing, disabling, crashing, updating, rolling back, or uninstalling disposes the extension owner scope.
-
-## Build and development bridge
-
-Validate and build a package with:
+## Build and test
 
 ```bash
 npm run extension:package -- ./my-extension
 npm run extension:package -- ./my-extension --output ./dist/my-extension.ifcviewx-extension
 ```
 
-The CLI validates manifest links, common JSON schema shapes, permissions, contribution requirements, paths, symlinks, HTML restrictions, and size limits before producing the ZIP and SHA-256.
-
-For local development:
+For live development:
 
 ```bash
 npm run extension:dev -- ./my-extension --port 4178
 ```
 
-The command prints a viewer query such as:
+Open the viewer with the query printed by the command. The development bridge
+accepts only `http://127.0.0.1` or `http://localhost`. File changes rebuild and
+reload the package. A first install or new permission opens the normal review.
 
-```text
-?extensionDev=http%3A%2F%2F127.0.0.1%3A4178%2F
-```
+## Security boundary
 
-Open the viewer with that query. The bridge is accepted only over HTTP on `127.0.0.1` or `localhost`. File changes rebuild the package and send a reload event. An already installed extension updates automatically only when it requests no new permission. A first install or any permission addition opens the normal review screen.
+The iframe has an opaque origin and cannot read the parent page, cookies,
+service credentials, model bytes, Three.js objects, or host globals. The host
+checks the iframe, protocol, nonce, method, parameters, and manifest permission
+for each call.
 
-## Browser and local split
+Its content security policy blocks connections, workers, child frames, objects,
+and external resources. Host calls use a dedicated `MessagePort` after the
+initial window handshake. There is no general viewer, service, token, mesh, or
+network method.
 
-Installed browser extensions can perform model reads, host-owned mesh distance, clash, laser, and section-contour queries, reversible view changes, declarative overlays, bounded result handling, storage, user-chosen file import, exports, and permission-gated BCF issue creation fully in the browser.
+Disabling or closing an extension aborts its work and removes its listeners,
+results, overlays, commands, and storage access for that session.
 
-`localCompanion` binds `ctx.local` to one separately installed Local Studio provider. The host checks the declared version range before invocation, shows missing and incompatible states, and cancels native jobs when the extension closes. The browser installer does not install native code. Native providers remain outside the browser sandbox and must be installed and trusted separately. See [Local Studio providers](../local-providers.md).
+Changing the model cancels pending geometry calls. Updating, rolling back,
+uninstalling, crashing, or closing the package disposes the same owner scope so
+old calls cannot update a later session.
+
+??? info "Package and runtime limits"
+    - 5 MB compressed, 12 MB unpacked, and 128 files
+    - 2 MB per file and 1 MB for the HTML entry
+    - 256 KB per message or result
+    - 4 concurrent calls and 120 calls per 10 seconds
+    - 5,000 element IDs per view or geometry input
+    - 10,000 live result rows and 16 handles per extension
+    - 500 result rows per page
+    - 500 declared overlay primitives
+    - 240 KB for a user-selected text import
+    - 16 KB for an issue, with 200 element IDs and 24 metadata fields
+    - 64 KB per stored value and 256 KB total storage
+
+Malformed, oversized, replayed, or repeated rate-limited messages can disable
+the extension for the session. Sensitive calls and failures appear in the
+local audit.
+
+## Add a Local Studio companion
+
+`localCompanion` binds the extension to one native provider. The host checks
+the provider ID and version before every call. The browser installer never
+installs native code. Read [Native providers](../local-providers.md) for the
+separate installation and trust model.

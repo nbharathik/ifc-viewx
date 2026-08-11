@@ -1,12 +1,8 @@
 # SDK reference
 
-`@ifcviewx/sdk` is the single public extension contract. It is used by every
-bundled extension and provides the same manifest and permission model used by
-installed sandboxed extensions. There is no separate v1 compatibility API.
-
-The `manifestVersion: 2` value in `extension.json` identifies the manifest file
-format. It does not select a second SDK. The `sdk` range declares which releases
-of the current SDK an extension accepts.
+`@ifcviewx/sdk` is the public API for bundled extensions. Installed extensions
+use the same permission model through the asynchronous
+[sandbox API](installed.md#write-the-panel).
 
 ```ts
 import type { ExtensionContext, ExtensionInstance } from "@ifcviewx/sdk";
@@ -18,33 +14,31 @@ export function mount(
 ): ExtensionInstance | void;
 ```
 
-Bundled panels receive the TypeScript context below. Installed packages use the
-same domains through the asynchronous [sandbox API](installed.md#authoring-api).
-Trusted native work is available only through a declared Local Studio companion.
+`manifestVersion: 2` identifies the manifest format. The `sdk` range declares
+which versions of the current API the extension supports.
 
 ## Manifest
 
-`extension.json` is read and validated before panel code is imported.
+IFCViewX validates `extension.json` before it loads panel code.
 
-| Field | Meaning |
+| Field | Purpose |
 | --- | --- |
 | `manifestVersion` | Manifest schema marker. It must be `2` |
-| `id` | Stable lowercase ID. It must match the folder for bundled extensions |
-| `name`, `description`, `version` | User-facing identity and semantic package version |
+| `id` | Stable lowercase ID. For bundled extensions, it matches the folder |
+| `name`, `description`, `version` | Package identity and semantic version |
 | `sdk` | Compatible SDK range, such as `>=2.0.0 <3` |
-| `runtime` | `bundled` with a TypeScript entry, or `sandboxed` with a self-contained HTML entry |
-| `activationEvents` | Events that may load code. `onPanel:<id>` is the normal panel event |
-| `permissions` | Least-privilege access requested from the host |
-| `contributes` | Panels, commands, analyses, result views, and other declarative entries |
-| `catalog` | Search and explanatory text shown in the extension browser |
+| `runtime` | A bundled TypeScript or sandboxed HTML entry |
+| `activationEvents` | Events that may load the extension |
+| `permissions` | Host access requested by the extension |
+| `contributes` | Panels, commands, results, and other UI entries |
+| `catalog` | Text used in the extension browser and docs |
 
 Contribution points are `panels`, `commands`, `toolbarItems`, `contextActions`,
 `analyses`, `assistantTools`, `resultViews`, `overlays`, `importers`, `exporters`,
-and `settings`. IDs are unique inside their contribution point. Command IDs must
-be namespaced. References such as an analysis `resultView` or toolbar `command`
-must resolve to another declared entry.
+and `settings`. IDs must be unique within each contribution point. Command IDs
+must be namespaced, and references must point to declared entries.
 
-Supported activation events are:
+Activation events:
 
 - `onPanel:<id>`
 - `onCommand:<id>`
@@ -52,37 +46,39 @@ Supported activation events are:
 - `onFile:<extension>`
 - `onLocalCapability:<id>`
 - `onModel`
-- `onStartup`, reserved for reviewed bundled extensions
+- `onStartup`, for reviewed bundled extensions only
 
 ## Permissions
 
+Request only what the extension uses.
+
 | Permission | Allows |
 | --- | --- |
-| `model.summary.read` | Loaded model identity |
-| `model.structure.read` | Elements, classes, tree, subtree, and federated IDs |
-| `model.properties.read` | Properties for one element |
-| `model.index.build` | Shared full property index |
-| `geometry.query` | Bounds, boxes, clash, distance, laser, contours, and compact signatures |
-| `view.read` | Selection, precision pick, visibility, camera, sections, and measurements |
-| `view.control` | Selection, lazy categories, camera, sections, measurements, and colors |
-| `view.overlay` | A declared host-owned overlay |
+| `model.summary.read` | Read loaded model identity |
+| `model.structure.read` | Read elements, classes, tree, subtree, and federated IDs |
+| `model.properties.read` | Read properties for one element |
+| `model.index.build` | Build and read the shared property index |
+| `geometry.query` | Read bounds, boxes, clash, distance, laser, contours, and signatures |
+| `view.read` | Read picks, selection, visibility, camera, sections, and measurements |
+| `view.control` | Change selection, visibility, camera, sections, measurements, and colors |
+| `view.overlay` | Use a declared host-owned overlay |
 | `review.issue.create` | Create a BCF review topic |
-| `viewport.capture` | Include a host-rendered snapshot with a review topic |
-| `edit.propose` | Stage an edit for explicit user approval |
+| `viewport.capture` | Add a host-rendered snapshot to a topic |
+| `edit.propose` | Stage an edit for user approval |
 | `automation.python` | Run user-authored Python in a reviewed bundled extension |
-| `file.open` | Ask the user to choose a file through a declared importer |
+| `file.open` | Open a user-selected file through a declared importer |
 | `file.export` | Export through a declared exporter |
-| `storage.extension` | Namespaced extension storage and settings |
-| `assistant.contribute` | A declared assistant tool |
-| `local.invoke` | A declared Local Studio companion capability |
+| `storage.extension` | Use namespaced settings and storage |
+| `assistant.contribute` | Add a declared assistant tool |
+| `local.invoke` | Call a declared Local Studio companion |
 
-`geometry.mesh.read` is reserved for a later host. Installed extensions cannot
-request `geometry.mesh.read` or `automation.python`. Declaring a contribution
-without its required permission is a manifest error.
+Installed extensions cannot request `automation.python`. `geometry.mesh.read`
+is reserved for a future host. A contribution without its required permission
+is a manifest error.
 
-## Domain services
+## Context services
 
-### Session and model
+### Model and property index
 
 ```ts
 ctx.session.model();
@@ -97,9 +93,8 @@ ctx.model.modelOf(id);
 ctx.model.expressOf(id);
 ```
 
-`ctx.model.index()` is shared across extensions and built once per model.
-Building it requires more access than reading one property, so it has its own
-permission.
+The property index is built once per model and shared by all extensions. It
+requires `model.index.build` because it reads more data than one property call.
 
 ### Geometry
 
@@ -107,58 +102,54 @@ permission.
 await ctx.geometry.clash(aIds, bIds, {
   toleranceMm: 10,
   clearanceMm: 25,
-  signal: controller.signal,
+  signal: ctx.signal,
 });
 
-await ctx.geometry.distance(aId, bId, { signal: controller.signal });
+await ctx.geometry.distance(aId, bId, { signal: ctx.signal });
 
 await ctx.geometry.laser([12.4, 3.1, -8.0], {
   source: picked.expressID,
   maxDistance: 30,
-  signal: controller.signal,
+  signal: ctx.signal,
 });
 
 await ctx.geometry.sectionContours("y", 3.2, {
   maxSegments: 100_000,
-  signal: controller.signal,
+  signal: ctx.signal,
 });
 
-const revisionGeometry = await ctx.geometry.signatures(elementIds, {
-  signal: controller.signal,
-});
+await ctx.geometry.signatures(elementIds, { signal: ctx.signal });
 ```
 
-Signatures contain compact sampled shape, placement, and bounds data, not raw
-triangles. All geometry calls use host-owned retained geometry and the shared
-worker. Closing the extension aborts linked work.
+Geometry calls use the host's retained geometry and shared worker. Signatures
+contain sampled shape, placement, and bounds data, not raw triangles.
 
 ### View
 
-Read state with `selection()`, `lastPick()`, `measuring()`, `isVisible()`,
+Read with `selection()`, `lastPick()`, `measuring()`, `isVisible()`,
 `categoryVisible()`, `camera()`, `measurements()`, `sections()`, and
-`sectionBox()`. Control the view with `select`, `setCategoryVisible`, `isolate`,
-`hide`, `showAll`, `frame`, `frameAt`, `viewFrom`, `setCamera`, `addMeasurement`,
-`removeMeasurement`, `setSections`, `setSectionBox`, and `colorBy`.
-`boxAround` is a geometry query.
+`sectionBox()`.
 
-`ctx.view.pickGuide(true)` enables frame-throttled Vertex, Edge midpoint, Edge,
-and Face feedback for the next extension-owned viewport pick. The guide and the
-ordinary measurement tool are mutually exclusive. The host turns the guide off
-when the extension closes.
+Change the view with `select`, `setCategoryVisible`, `isolate`, `hide`,
+`showAll`, `frame`, `frameAt`, `viewFrom`, `setCamera`, `addMeasurement`,
+`removeMeasurement`, `setSections`, `setSectionBox`, and `colorBy`. Use the
+geometry service for `boxAround`.
 
-### Events and lifetime
+`ctx.view.pickGuide(true)` shows Vertex, Edge midpoint, Edge, and Face feedback
+for the next extension-owned pick. It cannot run at the same time as the normal
+measurement tool and turns off when the extension closes.
+
+### Events and cleanup
 
 ```ts
 const off = ctx.events.on("selection", repaint);
 ```
 
 Events are `model`, `selection`, `visibility`, `section`, `measure`, and
-`service`. The returned function unsubscribes early. The host also removes all
-listeners automatically on close.
+`service`. Call the returned function to unsubscribe early.
 
-`ctx.signal` aborts before the panel instance is disposed. Use it for geometry,
-workers, and long loops. Return `dispose()` for resources that are not
-signal-aware.
+The host aborts `ctx.signal` and removes listeners when the panel closes. Return
+`dispose()` only for resources that do not support an abort signal.
 
 ### Storage and feedback
 
@@ -170,12 +161,12 @@ ctx.feedback.toast("Saved", "success");
 ctx.feedback.publishFindings(summary, findings);
 ```
 
-Storage is JSON serializable and namespaced by extension ID. The installed
-profile limits values to 64 KB, 64 keys, and 256 KB total per extension.
+Storage must be JSON serializable and is namespaced by extension ID. Installed
+extensions can store 64 KB per value, 64 keys, and 256 KB in total.
 
-### Files and review issues
+### Files and issues
 
-File access always uses a declared contribution:
+File calls must use declared contributions:
 
 ```ts
 const opened = await ctx.files.open("my-extension.rules");
@@ -184,15 +175,14 @@ const rules = JSON.parse(opened.text);
 ctx.files.export("my-extension.report", "report.csv", csv, "text/csv");
 ```
 
-The importer controls accepted file types. Exporters are restricted to their
-declared MIME types. Bundled and installed extensions share a 240 KB text import
-limit.
+Importers define accepted file types. Exporters define allowed MIME types.
+Text imports are limited to 240 KB.
 
-An extension with `review.issue.create` and `viewport.capture` can create a BCF
+With `review.issue.create` and `viewport.capture`, an extension can create a BCF
 topic:
 
 ```ts
-const issue = await ctx.issues.create({
+await ctx.issues.create({
   title: "Wall and pipe clash",
   description: "Penetration: 64 mm",
   elementIds: [wallId, pipeId],
@@ -201,55 +191,53 @@ const issue = await ctx.issues.create({
 });
 ```
 
-The host owns viewpoint capture, snapshots, BCF storage, and issue navigation.
+The host owns the viewpoint, snapshot, BCF storage, and issue navigation.
 
 ### Commands and contributions
-
-Declare a command in `extension.json`, then register its handler:
 
 ```ts
 const remove = ctx.commands.register("my-extension.run", run);
 ctx.commands.run("my-extension.run");
 ```
 
-An extension cannot register or run an undeclared command. Closing it removes
-handlers and shortcuts. `ctx.contributions.register()` binds other declared
-runtime resources to the same owner scope.
+Commands must be declared before they can be registered or run.
+`ctx.contributions.register()` binds other declared runtime resources to the
+same extension lifetime.
 
 ### Result handles
-
-Store typed rows once and page them where needed:
 
 ```ts
 const handle = ctx.results.create("my-extension.results", rows, {
   metadata: { fidelity: "mesh", engine: "browser-bvh" },
 });
+
 const firstPage = ctx.results.page(handle.id, 0, 100);
 ```
 
-The result view must be declared. Handles belong to the creating extension,
-default to the current model revision, and are removed on close.
+The result view must be declared. Handles belong to their extension, default to
+the current model revision, and disappear when the extension closes.
 
 ### Local companion
 
-With `local.invoke` and a declared `localCompanion`, an extension can invoke a
-typed native capability:
+An extension with `local.invoke` and `localCompanion` can call a native
+capability:
 
 ```ts
 if (ctx.local.status().state === "available") {
-  const result = await ctx.local.invoke("geometry.exact-clearance", {
-    a: [12],
-    b: [44],
-  }, ctx.signal);
+  await ctx.local.invoke(
+    "geometry.exact-clearance",
+    { a: [12], b: [44] },
+    ctx.signal,
+  );
 }
 ```
 
-The host fixes the provider ID and version range from the manifest. See
-[Local Studio providers](../local-providers.md).
+The manifest fixes the provider ID and version range. See
+[Native providers](../local-providers.md).
 
-### Python automation
+### Python
 
-The reviewed bundled Python Console uses the scoped Python service:
+Reviewed bundled extensions can use the scoped Python service:
 
 ```ts
 const output = await ctx.python.query(code, onStatus);
@@ -257,24 +245,23 @@ const proposal = await ctx.python.propose(editCode, onStatus);
 ```
 
 Both calls require `automation.python`. Proposals also require `edit.propose`
-and always return through the staged approval flow. Sandboxed installed
-extensions cannot receive Python access.
+and always enter the user approval flow.
 
-## Capabilities
+### Capabilities
 
-`ctx.capabilities.list()` returns only host capabilities allowed by the
-manifest permissions. `execute(id, input, signal?)` uses the same schema
-validation, policy, and result types as the assistant and browser bridge. Only
-read and reversible view capabilities are exposed here.
+`ctx.capabilities.list()` returns the host capabilities allowed by the manifest.
+`execute(id, input, signal?)` uses the same schemas, policy, and result types as
+the assistant and browser bridge. Extensions receive only read and reversible
+view capabilities.
 
-## Reference extensions
+## Examples in the repo
 
-- Storey Navigator is the small structure and view example.
-- Element Explorer shows the property index and file export.
-- Clash Detection shows geometry, results, file exchange, and BCF issues.
-- Smart Measure shows precision picks, laser queries, and local fidelity.
-- Section Workspace shows contours, synchronized selection, and SVG export.
-- Python Console shows the reviewed Python permission and staged edits.
+- Storey Navigator: model structure and view control
+- Element Explorer: property index and file export
+- Clash Detection: geometry, results, files, and BCF issues
+- Smart Measure: precision picks, laser, and local fidelity
+- Section Workspace: contours, linked selection, and SVG export
+- Python Console: reviewed Python and staged edits
 
 Every bundled example imports only `@ifcviewx/sdk`. Renderer and service-client
-internals are not part of the extension contract.
+internals are not part of the extension API.

@@ -1,18 +1,18 @@
-# Extensions
+# Build an extension
 
-IFCViewX supports reviewed extensions bundled with the app and local packages installed at runtime. This page covers bundled TypeScript extensions. See [installed browser extensions](installed.md) for the isolated package format, permissions, CLI, and development bridge.
+Extensions add tools to IFCViewX without importing viewer internals. Start by
+choosing the right type.
 
-An extension is one lazy-loaded folder with a serializable manifest and a panel module.
+| Type | Best for | Runtime |
+| --- | --- | --- |
+| Bundled extension | First-party tools built with IFCViewX | TypeScript in the app |
+| Installed extension | A package users install without rebuilding | Isolated browser iframe |
+| Native provider | Exact geometry or trusted machine work | Python in Local Studio |
 
-```text
-src/plugins/my-tool/
-  extension.json   identity, permissions, activation, and contributions
-  panel.ts         code loaded only when the panel opens
-```
+This guide creates a bundled extension. For the other options, see
+[installed extensions](installed.md) or [native providers](../local-providers.md).
 
-Drop the folder in and it appears in the catalog. No central registration file is required.
-
-## Build one
+## Create it
 
 ```bash
 npm install
@@ -20,9 +20,18 @@ npm run new-plugin -- class-list "Class List"
 npm run dev
 ```
 
-Open **Plugins** in the top bar. The generated extension is already listed.
+Open **Plugins** in the viewer. The new extension appears automatically.
 
-The manifest is data, so it can be validated without executing extension code:
+```text
+src/plugins/class-list/
+  extension.json
+  panel.ts
+```
+
+`extension.json` declares identity, activation, permissions, and UI entries.
+`panel.ts` loads only when its panel opens.
+
+## Minimal manifest
 
 ```json
 {
@@ -31,7 +40,7 @@ The manifest is data, so it can be validated without executing extension code:
   "name": "Class List",
   "version": "0.1.0",
   "sdk": ">=2.0.0 <3",
-  "description": "Lists IFC classes and their element counts.",
+  "description": "Lists IFC classes and element counts.",
   "runtime": { "kind": "bundled", "entry": "panel.ts" },
   "activationEvents": ["onPanel:class-list"],
   "permissions": ["model.structure.read", "view.control"],
@@ -39,8 +48,8 @@ The manifest is data, so it can be validated without executing extension code:
     "panels": [{ "id": "class-list", "title": "Class List", "icon": "table" }]
   },
   "catalog": {
-    "tagline": "Every IFC class in the model, with counts",
-    "about": "Groups placed elements by class and isolates one with a click.",
+    "tagline": "Browse every IFC class",
+    "about": "Lists classes and isolates their elements.",
     "icon": "table",
     "category": "Data",
     "keywords": "class type count",
@@ -49,45 +58,35 @@ The manifest is data, so it can be validated without executing extension code:
 }
 ```
 
-The panel receives grouped services rather than the renderer or service client:
+## Minimal panel
 
 ```ts
-import { grid, page, type ExtensionContext, type ExtensionInstance } from "@ifcviewx/sdk";
+import { grid, page, type ExtensionContext } from "@ifcviewx/sdk";
 
-export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstance {
-  const body = document.createElement("div");
-  host.appendChild(page(body));
+export function mount(host: HTMLElement, ctx: ExtensionContext): void {
+  const rows = ctx.model.classes().map(([name, count]) => ({
+    cells: [name, count],
+    pick: () => ctx.view.isolate(
+      ctx.model.elements()
+        .filter((element) => element.type === name)
+        .map((element) => element.id),
+      name,
+    ),
+  }));
 
-  const paint = (): void => {
-    body.replaceChildren(grid(["Class", "Count"], ctx.model.classes().map(([name, count]) => ({
-      cells: [name.replace(/^Ifc/, ""), count],
-      pick: () => ctx.view.isolate(
-        ctx.model.elements().filter((element) => element.type === name).map((element) => element.id),
-        name,
-      ),
-    }))));
-  };
-
-  ctx.events.on("model", paint);
-  paint();
-  return {};
+  host.appendChild(page(grid(["Class", "Count"], rows)));
 }
 ```
 
-The host checks every service call against `permissions`. Missing permissions fail with the extension name and required permission. Closing the panel aborts `ctx.signal`, removes event listeners and contributions, cancels linked geometry jobs, and calls `dispose()`.
+The host checks every call against the declared permissions. When the panel
+closes, IFCViewX aborts `ctx.signal` and removes its listeners and resources.
 
-## One SDK boundary
+## Rules
 
-Import `@ifcviewx/sdk` and files inside your own extension folder. Do not import viewer internals. The SDK has one permission-scoped `ExtensionContext` and does not expose `ctx.viewer` or `ctx.service`. Python is a declared service available only to reviewed bundled extensions with `automation.python`.
+- Import `@ifcviewx/sdk` and files in your own extension folder only.
+- Request only the permissions you need.
+- Keep the manifest serializable so it can be checked before code loads.
+- Run `npm run check` before submitting a change.
 
-```ts
-import { page, grid, type ExtensionContext } from "@ifcviewx/sdk";
-```
-
-`npm run check` validates the manifest, import boundary, SDK context, types, and tests.
-
-The manifest keeps `manifestVersion: 2` as its file-format marker, while the
-public API has no v1 or v2 split. Every bundled extension uses `extension.json`
-and the current SDK.
-
-See the [installed extension guide](installed.md), the [SDK reference](api.md), and the [catalog](catalog.md).
+Read the [SDK reference](api.md) for permissions and services. Browse the
+[tool catalog](catalog.md) for working examples.

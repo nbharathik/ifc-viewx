@@ -1,82 +1,90 @@
-# Working on the repo
+# Work on the repo
+
+## Set up the project
 
 ```bash
 npm install
-npm run dev          # the viewer, with hot reload
-npm test             # the Vitest suite
-npm run check        # typecheck, the plugin boundary check, then the tests
-npm run build        # check, then a production build into dist/
-npm run eval         # score the assistant's tool choice against a real model
-npm run docs         # this site, with live reload
+npm run dev
 ```
 
-Any small IFC works for testing. The
+Use any small IFC file for testing. The
 [buildingSMART samples](https://github.com/buildingSMART/Sample-Test-Files) are
 a good starting point.
 
-## Layout
+## Useful commands
 
-```
-src/
-  sdk/           the plugin contract, and the only thing plugins import
-  plugins/       one folder per plugin, plus runtime/ that mounts them
-  viewer-core/   parsing, geometry, scene, camera, picking
-  ui/            shell, ribbon, commands, and the built in panels
-  ifc/           model checks, typed edits, schedules, clash
-  python/        Pyodide with IfcOpenShell
-  llm/           the assistant
-  bridge/        talking to Local Studio
-local-bridge/    the ifcviewx Python package
-docs/            this site
-scripts/         the plugin scaffolder, the boundary check, the catalog generator
-```
+| Command | Purpose |
+| --- | --- |
+| `npm run dev` | Start the viewer with hot reload |
+| `npm test` | Run the Vitest suite |
+| `npm run check` | Type-check, check extension boundaries, and run tests |
+| `npm run build` | Check and build the production app in `dist/` |
+| `npm run eval` | Evaluate assistant tool choice against a real model |
+| `npm run docs` | Start this documentation site with live reload |
 
-Adding a feature is usually a [plugin](plugins/index.md). Core is for what does
-not fit in a panel, such as a new viewer capability or a change to how models
-load.
+## Repository map
 
-`src/plugins/*/` may import `@ifcviewx/sdk` and its own files, nothing else,
-and core may not import a plugin folder. `npm run check` fails otherwise. When
-core has something new to offer plugins, it goes into `src/sdk/`.
+| Path | Purpose |
+| --- | --- |
+| `src/sdk/` | Public extension contract |
+| `src/plugins/` | One folder for each bundled extension |
+| `src/viewer-core/` | Parsing, geometry, scene, camera, and picking |
+| `src/ui/` | Shell, commands, and built-in panels |
+| `src/ifc/` | Checks, edits, schedules, and clash logic |
+| `src/python/` | Browser IfcOpenShell through Pyodide |
+| `src/assistant/` and `src/llm/` | Assistant runtime and providers |
+| `src/bridge/` | Local Studio connection |
+| `local-bridge/` | The `ifcviewx` Python package |
+| `docs/` | This site |
 
-## Style
+Most new UI tools should be [extensions](plugins/index.md). Add a core feature
+only when it cannot live behind the SDK, such as model loading or a new viewer
+capability.
 
-Comments explain why, not what. No em-dashes, which `npm run check` also
-covers. Strict TypeScript, with `noUnusedLocals` and `noUnusedParameters`.
+An extension may import `@ifcviewx/sdk` and files in its own folder. It must not
+import viewer internals. Core code must not import an extension folder. Add new
+shared APIs to `src/sdk/`.
 
-## The docs
+## Code style
+
+- Use strict TypeScript.
+- Remove unused locals and parameters.
+- Write comments that explain why.
+- Do not use em dashes.
+
+`npm run check` enforces these rules.
+
+## Work on the docs
 
 ```bash
 pip install -r docs/requirements.txt
 npm run docs
 ```
 
-Serves at `http://127.0.0.1:8010/ifc-viewx/docs/`. The path matters: it matches
-where the site is published, and MkDocs prints the full URL when it starts.
-Port 8010 rather than the MkDocs default of 8000, which collides with a lot.
-Use `mkdocs serve -a 127.0.0.1:8011` if 8010 is busy too.
-
-The catalog page is generated from the manifests on every `npm run docs`, so
-edits to it are overwritten.
-
-## Deploys
-
-Push to `main` builds the viewer and this site and publishes both to GitHub
-Pages: the app at the root, the docs under `/docs/`. The Python package
-publishes from a tag.
-
-## Releasing ifcviewx
+Open `http://127.0.0.1:8010/ifc-viewx/docs/`. If port 8010 is busy, run:
 
 ```bash
-npm run bump -- 0.2.0
-git commit -am "release v0.2.0"
-git tag -a v0.2.0 -m "IFCViewX 0.2.0"
+mkdocs serve -a 127.0.0.1:8011
+```
+
+The extension catalog is generated from manifests. Edit the manifest or catalog
+generator instead of editing `docs/plugins/catalog.md` by hand.
+
+Before submitting a docs change, run:
+
+```bash
+mkdocs build --strict
+```
+
+## Release `ifcviewx`
+
+```bash
+npm run bump -- 0.1.2
+git commit -am "release v0.1.2"
+git tag -a v0.1.2 -m "IFCViewX 0.1.2"
 git push origin main --follow-tags
 ```
 
-`npm run bump` sets the same number in `package.json` and
-`local-bridge/pyproject.toml`; the workflow refuses a tag that disagrees with
-`pyproject.toml`, because PyPI never lets a version number be reused. The tag
-push builds the viewer, bundles it into the wheel, uploads to PyPI through a
-trusted publisher, and opens a GitHub release with the wheel and sdist
-attached. Re-running it for a version already on PyPI fails; bump instead.
+`npm run bump` updates `package.json` and `local-bridge/pyproject.toml`. The tag
+must match the Python package version. A tag builds the viewer, creates the wheel
+and source archive, publishes to PyPI, and creates a GitHub release.

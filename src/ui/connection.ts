@@ -14,7 +14,7 @@
 import { closeLayer, h, icon, iconButton, lightDismiss, openLayer, toast } from "./kit.js";
 import type { ServiceClient, ServiceMode } from "../bridge/serviceClient.js";
 
-export const INSTALL_CMD = "pip install ifcviewx\nifcviewx";
+export const INSTALL_CMD = "pip install ifcviewx";
 
 interface Feature {
   id: string;

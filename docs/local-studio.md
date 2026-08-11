@@ -1,91 +1,82 @@
 # Local Studio
 
-The same viewer, running on your machine.
+Local Studio runs IFCViewX on your computer and adds tools that a browser tab
+cannot provide.
+
+## Install and start
 
 ```bash
 pip install ifcviewx
+ifcviewx
 ```
+
+It opens the viewer at `http://127.0.0.1:8765`.
+
+Common commands:
 
 ```bash
-ifcviewx                     # serves the viewer and opens the browser
-ifcviewx model.ifc           # with that model already open
-ifcviewx model.ifc --convert # convert to .ifcx first, then open
-ifcviewx check model.ifc     # checks in the terminal, for CI
-ifcviewx mcp                 # expose the running viewer to MCP clients
+ifcviewx model.ifc             # open a model
+ifcviewx model.ifc --convert   # convert first, then open
+ifcviewx check model.ifc       # run checks in a terminal
+ifcviewx mcp                   # start the MCP bridge
 ```
-
-It serves from `127.0.0.1:8765` with everything already on.
 
 ## What it adds
 
-**IfcOpenShell conversion.** Converts a model to the viewer's `.ifcx` format
-with the real geometry kernel. Advanced breps come through exactly rather than
-tessellated, and every later open of that model skips parsing.
+| Tool | What it does |
+| --- | --- |
+| IFC conversion | Converts IFC to `.ifcx` with IfcOpenShell for faster reopening |
+| Native Python | Runs the full IfcOpenShell API without a browser runtime download |
+| MCP bridge | Lets supported AI clients read the model and control the view |
+| Assistant key vault | Keeps the provider key in the local service |
+| Command-line checks | Runs structural and IDS checks without a browser or network |
+| Native providers | Adds trusted Python packages for native workflows |
 
-**Native Python.** The console runs against the whole IfcOpenShell API instead
-of the browser subset, with no 30 MB runtime download on first run.
+Local Studio is a separate copy of the app. The hosted viewer does not connect
+to it, and there is no pairing code or token to paste.
 
-**An MCP bridge.** Claude Desktop, Claude Code and other clients can query the
-model and select, isolate and frame elements. Read and view only: no tool runs
-code or writes to the model.
+Conversion keeps a cached `.ifcx` copy, so later opens can skip IFC parsing.
+Native Python runs against the full IfcOpenShell API. Edits still run on a copy
+and return to the viewer as a diff that you must approve.
 
-**A key vault.** The service holds your assistant provider key and proxies each
-turn, so the key never reaches the page or its storage. The proxy supports the
-same native tools and streaming events as the browser transports. View images
-are off unless both the user attaches one and the service declares multimodal
-support. See [Assistant](assistant.md).
+The MCP bridge can query the loaded model and change the view by selecting,
+isolating, or framing elements. It does not expose a tool that runs Python or
+writes directly to the model.
 
-**Checks in CI.** `ifcviewx check` runs the same structural pass the viewer
-runs, with no browser and no network.
+The assistant proxy uses the same tools and streaming events as browser
+providers. A viewport image is sent only when you attach it and the configured
+provider supports images.
 
-**Native providers.** Separately installed trusted Python packages can add
-exact geometry, large batch jobs, preprocessing, and future native workflows
-through a versioned capability and job protocol.
-
-## Checking a model from a terminal
+## Check a model in CI
 
 ```bash
 pip install "ifcviewx[check]"
 ifcviewx check model.ifc --ids spec.ids --json result.json --fail-on error
 ```
 
-| exit | meaning |
+| Exit code | Meaning |
 | --- | --- |
-| 0 | nothing at or above `--fail-on` |
-| 1 | findings at or above `--fail-on` |
-| 2 | bad input, a missing dependency, or a crash |
+| `0` | No finding reached the selected level |
+| `1` | At least one finding reached the selected level |
+| `2` | Bad input, missing dependency, or a crash |
 
-That split is the point. With one non-zero code a broken pipeline and a broken
-model look identical, and the wrong person gets paged.
+`--fail-on` accepts `error`, `warning`, `info`, or `none`. Use `--ids` more than
+once to check several IDS files. Use `--json -` to write JSON to standard output.
 
-`--fail-on` takes `error` (the default), `warning`, `info` or `none`. `--ids`
-is repeatable. `--json out.json` writes a versioned result carrying a
-`schemaVersion`, the model's sha256, every check with its count, and the
-elements that failed each specification; `--json -` writes it to stdout
-instead of the summary.
+The JSON result includes a schema version, model SHA-256, check counts, and the
+elements that failed each rule. This makes the result suitable for CI artifacts
+and later comparison.
 
-IDS runs through [ifctester](https://pypi.org/project/ifctester/), the
-buildingSMART reference implementation, so every facet is evaluated here,
-including the classification and material ones the in-browser validator
-reports as unsupported. It is an optional dependency: without it, `--ids`
-exits 2 and says what to install rather than skipping the check quietly.
+IDS checks use the optional `ifctester` package. If it is missing, the command
+stops with exit code `2` instead of silently skipping IDS checks.
 
-## They are separate apps
+## Add native tools
 
-The hosted viewer does not reach your machine, so there is no pairing step and
-nothing to paste. Local Studio is a second copy of the same app with a service
-behind it. Your files stay on your machine either way.
+A native provider is a separate Python package registered in the
+`ifcviewx.providers` entry-point group. Install it into the same Python
+environment, restart Local Studio, and let an extension call it through a
+declared companion.
 
-## Writing a native provider
-
-A provider is a separate Python package registered through the
-`ifcviewx.providers` entry-point group. A browser extension declares its
-provider ID and compatible version in `localCompanion`, then calls the
-permission-checked `ctx.local` service. See [Local Studio providers](local-providers.md)
-for the manifest, job, security, and installation contracts.
-
-The browser extension installer never installs native code. Install the
-provider into the Local Studio Python environment and restart the service.
-
-Built-in Local Studio details remain in
-[local-bridge/README.md](https://github.com/nbharathik/ifc-viewx/blob/main/local-bridge/README.md).
+Read [Native providers](local-providers.md) for the package contract. See the
+[Local Studio package reference](https://github.com/nbharathik/ifc-viewx/blob/main/local-bridge/README.md)
+for flags, environment variables, API routes, and security details.

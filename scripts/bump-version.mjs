@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 
 const version = process.argv[2];
 if (!/^\d+\.\d+\.\d+([ab]|rc)?\d*$/.test(version ?? "")) {
-  console.error("usage: npm run bump -- 0.2.0");
+  console.error("usage: npm run bump -- 0.1.2");
   process.exit(1);
 }
 

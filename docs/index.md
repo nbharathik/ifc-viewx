@@ -1,34 +1,57 @@
 # IFCViewX
 
-An IFC viewer that runs in a browser tab. Files are never uploaded: parsing,
-geometry, checks, editing and export all happen on your machine.
+Open an IFC model in your browser. Nothing is uploaded. Parsing, viewing,
+checks, edits, and exports run on your machine.
 
-[Open the viewer](https://nbharathik.github.io/ifc-viewx/){ .md-button .md-button--primary }
+[Open IFCViewX](https://nbharathik.github.io/ifc-viewx/){ .md-button .md-button--primary }
+[Browse the tools](plugins/catalog.md){ .md-button }
 
-## Two ways to run it
+## Start in three steps
 
-**In a browser.** Open the link and drop a file on it.
+1. Open the viewer.
+2. Drop in an IFC file, or choose the sample model.
+3. Select an element to see its properties, then open a tool from the viewer.
 
-**On your machine.** `pip install ifcviewx` serves the same viewer locally and
-adds IfcOpenShell conversion, native Python, an MCP bridge for AI clients, and
-a vault for your assistant key. See [Local Studio](local-studio.md).
+!!! tip
+    Start with the browser version. Install Local Studio only if you need
+    native Python, conversion, command-line checks, or an MCP bridge.
 
-## What it does
+## Choose how to run it
 
-Model tree, properties, quantities and schedules. Measurements, section planes,
-synchronized 2D section contours, plans and saved viewpoints. Quality checks and IDS validation, gathered into
-one offline HTML report you can print to PDF. Editing with diffs, undo and
-redo. Clash detection, quantity takeoff, geometry-aware revision compare and BCF issues. A Python
-console running real IfcOpenShell, and an optional AI assistant.
+| Browser | Local Studio |
+| --- | --- |
+| No installation | Install with `pip install ifcviewx` |
+| Best for everyday viewing and review | Adds native IfcOpenShell tools |
+| Files stay in the browser tab | Files stay on your computer |
 
-## Extending it
+[Learn about Local Studio](local-studio.md)
 
-Most of those tools are plugins, and a plugin is one folder with two files.
-Drop it in and it appears in the catalog.
+## Main tools
 
-```bash
-npm run new-plugin -- my-tool "My Tool"
-```
+<div class="grid cards" markdown>
 
-[Writing a plugin](plugins/index.md) takes about ten minutes.
-[Browse what already exists](plugins/catalog.md).
+-   **Inspect and organize**
+
+    Browse the model tree, properties, quantities, schedules, and saved
+    selection sets.
+
+-   **Review geometry**
+
+    Measure, cut sections, build 2D plans, compare revisions, and check clashes.
+
+-   **Check and report**
+
+    Run model checks and IDS validation. Export an offline report or BCF issues.
+
+-   **Extend the viewer**
+
+    Add a bundled or installed extension through the permission-scoped SDK.
+
+</div>
+
+## Where to go next
+
+- Use [Smart Measure](smart-measure.md) for gaps and axis measurements.
+- Use [Section Workspace](section-workspace.md) for plans and elevations.
+- Read the [Assistant guide](assistant.md) before connecting an AI provider.
+- See [Extensions](plugins/index.md) if you want to add a tool.

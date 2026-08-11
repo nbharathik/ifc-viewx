@@ -1,15 +1,16 @@
-# Local Studio providers
+# Native providers
 
-Local providers add exact geometry kernels, large batch workflows, conversion,
-and other native operations without widening the browser extension sandbox.
-They are Python packages installed into the same environment as Local Studio.
-They are trusted native software and run with the permissions of the Local
-Studio process.
+A native provider is a trusted Python package that adds a capability to Local
+Studio. Use one for exact geometry, large batch work, conversion, or another
+task that should not run in the browser sandbox.
 
-## How a browser extension uses one
+!!! warning
+    Providers run with the permissions of Local Studio. Install them only from
+    a source you trust.
 
-An extension declares one companion and requests the `local.invoke`
-permission:
+## Connect an extension
+
+Declare one companion and request `local.invoke`:
 
 ```json
 {
@@ -22,41 +23,33 @@ permission:
 }
 ```
 
-The extension management screen reports whether that provider is installed,
-whether its version matches, and which native capabilities are available. A
-required mismatch prevents activation. An optional companion leaves the
-browser-only part usable.
+The extension manager shows whether the provider is installed and compatible.
+A required mismatch blocks the extension. An optional mismatch leaves its
+browser-only features available.
 
-The SDK binds calls to the declared provider. Extension code cannot select a
-different native package:
+Call a capability through the bound companion:
 
 ```ts
-const state = ctx.local.status();
-const capabilities = ctx.local.capabilities();
-const result = await ctx.local.invoke("geometry.exact-clearance", {
-  a: [120, 121],
-  b: [880],
-  toleranceMm: 5,
-}, controller.signal);
+const result = await ctx.local.invoke(
+  "geometry.exact-clearance",
+  { a: [120, 121], b: [880], toleranceMm: 5 },
+  ctx.signal,
+);
 ```
 
-Closing the extension or aborting the supplied signal requests cancellation
-of the Local Studio job. The sandbox receives only typed JSON results. It does
-not receive the session token, a model path, raw model bytes, or the provider
-object.
+The extension cannot choose another provider or read its model path, session
+token, or Python object.
 
-## Provider package contract
+## Create a provider package
 
-Register an entry point in the provider package:
+Register an entry point in `pyproject.toml`:
 
 ```toml
 [project.entry-points."ifcviewx.providers"]
 clearance = "example_clearance:provider"
 ```
 
-The entry point returns an object with a `manifest` mapping and a `run`
-method. Provider and capability IDs are stable, lowercase, and namespaced.
-The manifest uses schema version 1:
+The entry point returns an object with `manifest` and `run`:
 
 ```python
 class ClearanceProvider:
@@ -65,7 +58,7 @@ class ClearanceProvider:
         "id": "org.example.clearance-native",
         "version": "1.2.0",
         "name": "Exact clearance",
-        "description": "Exact BRep clearance checks.",
+        "description": "Measures clearance with a native geometry kernel.",
         "limits": {
             "maxConcurrency": 1,
             "timeoutSeconds": 900,
@@ -75,7 +68,7 @@ class ClearanceProvider:
         "capabilities": [{
             "id": "geometry.exact-clearance",
             "title": "Exact clearance",
-            "description": "Measure exact clearance between element sets.",
+            "description": "Measure clearance between element sets.",
             "effect": "read",
             "modelRequirement": "ifc-source",
             "available": True,
@@ -97,41 +90,41 @@ class ClearanceProvider:
     }
 
     def run(self, capability_id, context, inputs, progress):
-        model = context["modelPath"]
+        model_path = context["modelPath"]
         progress({
             "phase": "geometry",
             "done": 0,
             "total": len(inputs["a"]),
-            "message": "Building exact shapes",
+            "message": "Building shapes",
         })
-        return {"pairs": [], "modelSha": context["modelSha"]}
+        return {"pairs": [], "modelPathUsed": bool(model_path)}
 
 
 provider = ClearanceProvider()
 ```
 
-The service validates manifests during discovery. Unsupported schemas,
-duplicate capabilities, invalid effects, missing limits, and any input schema
-that asks for a path are rejected. Browser inputs are checked against the
-declared schema again before a job is created. Provider output is checked
-against the result schema before it is stored or returned.
+Local Studio checks manifests, browser inputs, and provider results against
+their schemas. Capability IDs must be lowercase and namespaced. Input schemas
+cannot accept file paths.
 
-`context["modelPath"]` is resolved by Local Studio from the content hash. It
-is never supplied by the browser. Capabilities that do not need a model use
-`modelRequirement: "none"` and receive no model path.
+Discovery also rejects unsupported schema versions, duplicate capabilities,
+invalid effects, and missing resource limits. A malformed provider is shown as
+unavailable instead of being called.
 
-Install a provider with the Python package manager, then restart Local Studio:
+For `modelRequirement: "ifc-source"`, Local Studio finds the source from the
+model content hash and adds `context["modelPath"]`. The browser never supplies
+that path. Use `modelRequirement: "none"` when no model is needed.
+
+Install the package in the Local Studio environment, then restart:
 
 ```bash
 python -m pip install example-clearance-provider
 ifcviewx
 ```
 
-The browser extension installer never installs or updates native providers.
+## Job lifecycle
 
-## Job protocol
-
-The authenticated version 1 API is:
+The authenticated API uses these routes:
 
 ```text
 GET  /api/v1/providers
@@ -141,36 +134,36 @@ POST /api/v1/jobs/{id}/cancel
 GET  /api/v1/jobs/{id}/result
 ```
 
-A job moves through `queued`, `running`, then `succeeded`, `failed`, or
-`cancelled`. Progress has `phase`, `done`, `total`, and `message`. Results use
-a versioned envelope and expire after the provider or service TTL, whichever
-is shorter.
+A job moves from `queued` to `running`, then to `succeeded`, `failed`, or
+`cancelled`. Progress includes `phase`, `done`, `total`, and `message`. Results
+expire after the shorter provider or service time limit.
 
-Jobs and results are persisted under the Local Studio state directory. If the
-service restarts during a job, the next process changes it to `failed` with
-the `service_restarted` code. A browser disconnect does not apply or discard a
-completed result.
+Jobs run in child processes with concurrency, memory, timeout, and result-size
+limits. These limits contain mistakes, but they do not make an unknown package
+safe. A service restart marks interrupted jobs as `failed` with the
+`service_restarted` code.
 
-The service applies both global and per-provider concurrency limits. Each job
-runs in a killable child process with a timeout and memory ceiling. These
-limits contain mistakes and runaway work. They do not make an installed
-provider untrusted or safe to install from an unknown publisher.
+Job metadata and results are stored under the Local Studio state directory.
+A browser disconnect does not delete a completed result. Closing the extension
+or aborting `ctx.signal` requests cancellation of its active job.
 
-## Built-in compatibility provider
+??? info "Security boundary"
+    Browser calls carry typed JSON only. The service resolves model paths from
+    the authenticated model hash and checks the input schema before starting a
+    process. The result is checked again before it is stored or returned.
 
-`org.ifcviewx.core` exposes conversion, validation, schedules, guarded Python
-queries, and staged Python edits through the job protocol. The existing
-`/convert`, `/validate`, `/schedule`, `/python`, and `/jobs/{id}` routes remain
-available and delegate to the same provider jobs. This allows an older viewer
-and a newer Local Studio package to overlap during migration.
+    Global and per-provider concurrency limits protect the service from a large
+    queue. Per-job memory and time limits stop runaway work where the operating
+    system supports them. These controls reduce damage from mistakes, but the
+    package itself remains trusted native code.
 
-It also exposes `geometry.precise-distance`. The capability builds a BVH from
-a tightly tessellated pair of IfcOpenShell product shapes and returns the
-shortest surface distance, witness points, intersection state, fidelity, and
-engine. The Smart Measure extension uses it only when the user selects local
-precise mode; the browser mesh path remains the responsive default.
+## Built-in provider
 
-The result is deliberately labeled `native-mesh`. IfcOpenShell clearance
-queries operate on iterator triangulation, so this built-in capability does
-not claim exact BRep fidelity. A separate provider with a true topology-kernel
-distance operation may advertise exact fidelity through the same job model.
+`org.ifcviewx.core` provides conversion, validation, schedules, guarded Python,
+staged Python edits, and `geometry.precise-distance`. The distance capability
+uses a tightly tessellated IfcOpenShell mesh, so it reports `native-mesh`, not
+exact BRep fidelity.
+
+Older `/convert`, `/validate`, `/schedule`, `/python`, and `/jobs/{id}` routes
+delegate to the same built-in jobs. This lets older viewer and Local Studio
+versions overlap during upgrades.

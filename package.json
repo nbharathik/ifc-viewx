@@ -1,7 +1,7 @@
 {
   "name": "ifc-viewer-browser",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.1.2",
   "type": "module",
   "description": "Fast browser-based IFC viewer with Python (IfcOpenShell/Pyodide) editing, LLM assistance, and MCP bridge",
   "scripts": {

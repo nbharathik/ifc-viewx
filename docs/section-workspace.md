@@ -1,66 +1,57 @@
 # Section Workspace
 
-Section Workspace turns the active 3D cut into a synchronized 2D drawing. Open
-it from the plugin browser after loading a model.
+Section Workspace turns a 3D cut into a linked 2D plan or elevation. Load a
+model, then open **Section Workspace** from **Plugins**.
 
-## Build a plan or elevation
+## Create a drawing
 
 1. Choose **Plan / Y**, **Section / X**, or **Section / Z**.
-2. Enter an exact model-space cut height, or choose a storey for a plan.
-3. Move the normal section plane in the main viewer when you need a visual
-   adjustment. The drawing rebuilds after the movement settles.
-4. Use **Keep positive / Keep negative** to flip the visible half and
-   **Align 3D** to look square at the cut.
+2. Enter a cut position. For a plan, you can choose a storey instead.
+3. Use **Keep positive** or **Keep negative** to choose the visible side.
+4. Select **Align 3D** to face the cut directly.
 
-The 2D sheet and the 3D view share the same plane. Clicking a contour selects
-its IFC element in 3D. Double clicking frames it. Selecting in 3D highlights
-the corresponding contour in the sheet.
+Moving the matching section plane in 3D also updates the drawing.
 
-## Read the drawing
+## Work with the 2D view
+
+- Select a contour to select its element in 3D.
+- Double-click a contour to frame the element.
+- Scroll to zoom and drag empty space to pan.
+- Use `+` and `-` to zoom, arrow keys to pan, `0` to fit all, and `F` to fit
+  the selection.
+
+Solid lines are closed contours. Dashed lines are open contours. Open lines can
+come from an open mesh, missing geometry, or a cut at a mesh boundary.
 
 The grid uses model metres in the projected plane. The orange crosshair marks
-the projected model datum. Solid paths are closed loops. Dashed paths are open
-chains, which can come from an open product mesh, a missing retained geometry
-chunk, or a cut that reaches a mesh boundary.
+the projected model datum. The scale rail and coordinate labels stay the same
+size on screen while you zoom.
 
-Scroll over the sheet to zoom. Drag empty sheet space to pan; Shift-drag or
-middle-drag also works when the pointer is over dense linework. The on-sheet
-buttons zoom, fit the complete drawing, or fit only selected contours. The
-scale rail and coordinate labels keep a stable screen size as the view moves.
+If the status says the drawing is partial, first hide or isolate unrelated
+geometry. Increase **Drawing detail** only if you still need more contours.
 
-With keyboard focus on the sheet, use `+` and `-` to zoom, arrow keys to pan,
-`0` to fit everything, and `F` to fit selected contours.
+The status also shows intersected elements, path count, open paths, and worker
+time. The old drawing remains interactive while a new cut is being calculated,
+so the panel does not lock during an update.
 
-The compact status strip reports intersected elements, paths, open chains, and
-worker time. Open-path guidance is expandable instead of permanently taking
-space from the drawing. If the segment budget is reached, the drawing is
-labeled partial. Raise **Drawing detail** only when the visible scope needs it;
-isolating or hiding unrelated geometry is usually faster.
+## Export
 
-The previous drawing remains interactive while a new cut is calculated. Plane
-controls are persistent, so rebuilding does not take keyboard focus from the
-cut-height field.
+Select **Export SVG** to save the current drawing as a vector file. The export
+stores the cut axis, position, and mesh origin in its metadata.
 
-## Export and fidelity
+!!! note
+    The drawing uses the model's display mesh. It is suitable for coordination,
+    but it is not an exact BRep drawing and does not perform hidden-line removal.
 
-**Export SVG** writes the current element-owned contours as a standalone
-vector drawing. Its metadata identifies the axis, offset, and mesh origin.
+The work stays in your browser. Saved viewpoints keep the section plane, camera,
+and other view settings.
 
-The browser intersects the same tessellated geometry used for display. This is
-fast, private, and appropriate for coordination, but it is not an exact BRep
-drawing. Exact curves, hidden-line removal, DXF, PDF, and oversized batch work
-belong to a future optional Local Studio provider with a separate fidelity
-label.
+The browser applies model placements, origin shifts, and federation offsets
+before making contours. Exact curves, DXF, PDF, hidden-line drawings, and large
+batch exports need a native provider with a separate fidelity label.
 
-The browser sends no geometry to a server. Section plane state already belongs
-to saved viewpoints, so saving a view restores the cut with the camera and
-other view state.
+## Use it with the assistant
 
-## Assistant use
-
-The assistant and browser MCP bridge expose `sectionContours`. Ask for a plan
-or section analysis to synchronize the 3D plane and receive bounded rows for
-each intersected element, including open and closed path counts and total cut
-length. The assistant receives summaries, not raw contour coordinates. Result
-rows and evidence links remain local and can select or isolate the related
-elements.
+The assistant can run `sectionContours` to summarize the active cut. It receives
+element counts and path summaries, not the raw 2D coordinates. Evidence links
+can select or isolate the matching elements in your viewer.

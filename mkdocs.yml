@@ -1,5 +1,5 @@
-site_name: IFCViewX
-site_description: Fast, private IFC viewing in the browser, with a plugin ecosystem
+site_name: IFCViewX Docs
+site_description: Simple guides for viewing, checking, and extending IFC models with IFCViewX
 site_url: https://nbharathik.github.io/ifc-viewx/docs/
 repo_url: https://github.com/nbharathik/ifc-viewx
 repo_name: nbharathik/ifc-viewx
@@ -9,9 +9,22 @@ docs_dir: docs
 
 theme:
   name: material
+  language: en
+  icon:
+    logo: material/cube-scan
+    repo: fontawesome/brands/github
   features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
+    - navigation.tracking
     - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
     - content.code.copy
     - content.action.edit
   palette:
@@ -33,25 +46,47 @@ theme:
 markdown_extensions:
   - admonition
   - attr_list
+  - md_in_html
+  - tables
   - toc:
       permalink: true
-  - pymdownx.highlight
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
   - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true
 
+plugins:
+  - search
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/nbharathik/ifc-viewx
+      name: IFCViewX on GitHub
+
 nav:
   - Home: index.md
-  - How the viewer works: how-it-works.md
-  - Assistant: assistant.md
-  - Smart Measure: smart-measure.md
-  - Section Workspace: section-workspace.md
-  - Plugins:
-      - Writing an extension: plugins/index.md
-      - Installed browser extensions: plugins/installed.md
+  - Viewer tools:
+      - Assistant: assistant.md
+      - Smart Measure: smart-measure.md
+      - Section Workspace: section-workspace.md
+  - Extensions:
+      - Start here: plugins/index.md
+      - Install a package: plugins/installed.md
       - SDK reference: plugins/api.md
-      - Catalog: plugins/catalog.md
+      - Tool catalog: plugins/catalog.md
   - Local Studio:
       - Overview: local-studio.md
       - Native providers: local-providers.md
-  - Working on the repo: contributing.md
+  - Development:
+      - How it works: how-it-works.md
+      - Work on the repo: contributing.md

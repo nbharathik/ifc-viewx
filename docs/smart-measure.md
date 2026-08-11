@@ -1,68 +1,59 @@
 # Smart Measure
 
-Smart Measure is the first Phase 7 geometry workflow. Open it from the plugin
-browser after loading a model. It combines object clearance checks and a
-three-axis surface laser in one panel.
+Use Smart Measure to check the gap between two elements or measure along the
+X, Y, and Z axes. Load a model, then open **Smart Measure** from **Plugins**.
 
-## Shortest object distance
+## Measure a gap
 
-1. Select two elements in the viewer.
-2. Press **Use 2 selected**, or assign A and B separately.
+1. Select two elements.
+2. Select **Use 2 selected**. You can also set A and B separately.
 3. Enter the required clearance in millimetres.
-4. Press **Measure gap**.
+4. Select **Measure gap**.
 
-The browser measures the shortest distance between the retained triangle
-surfaces in the geometry worker. The witness segment becomes an ordinary
-viewer measurement. A zero result means the meshes intersect. Missing retained
-geometry and results beyond the requested range are reported instead of being
-treated as zero.
+The result appears as a measurement in the viewer. A value of zero means the
+two meshes intersect. If geometry is missing or outside the search range, the
+tool reports that instead of showing zero.
 
-When Local Studio holds the original IFC source, **Local precise** routes the
-numeric distance through the built-in IfcOpenShell provider with a tighter
-native tessellation. The browser mesh query still supplies the responsive
-witness line and viewer context. Local mode currently supports elements from
-the primary IFC source.
+### Browser or Local precise
 
-## Three-axis laser
+| Mode | Use it for | Geometry |
+| --- | --- | --- |
+| Browser mesh | Fast coordination checks | The model's display mesh |
+| Local precise | A higher-precision review | A tighter IfcOpenShell mesh in Local Studio |
 
-Press **Pick surface**, then click the model where the laser should sit. The
-geometry worker casts along positive and negative X, Y, and Z to the next
-visible mesh. The source element is excluded from the six hits so its opposite
-face does not hide the surrounding space.
+**Local precise** works only when Local Studio has the original IFC file. It
+currently supports elements from the primary model. The result is more precise,
+but it is still mesh based and is not an exact BRep distance.
 
-Each axis row shows:
+The browser query also creates the responsive witness line and viewer context.
+Local Studio returns the numeric distance from its tighter tessellation. Both
+results include their geometry engine and fidelity so reports do not mix the
+two modes silently.
 
-- the distance in the negative direction;
-- the picked origin;
-- the distance in the positive direction;
-- the complete span when both surfaces were found.
+## Use the three-axis laser
 
-The range control bounds the search. Hidden elements are excluded. Press
-**Face surface** to align the camera perpendicular to the picked face. Press
-**Keep axes** to turn the live axes into persistent measurement annotations.
+1. Select **Pick surface**.
+2. Select a point on the model.
+3. Adjust the range if needed.
 
-## Persistence and privacy
+The tool looks in both directions along X, Y, and Z. Each row shows the negative
+distance, the picked point, the positive distance, and the full span when both
+ends are found.
 
-Kept object witnesses and laser axes are normal browser measurement objects.
-Saved viewpoints store their endpoints and restore them with the camera and
-cuts. Live laser overlays are removed when the panel closes.
+- **Face surface** turns the camera towards the picked face.
+- **Keep axes** saves the live axes as viewer measurements.
+- Hidden elements are ignored.
 
-Browser mode sends no geometry anywhere. Local precise mode sends only typed
-element IDs to the authenticated Local Studio job API. The service resolves
-the stored IFC source by its existing content hash; the extension receives no
-file path, session token, or native provider object.
+## Saved views and privacy
 
-## Fidelity
+Saved viewpoints include measurements created by this tool. Live laser lines
+disappear when the panel closes.
 
-| Mode | Runs in | Geometry | Best for |
-| --- | --- | --- | --- |
-| Browser mesh | Geometry worker | Display tessellation | Interactive coordination and laser work |
-| Local precise | Local Studio | Tightly tessellated IFC product shapes | Higher-precision clearance review |
+Browser mode sends no geometry to a server. Local precise mode sends element
+IDs to your authenticated Local Studio service, which finds the stored IFC file
+from its content hash.
 
-Both routes return explicit fidelity and engine metadata. The assistant,
-browser MCP bridge, SDK extensions, and the panel use the same typed
-`distance` and `laser` capabilities.
-
-The built-in local route reports `native-mesh`, not `exact`. A provider backed
-by a true BRep distance kernel can be added later through the same Local Studio
-capability boundary without changing the browser workflow.
+The assistant, browser MCP bridge, extensions, and Smart Measure panel all use
+the same typed `distance` and `laser` capabilities. A future provider can add a
+true BRep distance kernel through the same Local Studio boundary without
+changing the panel workflow.

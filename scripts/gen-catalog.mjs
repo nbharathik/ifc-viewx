@@ -46,28 +46,39 @@ const section = ([tier, title, blurb]) => {
   const list = found.filter((plugin) => plugin.tier === tier);
   if (!list.length) return "";
   const entries = list.map((plugin) => {
-    const credit = plugin.author ? `\nBy ${plugin.url ? `[${plugin.author}](${plugin.url})` : plugin.author}.\n` : "";
+    const credit = plugin.author
+      ? `    By ${plugin.url ? `[${plugin.author}](${plugin.url})` : plugin.author}.`
+      : "";
     return [
-      `### ${plugin.name}${plugin.soon ? " *(planned)*" : ""}`,
+      `??? info "${plugin.name}${plugin.soon ? " (planned)" : ""}: ${plugin.tagline}"`,
       "",
-      `*${plugin.tagline}*`,
+      `    ${plugin.about}`,
       "",
-      plugin.about,
+      "    **Highlights**",
       "",
-      ...plugin.does.map((line) => `- ${line}`),
+      ...plugin.does.map((line) => `    - ${line}`),
+      "",
       credit,
-      `<small>Category: ${plugin.category}${plugin.capability ? ` &middot; Needs: \`${plugin.capability}\`` : ""}</small>`,
+      `    <small>Category: ${plugin.category}${plugin.capability ? ` &middot; Needs: \`${plugin.capability}\`` : ""}</small>`,
       "",
-    ].join("\n");
+    ].filter((line, index, lines) => line || lines[index - 1]).join("\n");
   });
-  return [`## ${title}`, "", blurb, "", ...entries].join("\n");
+  return [
+    `## ${title}`,
+    "",
+    blurb,
+    "Select a tool to see its purpose and main features.",
+    "",
+    ...entries,
+  ].join("\n");
 };
 
 const page = [
   "# Extension catalog",
   "",
-  "Everything in the viewer's plugin browser, generated from extension manifests.",
-  "Yours belongs here too: see [writing an extension](index.md).",
+  "Find the tool you need without leaving the viewer. This page is generated",
+  "from the extension manifests, so it stays in sync with the app.",
+  "See [Build an extension](index.md) to add your own tool.",
   "",
   ...TIERS.map(section).filter(Boolean),
 ].join("\n");
