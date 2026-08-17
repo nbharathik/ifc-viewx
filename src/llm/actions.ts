@@ -302,7 +302,11 @@ export async function runViewerAction(
         ...counts,
         hiddenByHand: viewer.getHiddenCount(),
         rules: viewer.getRules().map((rule) => ({ label: rule.label, mode: rule.mode, elements: rule.ids.length })),
-        sections: viewer.getSections().map((section) => ({ axis: section.axis, offset: Number(section.offset.toFixed(3)) })),
+        sections: viewer.getSections().map((section) =>
+          section.axis
+            ? { axis: section.axis, offset: Number(section.offset.toFixed(3)) }
+            : { name: section.name, normal: section.normal.map(round3), offset: Number(section.offset.toFixed(3)) },
+        ),
         sectionBox: box ? { min: box.min.map(round3), max: box.max.map(round3) } : null,
         spacesLoaded: viewer.isCategoryVisible("IfcSpace"),
         openingsLoaded: viewer.isCategoryVisible("IfcOpeningElement"),
@@ -351,6 +355,30 @@ export async function runViewerAction(
         viewer.clearSection();
         return "sections cleared";
       }
+      if (action.fromPick === true) {
+        if (viewer.getSections().length >= 8) throw new Error("plane limit reached: remove a section first");
+        const added = viewer.addSectionFromPick();
+        if (!added) throw new Error("no picked surface: ask the user to click a face first");
+        return `cut on the picked face (${added.name})`;
+      }
+      if (Array.isArray(action.normal)) {
+        const raw = action.normal.map(Number);
+        const len = raw.length === 3 ? Math.hypot(raw[0], raw[1], raw[2]) : 0;
+        if (!Number.isFinite(len) || len < 1e-9) throw new Error("section normal must be a non-zero 3-vector");
+        const offset = Number(action.offset);
+        if (!Number.isFinite(offset)) throw new Error("an arbitrary section needs a numeric offset");
+        viewer.setSections([
+          ...viewer.getSections(),
+          {
+            id: "",
+            name: "Assistant plane",
+            normal: [raw[0] / len, raw[1] / len, raw[2] / len],
+            offset,
+            flip: action.flip === true,
+          },
+        ]);
+        return "cut on an arbitrary plane";
+      }
       const axis = lower(action.axis);
       if (axis !== "x" && axis !== "y" && axis !== "z") throw new Error('section needs axis "x", "y" or "z"');
       const index = axis === "x" ? 0 : axis === "y" ? 1 : 2;
@@ -368,7 +396,8 @@ export async function runViewerAction(
     }
     case "sectionContours": {
       const requestedAxis = lower(action.axis);
-      const active = viewer.getSections()[0];
+      // The contour engine is axis-only; an arbitrary plane cannot seed it.
+      const active = viewer.getSections().find((section) => section.axis !== undefined);
       const axis: SectionAxis = requestedAxis === "x" || requestedAxis === "y" || requestedAxis === "z"
         ? requestedAxis
         : active?.axis ?? "y";

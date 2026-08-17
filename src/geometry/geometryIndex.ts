@@ -1,4 +1,6 @@
 import { modelOf } from "../viewer-core/ids.js";
+import type { ModelTransform } from "../viewer-core/engine/types.js";
+import { normalizedModelTransform } from "./modelTransform.js";
 import type { TriangleChunk } from "../viewer-core/scene/triangleStore.js";
 import type { Placement } from "../ifc/clash/narrow.js";
 import { BufferAttribute, BufferGeometry } from "three";
@@ -12,6 +14,8 @@ interface StoredGeometry {
   indices: Uint32Array;
   bounds: Float32Array;
   fingerprint?: GeometryShapeFingerprint;
+  localVolume?: number;
+  localClosed?: boolean;
   bvh?: MeshBVH;
   bvhGeometry?: BufferGeometry;
   bvhBytes?: number;
@@ -42,6 +46,13 @@ export interface GeometryBounds {
 
 export interface BvhPlacement extends Placement {
   bvh: MeshBVH;
+}
+
+export interface PlacedVolume {
+  volume: number;
+  triangles: number;
+  closed: boolean;
+  matrix: Float64Array;
 }
 
 export interface GeometryIndexOptions {
@@ -180,6 +191,29 @@ export class GeometryIndex {
     return out;
   }
 
+  /** Per-placement local volumes with lazy per-geometry caching. */
+  placedVolumes(id: number): PlacedVolume[] {
+    const element = this.elements.get(id);
+    const table = this.geometries.get(modelOf(id));
+    if (!element || !table) return [];
+    const out: PlacedVolume[] = [];
+    for (let i = 0; i < element.geometryIDs.length; i++) {
+      const geometry = table.get(element.geometryIDs[i]);
+      if (!geometry) continue;
+      if (geometry.localVolume === undefined) {
+        geometry.localVolume = signedLocalVolume(geometry.positions, geometry.indices);
+        geometry.localClosed = edgeManifold(geometry.indices);
+      }
+      out.push({
+        volume: geometry.localVolume,
+        triangles: geometry.indices.length / 3,
+        closed: geometry.localClosed ?? false,
+        matrix: element.matrices[i],
+      });
+    }
+    return out;
+  }
+
   /** The same placements with one lazy BVH shared by every instance of a mesh. */
   bvhPlacements(id: number): BvhPlacement[] {
     const element = this.elements.get(id);
@@ -271,26 +305,34 @@ export class GeometryIndex {
   worldBounds(
     id: number,
     origin: [number, number, number],
-    offset: [number, number, number],
+    placement: ModelTransform | [number, number, number],
   ): GeometryBounds | null {
     const element = this.elements.get(id);
     const table = this.geometries.get(modelOf(id));
     if (!element || !table) return null;
     const base = this.baseBounds(element, table);
     if (!base) return null;
-    return {
-      id,
-      min: [
-        base.min[0] - origin[0] + offset[0],
-        base.min[1] - origin[1] + offset[1],
-        base.min[2] - origin[2] + offset[2],
-      ],
-      max: [
-        base.max[0] - origin[0] + offset[0],
-        base.max[1] - origin[1] + offset[1],
-        base.max[2] - origin[2] + offset[2],
-      ],
-    };
+    const transform = normalizedModelTransform(placement);
+    // Same Y-up plan rotation scenePlacementMatrix applies.
+    const cosine = Math.cos(transform.rotationZ) * transform.scale;
+    const sine = Math.sin(transform.rotationZ) * transform.scale;
+    const min: [number, number, number] = [Infinity, Infinity, Infinity];
+    const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+    for (let corner = 0; corner < 8; corner++) {
+      const x = corner & 1 ? base.max[0] : base.min[0];
+      const y = corner & 2 ? base.max[1] : base.min[1];
+      const z = corner & 4 ? base.max[2] : base.min[2];
+      const point: [number, number, number] = [
+        cosine * x + sine * z + transform.translation[0] - origin[0],
+        transform.scale * y + transform.translation[1] - origin[1],
+        -sine * x + cosine * z + transform.translation[2] - origin[2],
+      ];
+      for (let axis = 0; axis < 3; axis++) {
+        min[axis] = Math.min(min[axis], point[axis]);
+        max[axis] = Math.max(max[axis], point[axis]);
+      }
+    }
+    return { id, min, max };
   }
 
   private baseBounds(element: StoredElement, table: Map<number, StoredGeometry>): BaseBounds | null {
@@ -323,4 +365,39 @@ export class GeometryIndex {
     element.baseBounds = { revision: this.version, value };
     return value;
   }
+}
+
+function signedLocalVolume(positions: Float32Array, indices: Uint32Array): number {
+  if (indices.length < 3) return 0;
+  const rx = positions[indices[0] * 3];
+  const ry = positions[indices[0] * 3 + 1];
+  const rz = positions[indices[0] * 3 + 2];
+  let sum = 0;
+  for (let t = 0; t < indices.length; t += 3) {
+    const a = indices[t] * 3, b = indices[t + 1] * 3, c = indices[t + 2] * 3;
+    const ax = positions[a] - rx, ay = positions[a + 1] - ry, az = positions[a + 2] - rz;
+    const bx = positions[b] - rx, by = positions[b + 1] - ry, bz = positions[b + 2] - rz;
+    const cx = positions[c] - rx, cy = positions[c + 1] - ry, cz = positions[c + 2] - rz;
+    sum += ax * (by * cz - bz * cy) + ay * (bz * cx - bx * cz) + az * (bx * cy - by * cx);
+  }
+  return sum / 6;
+}
+
+/** Closed iff every directed edge appears once and its reverse once, so inconsistent winding fails too. */
+function edgeManifold(indices: Uint32Array): boolean {
+  if (indices.length === 0 || indices.length % 3 !== 0) return false;
+  const edges = new Map<string, number>();
+  for (let t = 0; t < indices.length; t += 3) {
+    const a = indices[t], b = indices[t + 1], c = indices[t + 2];
+    if (a === b || b === c || c === a) return false;
+    for (const key of [`${a}:${b}`, `${b}:${c}`, `${c}:${a}`]) {
+      edges.set(key, (edges.get(key) ?? 0) + 1);
+    }
+  }
+  for (const [key, count] of edges) {
+    if (count !== 1) return false;
+    const colon = key.indexOf(":");
+    if (edges.get(`${key.slice(colon + 1)}:${key.slice(0, colon)}`) !== 1) return false;
+  }
+  return true;
 }

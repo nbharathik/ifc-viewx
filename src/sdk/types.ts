@@ -8,6 +8,8 @@ import type { ResultHandle, ResultOptions, ResultPage } from "../capabilities/re
 import type { ReportFinding } from "../ui/report.js";
 import type {
   CameraPose,
+  FederatedModel,
+  IfcTaskGraph,
   ItemProperties,
   LazyCategory,
   Measurement,
@@ -17,6 +19,7 @@ import type {
   SectionState,
   SpatialNode,
   ViewPreset,
+  VisibilityRule,
 } from "../viewer-core/viewer.js";
 import type {
   ContributionFor,
@@ -73,6 +76,7 @@ export interface ExtensionModelService {
   index(): PropertyIndex;
   modelOf(id: number): number;
   expressOf(id: number): number;
+  scheduleGraph(): Promise<IfcTaskGraph>;
 }
 
 export interface ExtensionGeometryService {
@@ -90,6 +94,9 @@ export interface ExtensionViewService {
   measuring(): boolean;
   pickGuide(on: boolean): void;
   isVisible(id: number): boolean;
+  rules(): VisibilityRule[];
+  models(): FederatedModel[];
+  setModelVisible(index: number, visible: boolean): void;
   categoryVisible(category: LazyCategory): boolean;
   setCategoryVisible(category: LazyCategory, visible: boolean): Promise<void>;
   isolate(ids: number[], label?: string): void;

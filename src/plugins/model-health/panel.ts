@@ -1,4 +1,4 @@
-import { bar, button, emptyState, grid, h, note, page, progress, stats } from "@ifcviewx/sdk";
+import { bar, button, emptyState, grid, h, header, note, page, progress, stats } from "@ifcviewx/sdk";
 import type { ExtensionContext, ExtensionInstance } from "@ifcviewx/sdk";
 
 type Severity = "error" | "warning" | "info";
@@ -143,7 +143,13 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
 
   const scan = button("Run full audit", () => void runFull(), "accent");
   const showAll = button("Show all", () => ctx.view.showAll());
-  const root = page(bar(scan, showAll), status.root, summary, findings);
+  const root = page(
+    header("Model health", "Catch identity, geometry and property problems before review."),
+    bar(scan, showAll),
+    status.root,
+    summary,
+    findings,
+  );
   host.appendChild(root);
 
   const rebuild = (): void => {

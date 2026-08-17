@@ -60,7 +60,9 @@ export function sampleModel(): Uint8Array {
   const dirY = add("IFCDIRECTION((0.,1.,0.))");
   const axis = add(`IFCAXIS2PLACEMENT3D(#${origin},#${dirZ},#${dirX})`);
   const profileAxis = add(`IFCAXIS2PLACEMENT2D(#${profileOrigin},$)`);
-  const context = add(`IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#${axis},$)`);
+  const context = add(`IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#${axis},#${dirY})`);
+  const projectedCrs = add(`IFCPROJECTEDCRS('EPSG:25833','ETRS89 / UTM zone 33N','ETRS89','DHHN2016','UTM','33N',#${metre})`);
+  add(`IFCMAPCONVERSION(#${context},#${projectedCrs},451000.,5990000.,12.5,0.999961923,0.008726535,1.)`);
 
   const project = add(`IFCPROJECT('${g()}',#${owner},'Sample building',$,$,$,$,(#${context}),#${units})`);
   const sitePlace = add(`IFCLOCALPLACEMENT($,#${axis})`);

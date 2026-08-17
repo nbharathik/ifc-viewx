@@ -17,25 +17,38 @@ export interface ShellActions {
 export type TabId =
   | "properties"
   | "filters"
+  | "geo"
   | "ids"
   | "bcf"
   | "assistant"
   | "schedule"
   | "plugins"
   | "activity";
-export type PaneId = "tree" | "types" | "summary";
+export type PaneId = "tree" | "types" | "organize" | "summary";
 
-const PANES: Array<[string, PaneId]> = [["Structure", "tree"], ["Types", "types"], ["Summary", "summary"]];
+const PANES: Array<[string, PaneId]> = [
+  ["Structure", "tree"],
+  ["Types", "types"],
+  ["Organize", "organize"],
+  ["Summary", "summary"],
+];
 
-const TABS: Array<{ id: TabId; label: string; icon: string; key: string }> = [
+/**
+ * A `handoff` tab owns no pane: the rail button asks the app to open the thing
+ * it names, which lands somewhere else. Switching panes first would leave an
+ * empty panel behind and light the wrong rail button.
+ */
+const TABS: Array<{ id: TabId; label: string; icon: string; key: string; handoff?: boolean }> = [
   { id: "properties", label: "Properties", icon: "info", key: "P" },
   { id: "filters", label: "Filters", icon: "funnel", key: "R" },
-  { id: "ids", label: "IDS checks", icon: "clipboard", key: "" },
+  { id: "ids", label: "IDS", icon: "clipboard", key: "" },
   { id: "bcf", label: "Issues", icon: "flag", key: "" },
   { id: "schedule", label: "Schedule", icon: "table", key: "" },
   { id: "assistant", label: "Assistant", icon: "sparkle", key: "C" },
   { id: "plugins", label: "Plugins", icon: "blocks", key: "" },
   { id: "activity", label: "Activity", icon: "activity", key: "L" },
+  // Geo sits last: it is a per-project setup step, not a daily panel.
+  { id: "geo", label: "Geo Context", icon: "globe", key: "" },
 ];
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -102,8 +115,20 @@ export class Shell {
     this.buildOutlinerSwitch();
     this.buildTabs();
 
+    // The organize pane and IDS tab bodies are created here, so index.html
+    // stays as shipped.
+    if (!document.getElementById("pane-organize")) {
+      $("pane-types").insertAdjacentElement("afterend", h("div", { class: "panel-body hidden", id: "pane-organize" }));
+    }
+    if (!document.getElementById("tab-ids")) {
+      $("tab-bcf").insertAdjacentElement("beforebegin", h("div", {
+        class: "panel-body hidden", id: "tab-ids", role: "tabpanel", tabindex: "0", "aria-labelledby": "rail-ids",
+      }));
+    }
     for (const [, id] of PANES) this.panes.set(id, $(`pane-${id}`));
-    for (const tab of TABS) this.panes.set(tab.id, $(`tab-${tab.id}`));
+    for (const tab of TABS) {
+      if (!tab.handoff) this.panes.set(tab.id, $(`tab-${tab.id}`));
+    }
 
     this.activityList = h("div", { class: "msgs log", id: "activity-list" });
     this.activityEmpty = emptyState("list", "Nothing yet", "Loads, edits and errors are recorded here.");
@@ -167,9 +192,9 @@ export class Shell {
         class: `rail-btn${first ? " active" : ""}`,
         id: `rail-${tab.id}`,
         type: "button",
-        role: "tab",
-        "aria-selected": String(first),
-        "aria-controls": `tab-${tab.id}`,
+        role: tab.handoff ? undefined : "tab",
+        "aria-selected": tab.handoff ? undefined : String(first),
+        "aria-controls": tab.handoff ? undefined : `tab-${tab.id}`,
         // Roving focus: one stop for the whole rail, arrows walk it.
         tabindex: first ? "0" : "-1",
         title: tab.key ? `${tab.label}  ${tab.key}` : tab.label,
@@ -177,7 +202,7 @@ export class Shell {
       }, [icon(tab.icon, 16)]);
       button.addEventListener("click", () => {
         // Clicking the panel you are already on closes it, like a toggle.
-        if (this.activeTab === tab.id && this.isPanelOpen("inspector")) this.togglePanel("inspector");
+        if (!tab.handoff && this.activeTab === tab.id && this.isPanelOpen("inspector")) this.togglePanel("inspector");
         else this.selectTab(tab.id);
       });
       button.addEventListener("keydown", (e) => this.railKey(e));
@@ -205,9 +230,11 @@ export class Shell {
   // -- state ----------------------------------------------------------------
   /** Switch tabs; the first time a tab is shown the host gets to build it. */
   selectTab(tab: TabId): void {
+    const meta = TABS.find((item) => item.id === tab);
+    if (meta?.handoff) return this.actions.tabShown(tab);
     this.activeTab = tab;
     if (this.inspector.classList.contains("collapsed")) this.togglePanel("inspector");
-    $("inspector-title").textContent = TABS.find((item) => item.id === tab)?.label ?? "";
+    $("inspector-title").textContent = meta?.label ?? "";
     for (const [id, button] of this.tabButtons) {
       button.classList.toggle("active", id === tab);
       button.setAttribute("aria-selected", String(id === tab));

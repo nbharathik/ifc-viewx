@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.2",
   "type": "module",
+  "license": "Apache-2.0",
   "description": "Fast browser-based IFC viewer with Python (IfcOpenShell/Pyodide) editing, LLM assistance, and MCP bridge",
   "scripts": {
     "dev": "vite",
@@ -22,6 +23,7 @@
     "docs:build": "npm run catalog && mkdocs build -d dist/docs"
   },
   "dependencies": {
+    "exceljs": "^4.4.0",
     "fflate": "0.8.3",
     "three": "0.184.0",
     "three-mesh-bvh": "^0.9.14",

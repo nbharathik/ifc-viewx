@@ -155,11 +155,13 @@ export const TOOLS: ToolSpec[] = [
       },
     } } },
   { name: "section", tier: "viewer", icon: "section", syntax: '{"action":"section","axis":"y","offset":3.2}',
-    summary: "one axis-aligned cut; offset is in metres in model space, omit it for the middle; pass clear to remove",
-    plain: "Cut the model on one axis",
+    summary: "one axis-aligned cut, an arbitrary plane via normal, or a cut on the last picked face; pass clear to remove",
+    plain: "Cut the model on a plane",
     params: { properties: {
       axis: { type: "string", enum: ["x", "y", "z"], description: "y is the horizontal cut that makes a plan" },
-      offset: { type: "number", description: "where along the axis; omit for the middle" },
+      offset: { type: "number", description: "where along the axis or normal; omit for the middle on axis cuts, required with normal" },
+      normal: { type: "array", items: { type: "number" }, description: "3-vector for an arbitrary plane; overrides axis" },
+      fromPick: { type: "boolean", description: "cut on the last surface the user clicked" },
       flip: { type: "boolean", description: "keep the other half" },
       clear: { type: "boolean", description: "remove every cut" },
     } } },
@@ -285,7 +287,7 @@ export function toolBlocker(tool: ToolSpec, state: ToolAvailability): string {
   if (tool.tier === "python") return "Written for you, never run";
   if (!state.model) return "Open a model";
   if (tool.tier === "edit" && state.mode !== "edit") return "Edit mode only";
-  if (tool.name === "ids") return state.ids ? "" : "Load an .ids file";
+  if (tool.name === "ids") return state.ids ? "" : "Open IDS Studio and load an .ids file";
   return "";
 }
 

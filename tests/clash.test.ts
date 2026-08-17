@@ -47,6 +47,54 @@ function boxMesh(
 }
 
 /**
+ * The same box as web-ifc actually delivers it: flat shaded, four fresh
+ * vertices per face, so every crease edge appears only once in the index.
+ */
+function soupBoxMesh(
+  expressID: number,
+  type: string,
+  size: [number, number, number],
+  at: [number, number, number],
+): IfcMesh {
+  const [sx, sy, sz] = size.map((value) => value / 2) as [number, number, number];
+  const corners: number[][] = [];
+  for (let i = 0; i < 8; i++) {
+    corners.push([i & 1 ? sx : -sx, i & 2 ? sy : -sy, i & 4 ? sz : -sz]);
+  }
+  const quads: Array<[number, number, number, number]> = [
+    [0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4],
+    [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5],
+  ];
+  const positions: number[] = [];
+  const indices: number[] = [];
+  for (const quad of quads) {
+    const base = positions.length / 3;
+    for (const corner of quad) positions.push(...corners[corner]);
+    indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  }
+  return {
+    expressID,
+    ifcType: type,
+    color: { r: 1, g: 1, b: 1, a: 1 },
+    matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, at[0], at[1], at[2], 1],
+    geometry: {
+      positions: new Float32Array(positions),
+      normals: new Float32Array(positions.length),
+      indices: new Uint32Array(indices),
+    },
+    geometryID: expressID,
+    localBounds: { min: { x: -sx, y: -sy, z: -sz }, max: { x: sx, y: sy, z: sz } },
+  };
+}
+
+function rotateZ(mesh: IfcMesh, radians: number, translation: [number, number, number]): IfcMesh {
+  const c = Math.cos(radians);
+  const s = Math.sin(radians);
+  mesh.matrix = [c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0, ...translation, 1];
+  return mesh;
+}
+
+/**
  * A tube of triangles running along X, used to check that a slender element
  * threaded past a wall is not reported just because their boxes overlap.
  */
@@ -163,6 +211,18 @@ describe("broad phase", () => {
     candidatePairs(items, items, 0, (one, others) => others.forEach((other) => pairs.push([one.id, other.id])));
     expect(pairs).toEqual([]);
   });
+
+  it("drops invalid boxes and repeated ids before building the grid", () => {
+    const repeated = item(2, [0.5, 0, 0], [1.5, 1, 1]);
+    const pairs: Array<[number, number]> = [];
+    candidatePairs(
+      [item(1, [0, 0, 0], [1, 1, 1]), item(1, [0, 0, 0], [1, 1, 1])],
+      [repeated, repeated, item(3, [NaN, 0, 0], [1, 1, 1])],
+      Infinity,
+      (one, others) => others.forEach((other) => pairs.push([one.id, other.id])),
+    );
+    expect(pairs).toEqual([[1, 2]]);
+  });
 });
 
 describe("triangle store", () => {
@@ -220,6 +280,17 @@ describe("hard clashes", () => {
     expect(result.hits[0].distance).toBeCloseTo(0.1, 3);
   });
 
+  it("keeps the penetration estimate stable when both solids are rotated", async () => {
+    const angle = Math.PI / 4;
+    const direction: [number, number, number] = [Math.cos(angle) * 1.9, Math.sin(angle) * 1.9, 0];
+    const index = indexOf([
+      rotateZ(boxMesh(1, "IfcWall", [2, 2, 2], [0, 0, 0]), angle, [0, 0, 0]),
+      rotateZ(boxMesh(2, "IfcDuctSegment", [2, 2, 2], [0, 0, 0]), angle, direction),
+    ]);
+    const [hit] = (await runSweep(index, spec([1], [2]))).hits;
+    expect(hit.distance).toBeCloseTo(0.1, 3);
+  });
+
   it("puts the clash point inside the overlap", async () => {
     const index = indexOf([
       boxMesh(1, "IfcWall", [2, 2, 2], [0, 0, 0]),
@@ -267,6 +338,15 @@ describe("hard clashes", () => {
     expect((await runSweep(indexOf(meshes), spec([1], [2], { toleranceMm: 5 }))).hits).toHaveLength(1);
   });
 
+  it("does not turn a tolerated penetration into a zero-gap clearance failure", async () => {
+    const meshes = [
+      boxMesh(1, "IfcWall", [2, 2, 2], [0, 0, 0]),
+      boxMesh(2, "IfcDuctSegment", [2, 2, 2], [1.995, 0, 0]),
+    ];
+    const result = await runSweep(indexOf(meshes), spec([1], [2], { toleranceMm: 10, clearanceMm: 100 }));
+    expect(result.hits).toEqual([]);
+  });
+
   it("reports nothing for elements that are far apart", async () => {
     const index = indexOf([
       boxMesh(1, "IfcWall", [2, 2, 2], [0, 0, 0]),
@@ -286,6 +366,63 @@ describe("hard clashes", () => {
     expect(result.hits).toHaveLength(1);
     expect(result.hits[0].kind).toBe("hard");
     expect(result.hits[0].distance).toBeCloseTo(0.4, 3);
+  });
+
+  it("finds containment inside a flat-shaded triangle-soup solid, web-ifc style", async () => {
+    const index = indexOf([
+      soupBoxMesh(1, "IfcSlab", [4, 4, 4], [0, 0, 0]),
+      boxMesh(2, "IfcValve", [0.4, 0.4, 0.4], [0, 0, 0]),
+    ]);
+    const result = await runSweep(index, spec([1], [2]));
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0].kind).toBe("hard");
+    expect(result.hits[0].distance).toBeCloseTo(0.4, 3);
+  });
+
+  it("finds containment even when the outer solid has reversed winding", async () => {
+    const outer = boxMesh(1, "IfcSlab", [4, 4, 4], [0, 0, 0]);
+    const indices = outer.geometry.indices;
+    for (let offset = 0; offset < indices.length; offset += 3) {
+      const second = indices[offset + 1];
+      indices[offset + 1] = indices[offset + 2];
+      indices[offset + 2] = second;
+    }
+    const result = await runSweep(indexOf([
+      outer,
+      boxMesh(2, "IfcValve", [0.4, 0.4, 0.4], [0, 0, 0]),
+    ]), spec([1], [2]));
+    expect(result.hits).toHaveLength(1);
+  });
+
+  it("does not infer a contained solid inside an open shell", async () => {
+    const shell = boxMesh(1, "IfcSlab", [4, 4, 4], [0, 0, 0]);
+    shell.geometry.indices = shell.geometry.indices.slice(0, -6);
+    const result = await runSweep(indexOf([
+      shell,
+      boxMesh(2, "IfcValve", [0.4, 0.4, 0.4], [0, 0, 0]),
+    ]), spec([1], [2]));
+    expect(result.hits).toEqual([]);
+  });
+
+  it("filters malformed faces without losing the valid solid", async () => {
+    const wall = boxMesh(1, "IfcWall", [2, 2, 2], [0, 0, 0]);
+    wall.geometry.indices = new Uint32Array([...wall.geometry.indices, 0, 0, 1, 999]);
+    const result = await runSweep(indexOf([
+      wall,
+      boxMesh(2, "IfcDuctSegment", [2, 2, 2], [1.5, 0, 0]),
+    ]), spec([1], [2]));
+    expect(result.hits).toHaveLength(1);
+  });
+
+  it("deduplicates repeated ids before testing", async () => {
+    const result = await runSweep(indexOf([
+      boxMesh(1, "IfcWall", [2, 2, 2], [0, 0, 0]),
+      boxMesh(2, "IfcDuctSegment", [2, 2, 2], [1.5, 0, 0]),
+    ]), spec([1, 1], [2, 2]));
+    expect(result.elementsA).toBe(1);
+    expect(result.elementsB).toBe(1);
+    expect(result.pairsTested).toBe(1);
+    expect(result.hits).toHaveLength(1);
   });
 
   it("counts elements it has no geometry for rather than silently skipping them", async () => {
@@ -360,6 +497,21 @@ describe("results", () => {
       cancelled: () => true,
     });
     expect(result.truncated).toBe(true);
+  });
+
+  it("reports pair-level progress and yields inside one large candidate list", async () => {
+    const meshes = [boxMesh(1, "IfcWall", [2, 2, 2], [0, 0, 0])];
+    for (let index = 0; index < 405; index++) {
+      meshes.push(boxMesh(10 + index, "IfcDuctSegment", [2, 2, 2], [0, 0, 0]));
+    }
+    const updates: Array<{ done: number; total: number }> = [];
+    await runSweep(indexOf(meshes), spec([1], meshes.slice(1).map((mesh) => mesh.expressID), {
+      toleranceMm: 5_000,
+    }), {
+      onProgress: ({ done, total }) => updates.push({ done, total }),
+      yieldTurn: async () => undefined,
+    });
+    expect(updates).toEqual([{ done: 400, total: 405 }, { done: 405, total: 405 }]);
   });
 });
 

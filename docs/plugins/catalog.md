@@ -9,6 +9,22 @@ See [Build an extension](index.md) to add your own tool.
 These run in the tab. Nothing to install, nothing uploaded.
 Select a tool to see its purpose and main features.
 
+??? info "4D Schedule: Turn IFC tasks and schedule CSVs into a live construction sequence"
+
+    Reads native IfcWorkSchedule, IfcTask, IfcTaskTime, sequence and product relationships in the parser worker. Overlay external dates and progress, map tasks without changing the IFC, scrub or play the federated model timeline, compare planned and actual delivery, and hand delayed states to BCF.
+
+    **Highlights**
+
+    - Native IFC work schedules, task hierarchy, task time, dependencies and product links
+    - CSV schedule overlay by task ID with planned and actual dates and progress
+    - Task mapping by GlobalId, current selection, saved selection set or class and storey filter
+    - Gantt view, date scrubber, playback and planned, active, delayed and completed model colours
+    - Planned versus actual variance with federated discipline filtering
+    - Mapping JSON and progress CSV export without modifying the IFC
+    - BCF issue creation from any delayed task or selected construction state
+
+    <small>Category: Planning</small>
+
 ??? info "Clash Detection: Turn raw clashes into an auditable coordination docket"
 
     Saves repeatable A and B coordination checks, then classifies their mesh intersections and clearance failures against the previous run. Every result receives a stable GlobalId-based reference, can be grouped by review state, level, class pair, primary element or proximity, and carries local ignore and assignment decisions. A reviewed pair becomes a BCF topic with its focused section box, selected elements and snapshot. Geometry stays in the existing browser worker, so the viewport remains responsive and no model geometry leaves the tab.
@@ -36,6 +52,21 @@ Select a tool to see its purpose and main features.
     - CSV export of the filtered rows, not just the visible page
 
     <small>Category: Data</small>
+
+??? info "IDS Requirements Studio: Write and standardize information requirements"
+
+    The authoring half of IDS, for requirement writers and BIM coordinators. Checking a model against an existing .ids file needs none of this: that lives in the IDS panel on the inspector rail. Open this when you are building the specifications themselves: facets visually, bound to versioned bSDD concepts, with staged corrections and compliance compared against a saved revision baseline.
+
+    **Highlights**
+
+    - Visual IDS 1.0 authoring for all six facet kinds
+    - Reusable built-in and project requirement templates
+    - bSDD class, material and property search with stable URIs
+    - Shared viewer validation with staged correction suggestions
+    - IDS, JSON and BCF handoff workflows
+    - Compliance comparison against a saved model revision
+
+    <small>Category: Quality</small>
 
 ??? info "Model Compare: See what moved, reshaped, changed level or changed data"
 
@@ -247,16 +278,16 @@ Select a tool to see its purpose and main features.
 
     <small>Category: Quality</small>
 
-??? info "Issue Tracker: Capture issues on the model and export them as BCF"
+??? info "Issue Tracker: Keep BCF local or sync it with an OpenCDE project"
 
-    Every topic stores the camera, the section planes, the selection and a snapshot of the viewport, so reopening one puts you back exactly where it was raised. Topics live in this browser beside the model and export as a BCF 2.1 archive other BIM tools can read.
+    Every topic stores the camera, section planes, selection and viewport snapshot, so reopening one returns to the place it was raised. Review locally, export a BCF 2.1 archive, or connect a buildingSMART OpenCDE BCF 3.0 project. Server changes stay in a visible queue until you press Sync.
 
     **Highlights**
 
     - One capture keeps view, section, selection and snapshot
-    - Status, priority and assignee, with filtering
-    - Reopen a topic to restore the exact viewpoint
-    - Export a BCF 2.1 zip for other tools
+    - OpenCDE BCF 3.0 projects, server fields and assignees
+    - Explicit, retryable sync with a visible offline queue
+    - BCF 2.1 zip import and export for other BIM tools
 
     <small>Category: Collaboration</small>
 

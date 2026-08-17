@@ -453,13 +453,24 @@ export class SandboxRuntime implements ExtensionInstance {
       }
       case "view.sections": return this.context.view.sections();
       case "view.setSections": {
-        if (!Array.isArray(params.sections) || params.sections.length > 6) throw new Error("sections must contain at most six planes");
+        if (!Array.isArray(params.sections) || params.sections.length > 8) throw new Error("sections must contain at most eight planes");
         const sections: SectionState[] = params.sections.map((entry, index) => {
           const value = record(entry);
-          if (value.axis !== "x" && value.axis !== "y" && value.axis !== "z") throw new Error(`sections[${index}].axis is invalid`);
           if (typeof value.flip !== "boolean") throw new Error(`sections[${index}].flip must be boolean`);
-          const axis = value.axis;
-          return { axis, offset: finite(value.offset, `sections[${index}].offset`), flip: value.flip };
+          const offset = finite(value.offset, `sections[${index}].offset`);
+          if (value.axis === "x" || value.axis === "y" || value.axis === "z") {
+            return { axis: value.axis, offset, flip: value.flip };
+          }
+          if (value.axis !== undefined) throw new Error(`sections[${index}].axis is invalid`);
+          const normal = point(value.normal, `sections[${index}].normal`);
+          if (Math.hypot(...normal) < 1e-9) throw new Error(`sections[${index}].normal must be non-zero`);
+          return {
+            id: typeof value.id === "string" ? textValue(value.id, `sections[${index}].id`, 100) : "",
+            name: typeof value.name === "string" ? textValue(value.name, `sections[${index}].name`, 100) : "",
+            normal,
+            offset,
+            flip: value.flip,
+          };
         });
         this.context.view.setSections(sections);
         return null;

@@ -23,6 +23,10 @@ function measureViewer(): Viewer {
     onSectionChange: () => () => undefined,
     onMeasureChange: () => () => undefined,
     onModelLoaded: () => () => undefined,
+    onAnnotationChange: () => () => undefined,
+    getAnnotationRevision: () => 0,
+    getAnnotationStates: () => [],
+    getSections: () => [],
   } as unknown as Viewer;
 }
 
@@ -40,7 +44,8 @@ describe("Measure card layout", () => {
     const card = host.querySelector<HTMLElement>("#measure-card");
     const drawers = card?.querySelectorAll<HTMLDetailsElement>(".mc-disclosure");
     expect(card?.classList.contains("hidden")).toBe(false);
-    expect([...drawers ?? []].map((drawer) => drawer.open)).toEqual([false, false]);
+    // Accuracy, the ledger and the quantity survey all start collapsed.
+    expect([...drawers ?? []].map((drawer) => drawer.open)).toEqual([false, false, false]);
     expect(card?.querySelector(".mc-list")?.classList.contains("hidden")).toBe(false);
     expect(card?.querySelector(".mc-ledger summary")?.textContent).toContain("0 saved");
   });

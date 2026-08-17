@@ -3,7 +3,7 @@
 // App-level state lives here: active model bytes, checkpoints, and the
 // pending-edit lifecycle. Edits only land on an explicit Apply.
 import "./styles.css";
-import { createViewer } from "./viewer-core/viewer.js";
+import { createViewer, type FederatedModel } from "./viewer-core/viewer.js";
 import { listCachedModels, loadCachedSource, storeSourceBytes, type CachedModel } from "./viewer-core/engine/cache.js";
 import type { LoadProgress } from "./viewer-core/engine/types.js";
 import { PythonEngine, type ProposedEdit } from "./python/pythonEngine.js";
@@ -25,9 +25,10 @@ import type { AssistantTraceEvent, EvidenceReference, ViewImageAttachment } from
 import { ViewTransactionManager } from "./assistant/viewTransactions.js";
 import { AssistantPanel, type PendingEditView } from "./ui/sidePanel.js";
 import { TypesPane } from "./ui/typesPane.js";
+import { OrganizePane } from "./ui/organizePane.js";
 import { FilterChip, FilterPanel, FilterStore } from "./ui/filters.js";
-import type { IdsPanel } from "./ui/ids.js";
 import type { BcfPanel } from "./ui/bcf.js";
+import type { GeoContextPanel } from "./ui/geo.js";
 import { Shell, emptyState, type PaneId, type TabId } from "./ui/shell.js";
 import { Dock, readViewpoints, saveViewpoint as storeViewpoint, viewpointKey } from "./ui/dock.js";
 import { Connection } from "./ui/connection.js";
@@ -38,6 +39,7 @@ import { buildMenu, busyRow, CommandPalette, confirmAction, h, icon, lightDismis
 import { ageLabel, clearChats, readChats, saveChat, type Conversation } from "./llm/chatStore.js";
 import { sampleModel, SAMPLE_NAME } from "./ui/sample.js";
 import { download } from "./sdk/data.js";
+import { saveMesh, type MeshFormat } from "./export/mesh.js";
 import type { ExtensionIssueInput, ExtensionIssueResult } from "./sdk/types.js";
 import type { PythonRunner } from "./plugins/runtime/context.js";
 import { PluginHost } from "./plugins/runtime/host.js";
@@ -142,6 +144,10 @@ const PY_BROWSER_WARN_BYTES = 100e6;
 let activeBytes: Uint8Array | null = null;
 /** An IDS document is loaded, so the assistant's `ids` action has a target. */
 let idsLoaded = false;
+window.addEventListener("ifcviewx:ids-loaded", () => {
+  idsLoaded = true;
+  refreshAssistantEngine();
+});
 let fileName = "";
 let schemaName: string | null = null;
 let checkpoints: Uint8Array[] = [];
@@ -218,8 +224,9 @@ const ifc = new IfcEngine(`${import.meta.env.BASE_URL}wasm/`);
 let assistantUi: AssistantPanel | null = null;
 let scheduleUi: SchedulePanel | null = null;
 let filterUi: FilterPanel | null = null;
-let idsUi: IdsPanel | null = null;
 let bcfUi: BcfPanel | null = null;
+let geoUi: GeoContextPanel | null = null;
+let idsUi: unknown = null;
 let assistantAgent: AgentRuntime | null = null;
 
 function agent(): AgentRuntime {
@@ -338,26 +345,6 @@ function filterPanel(): FilterPanel {
   return filterUi;
 }
 
-/** IDS and BCF are dead weight until asked for, so they arrive on demand. */
-async function idsPanel(): Promise<IdsPanel> {
-  if (!idsUi) {
-    const { IdsPanel } = await import("./ui/ids.js");
-    idsUi = new IdsPanel($("tab-ids"), {
-      viewer,
-      isolate: (label, ids) => void filters.add({ label, mode: "keep", ids }),
-      report: (title, ids) => void raiseIssue(title, ids).catch(reportError),
-      log: (message, kind) => shell.log(message, kind),
-      // The assistant's `ids` action checks whatever is loaded here, so the
-      // tool list has to learn about it the moment the file lands.
-      changed: () => {
-        idsLoaded = true;
-        refreshAssistantEngine();
-      },
-    });
-  }
-  return idsUi;
-}
-
 async function bcfPanel(): Promise<BcfPanel> {
   if (!bcfUi) {
     const { BcfPanel } = await import("./ui/bcf.js");
@@ -393,10 +380,51 @@ async function raiseIssue(
     input.description ?? (ids.length ? `${ids.length} elements do not meet this specification.` : ""),
     metadata.length ? metadata.join("\n") : "",
   ].filter(Boolean).join("\n\n");
-  const issueId = panel.capture(title, description, { elementIds: ids, priority: input.priority });
+  const issueId = panel.capture(title, description, { elementIds: ids, priority: input.priority, point: input.point });
   if (!issueId) throw new Error("The issue could not be created");
   shell.selectTab("bcf");
   return { id: issueId, title: title || "New issue", status: "Open", snapshot: "pending" };
+}
+
+/**
+ * IDS lives in its own panel: open a file, validate, walk the failures. The
+ * authoring studio stays a plugin, one click away, for the rarer job of
+ * writing the requirements in the first place.
+ */
+async function idsPanel(): Promise<unknown> {
+  if (!idsUi) {
+    const { IdsPanel } = await import("./ui/ids.js");
+    idsUi = new IdsPanel($("tab-ids"), {
+      viewer,
+      isolate: (label, ids) => {
+        viewer.isolate(ids, label);
+        shell.log(`Isolated ${ids.length} element(s) from ${label}`, "info", true);
+      },
+      report: (title, ids) => void raiseIssue(title, ids).catch(reportError),
+      log: (message, kind) => shell.log(message, kind),
+      changed: () => ribbon.sync(),
+      openStudio: () => void plugins.open("ids-studio"),
+    });
+  }
+  return idsUi;
+}
+
+async function geoPanel(): Promise<GeoContextPanel> {
+  if (!geoUi) {
+    const { GeoContextPanel } = await import("./ui/geo.js");
+    geoUi = new GeoContextPanel($("tab-geo"), {
+      viewer,
+      log: (message, kind) => shell.log(message, kind),
+      createIssue: async (input) => {
+        await raiseIssue(input.title, [], {
+          description: input.description,
+          point: input.point,
+          metadata: input.metadata,
+        });
+      },
+    });
+  }
+  return geoUi;
 }
 
 /** A panel that fails to arrive is not mounted, so opening the tab retries. */
@@ -415,6 +443,7 @@ function mountLazy(tab: TabId, build: () => Promise<unknown>): void {
 function mountTab(tab: TabId): void {
   if (tab === "assistant") assistant();
   else if (tab === "filters") filterPanel();
+  else if (tab === "geo") mountLazy(tab, geoPanel);
   else if (tab === "ids") mountLazy(tab, idsPanel);
   else if (tab === "bcf") mountLazy(tab, bcfPanel);
   else if (tab === "schedule") mountLazy(tab, schedulePanel);
@@ -428,12 +457,21 @@ function types(): TypesPane {
   return typesUi;
 }
 
+/** The organize pane follows the same lazy build as the type list. */
+let organizeUi: OrganizePane | null = null;
+
+function organize(): OrganizePane {
+  if (!organizeUi) organizeUi = new OrganizePane($("pane-organize"), viewer);
+  return organizeUi;
+}
+
 const paneVisible = (pane: PaneId): boolean => !$(`pane-${pane}`).classList.contains("hidden");
 
 function showPane(pane: PaneId): void {
   shell.setOutlinerPane(pane);
   if (pane === "summary") renderSummary();
   else if (pane === "types") types().render();
+  else if (pane === "organize") organize().render();
 }
 
 // ---------------------------------------------------------------------------
@@ -606,6 +644,8 @@ async function loadBytes(bytes: Uint8Array, name: string, preserveCamera = false
   if (!preserveCamera) { checkpoints = []; redoStack = []; }
   hideDropzone(true);
   updateModelChrome();
+  const primaryGeo = viewer.getModels()[0];
+  if (primaryGeo) reportGeoStatus(primaryGeo);
   // The tool catalog is gated on a model being open, so it has to be told.
   refreshAssistantEngine();
   if (python.isReady()) void syncPython().catch(() => undefined);
@@ -692,6 +732,7 @@ async function attachFile(file: File): Promise<void> {
       onProgress: (progress) => loadingUi.update(progress),
     });
     shell.log(`Added ${file.name} as model ${added.index + 1}`, "success");
+    reportGeoStatus(added);
     summaryDirty = true;
     updateModelChrome();
   } finally {
@@ -799,6 +840,49 @@ function exportModel(): void {
   shell.log(`Exported ${fileName}`, "success", true);
 }
 
+/** The plan sheet, whether or not the inset is currently showing. */
+async function savePlanImage(): Promise<void> {
+  const saved = await viewer.downloadPlan(fileName).catch(reportError);
+  if (saved) shell.log("Plan saved as PNG", "success", true);
+  else if (saved === false) toast("No plan to save yet", "info");
+}
+
+/**
+ * Mesh export. The format and the scope are one question, so they are one
+ * prompt; the exporters themselves only load once a format is chosen.
+ */
+function exportMeshFile(): void {
+  const selected = viewer.getSelectedIds().length;
+  promptForm(
+    "Export mesh",
+    [
+      { key: "format", label: "Format", value: "glb", options: ["glb", "gltf", "stl", "obj"] },
+      {
+        key: "scope",
+        label: "Scope",
+        value: selected ? "selection" : "visible",
+        options: selected ? ["selection", "visible"] : ["visible"],
+      },
+    ],
+    "Export",
+    (values) => {
+      const format = values.format as MeshFormat;
+      const scope = values.scope === "selection" ? { selectedOnly: true } : { visibleOnly: true };
+      shell.log(`Exporting ${format.toUpperCase()}...`);
+      void saveMesh(viewer, format, scope)
+        .then((result) => {
+          shell.log(
+            `Exported ${result.elements} element(s), ${result.triangles.toLocaleString()} triangles` +
+              (result.truncated ? " (truncated at the size cap)" : ""),
+            result.truncated ? "info" : "success",
+            true,
+          );
+        })
+        .catch(reportError);
+    },
+  );
+}
+
 function frameSelection(): void {
   const id = viewer.getSelection();
   if (id !== null) viewer.fitToElement(id);
@@ -817,6 +901,17 @@ function syncTools(): void {
 function toggleMeasure(): void {
   viewer.toggleMeasure();
   syncTools();
+}
+
+function reportGeoStatus(model: FederatedModel): void {
+  if (model.geoStatus === "aligned") {
+    shell.log(`Geo Context: automatically aligned ${model.name} to the federation CRS`, "success");
+    return;
+  }
+  if (model.geoStatus !== "missing" && model.geoStatus !== "conflict") return;
+  const label = model.geoStatus === "conflict" ? "conflicts with the federation CRS" : "has incomplete CRS information";
+  shell.log(`Geo Context: ${model.name} ${label}. Open Geo Context for diagnostics.`, "info", true);
+  toast(`${model.name} ${label}`, "info");
 }
 
 function openSmartMeasure(): void {
@@ -1860,6 +1955,8 @@ registry.add([
   { id: "file.attach", label: "Add model", icon: "layers", section: "File", hint: "Load a second model beside this one", enabled: hasModel, run: () => attachInput.click() },
   { id: "file.sample", label: "Sample model", icon: "cube", section: "File", hint: "A small two-storey building, generated here, to try the viewer on", run: () => void openSample().catch(reportError) },
   { id: "file.export", label: "Export", icon: "download", section: "File", hint: "Download the active IFC", enabled: hasModel, run: exportModel },
+  { id: "file.mesh", label: "Export mesh", icon: "cube", section: "File", hint: "glTF, GLB, STL or OBJ of what is on screen, or of the selection", enabled: hasModel, run: exportMeshFile },
+  { id: "file.plan", label: "Export plan", icon: "section", section: "File", hint: "The 2D plan as a PNG, cut where the section is", enabled: hasModel, run: () => void savePlanImage() },
   { id: "file.close", label: "Close", icon: "x", section: "File", enabled: hasModel, run: closeOrConfirm },
   { id: "file.screenshot", label: "Screenshot", icon: "camera", section: "File", shortcut: "S", enabled: hasModel, run: () => { viewer.screenshot(); shell.log("Screenshot saved", "success", true); } },
   { id: "file.viewpoint", label: "Viewpoint", icon: "bookmark", section: "File", shortcut: "V", enabled: hasModel, run: saveViewpoint },
@@ -1882,6 +1979,13 @@ registry.add([
   { id: "vis.undo", label: "Undo visibility", icon: "undo", section: "Visibility", shortcut: "Ctrl+Shift+Z", hint: "Step back through hide and isolate", enabled: () => viewer.canUndoVisibility(), run: () => { if (!viewer.undoVisibility()) toast("Nothing to undo", "info"); } },
   { id: "vis.redo", label: "Redo visibility", icon: "redo", section: "Visibility", shortcut: "Ctrl+Shift+Y", enabled: () => viewer.canRedoVisibility(), run: () => { if (!viewer.redoVisibility()) toast("Nothing to redo", "info"); } },
   { id: "vis.ghost", label: "Ghost hidden", icon: "eye-off", section: "Visibility", hint: "Hidden elements stay as a faint hatch instead of vanishing", pressed: () => viewer.isGhostHidden(), run: () => { viewer.setGhostHidden(!viewer.isGhostHidden()); shell.log(viewer.isGhostHidden() ? "Hidden elements are ghosted" : "Hidden elements are fully hidden"); ribbon.sync(); } },
+  { id: "vis.xray", label: "Transparent", icon: "eye", section: "Visibility", hint: "Draw the selection see-through; click again to make it solid", enabled: () => viewer.getSelection() !== null, run: () => { const ids = viewer.getSelectedIds(); const on = !ids.every((id) => viewer.isElementXray(id)); viewer.setXray(ids, on); ribbon.sync(); } },
+  { id: "vis.xrayrest", label: "Transp. unselected", icon: "eye", section: "Visibility", hint: "Keep the selection solid; everything else goes see-through", enabled: () => viewer.getSelection() !== null, run: () => { viewer.xrayAllExcept(viewer.getSelectedIds()); ribbon.sync(); } },
+  { id: "vis.xrayclear", label: "Opaque all", icon: "eye", section: "Visibility", enabled: () => viewer.getXrayCount() > 0, run: () => { viewer.clearXray(); ribbon.sync(); } },
+  { id: "vis.picksolid", label: "Ignore transparent", icon: "focus", section: "Visibility", hint: "Clicks and measurements pass through see-through elements", pressed: () => viewer.getPickIgnoreXray(), run: () => { viewer.setPickIgnoreXray(!viewer.getPickIgnoreXray()); ribbon.sync(); } },
+  { id: "vis.showthrough", label: "Show through", icon: "sparkle", section: "Visibility", hint: "The selection stays visible through walls", pressed: () => viewer.getShowThroughSelection(), run: () => { viewer.setShowThroughSelection(!viewer.getShowThroughSelection()); ribbon.sync(); } },
+  { id: "vis.grids", label: "Grid axes", icon: "table", section: "Visibility", hint: "IfcGrid axis lines with their bubble labels", enabled: hasModel, pressed: () => viewer.areGridsVisible(), run: () => { void viewer.setGridsVisible(!viewer.areGridsVisible()).then(() => { if (viewer.areGridsVisible() && viewer.getSceneInfo().meshCount > 0 && !document.querySelector(".ifc-grid-bubble")) toast("This model has no grid axes", "info"); ribbon.sync(); }).catch(reportError); } },
+  { id: "vis.edges", label: "Edges", icon: "section", section: "Visibility", hint: "Feature edge lines over the shading", enabled: hasModel, pressed: () => viewer.areEdgesVisible(), run: () => { viewer.setEdgesVisible(!viewer.areEdgesVisible()); ribbon.sync(); } },
   { id: "sel.clear", label: "Deselect", icon: "x", section: "Visibility", shortcut: "Esc", binding: "", enabled: () => viewer.getSelection() !== null, run: () => viewer.clearSelection() },
   { id: "vis.spaces", label: "Spaces", icon: "layers", section: "Visibility", hint: "IfcSpace geometry loads on demand", pressed: () => viewer.isCategoryVisible("IfcSpace"), run: () => void setCategory("IfcSpace").catch(reportError) },
   { id: "vis.openings", label: "Openings", icon: "layers", section: "Visibility", pressed: () => viewer.isCategoryVisible("IfcOpeningElement"), run: () => void setCategory("IfcOpeningElement").catch(reportError) },
@@ -1894,6 +1998,14 @@ registry.add([
   { id: "cam.right", label: "Right", icon: "cube", section: "Camera", shortcut: "2", run: () => viewer.viewFrom("right") },
   { id: "cam.top", label: "Top", icon: "cube", section: "Camera", shortcut: "3", run: () => viewer.viewFrom("top") },
   { id: "cam.iso", label: "Iso", icon: "cube", section: "Camera", shortcut: "4", run: () => viewer.viewFrom("iso") },
+  { id: "cam.back", label: "Back", icon: "cube", section: "Camera", run: () => viewer.viewFrom("back") },
+  { id: "cam.left", label: "Left", icon: "cube", section: "Camera", run: () => viewer.viewFrom("left") },
+  { id: "cam.bottom", label: "Bottom", icon: "cube", section: "Camera", run: () => viewer.viewFrom("bottom") },
+  { id: "cam.ortho", label: "Orthographic", icon: "ortho", section: "Camera", shortcut: "5", hint: "Parallel projection; toggling keeps the framing", pressed: () => viewer.getProjection() === "orthographic", run: () => { viewer.setProjection(viewer.getProjection() === "orthographic" ? "perspective" : "orthographic"); ribbon.sync(); } },
+  { id: "cam.rotl", label: "Rotate left", icon: "undo", section: "Camera", shortcut: "[", hint: "Quarter turn about the up axis", run: () => viewer.rotateView(90) },
+  { id: "cam.rotr", label: "Rotate right", icon: "redo", section: "Camera", shortcut: "]", run: () => viewer.rotateView(-90) },
+  { id: "cam.perp", label: "Perpendicular", icon: "focus", section: "Camera", shortcut: "N", hint: "Face the last-picked surface head on", enabled: hasModel, run: () => { if (!viewer.viewPerpendicular()) toast("No picked face; snapped to the nearest axis", "info"); } },
+  { id: "cam.fly", label: "Fly mode", icon: "walk", section: "Camera", shortcut: "6", hint: "First person: WASD moves, Q/E down and up, Shift is faster, wheel zooms, Shift+wheel sets speed, Esc exits", enabled: hasModel, pressed: () => viewer.isFlyMode(), run: () => viewer.setFlyMode(!viewer.isFlyMode()) },
 
   { id: "tool.measure", label: "Measure", icon: "ruler", section: "Tools", shortcut: "M", pressed: () => viewer.isMeasuring(), run: toggleMeasure },
   { id: "tool.section", label: "Section", icon: "section", section: "Tools", shortcut: "X", hint: "Slice on X, Y and Z", pressed: () => viewer.getSections().length > 0, run: toggleSection },
@@ -1906,23 +2018,30 @@ registry.add([
   { id: "analysis.clash", label: "Clash detection", icon: "alert", section: "Analyze", hint: "Find mesh intersections and clearance failures", enabled: hasModel, run: () => void plugins.open("clash") },
   { id: "analysis.health", label: "Model health", icon: "shield", section: "Analyze", hint: "Check identity, geometry and model quality", enabled: hasModel, run: () => void plugins.open("model-health") },
   { id: "analysis.compare", label: "Compare models", icon: "compare", section: "Analyze", hint: "Classify geometry and property changes", enabled: hasModel, run: () => void plugins.open("compare") },
+  { id: "analysis.ids", label: "IDS", icon: "clipboard", section: "Analyze", hint: "Open an IDS file and check the model against it", run: () => shell.selectTab("ids") },
+  { id: "analysis.ids-studio", label: "IDS authoring", icon: "clipboard", section: "Analyze", hint: "Write IDS 1.0 requirements, bind bSDD concepts and compare compliance", run: () => void plugins.open("ids-studio") },
+  { id: "analysis.schedule-4d", label: "4D Schedule", icon: "clock", section: "Analyze", hint: "IFC task graph, schedule CSV overlay, Gantt and construction timeline", enabled: hasModel, run: () => void plugins.open("schedule-4d") },
   { id: "analysis.takeoff", label: "Takeoff", icon: "calculator", section: "Analyze", hint: "Extract quantities from the model", enabled: hasModel, run: () => void plugins.open("takeoff") },
+  { id: "analysis.geo", label: "Geo Context", icon: "globe", section: "Analyze", hint: "Inspect CRS metadata, align models and exchange GeoJSON", enabled: hasModel, run: () => shell.selectTab("geo") },
 
   { id: "panel.tree", label: "Structure", icon: "panel-left-close", section: "Panels", shortcut: "Ctrl+B", pressed: () => shell.isPanelOpen("outliner"), run: () => { shell.togglePanel("outliner"); ribbon.sync(); } },
   { id: "panel.insp", label: "Inspector", icon: "panel-right-close", section: "Panels", shortcut: "\\", pressed: () => shell.isPanelOpen("inspector"), run: () => { shell.togglePanel("inspector"); ribbon.sync(); } },
   { id: "panel.props", label: "Properties", icon: "info", section: "Panels", shortcut: "P", run: () => shell.selectTab("properties") },
   { id: "panel.filters", label: "Filters", icon: "funnel", section: "Panels", shortcut: "R", run: () => shell.selectTab("filters") },
-  { id: "panel.ids", label: "IDS checks", icon: "clipboard", section: "Panels", hint: "Validate against a buildingSMART IDS", run: () => shell.selectTab("ids") },
-  { id: "panel.bcf", label: "Issues", icon: "flag", section: "Panels", hint: "BCF topics with viewpoints and snapshots", run: () => shell.selectTab("bcf") },
+  { id: "panel.geo", label: "Geo Context", icon: "globe", section: "Panels", hint: "CRS diagnostics, federation alignment and GeoJSON", run: () => shell.selectTab("geo") },
+  { id: "panel.ids", label: "IDS", icon: "clipboard", section: "Panels", hint: "Check the model against a buildingSMART IDS file", run: () => shell.selectTab("ids") },
+  { id: "panel.schedule-4d", label: "4D Schedule", icon: "clock", section: "Panels", hint: "Construction timeline, Gantt and task-to-product mapping", run: () => void plugins.open("schedule-4d") },
+  { id: "panel.bcf", label: "Issues", icon: "flag", section: "Panels", hint: "Local or OpenCDE BCF topics with viewpoints", run: () => shell.selectTab("bcf") },
   { id: "panel.ai", label: "Assistant", icon: "sparkle", section: "Panels", shortcut: "C", run: () => shell.selectTab("assistant") },
   { id: "panel.py", label: "Python console", icon: "terminal", section: "Panels", shortcut: "Y", hint: "Write IfcOpenShell yourself; opens as a plugin", run: () => void plugins.open("python") },
   { id: "panel.log", label: "Activity", icon: "activity", section: "Panels", shortcut: "L", run: () => shell.selectTab("activity") },
   { id: "panel.summary", label: "Summary", icon: "list", section: "Panels", run: () => showPane("summary") },
   { id: "panel.types", label: "Types", icon: "layers", section: "Panels", hint: "Browse the model by IFC class", run: () => showPane("types") },
+  { id: "panel.organize", label: "Organize", icon: "layers", section: "Panels", hint: "Groups, layers, classifications and materials", run: () => showPane("organize") },
   { id: "panel.structure", label: "Structure tree", icon: "layers", section: "Panels", run: () => showPane("tree") },
 
   { id: "bcf.new", label: "Raise issue", icon: "flag", section: "Review", hint: "Keeps the camera, the section and a snapshot", enabled: hasModel, run: () => void raiseIssue("", []).catch(reportError) },
-  { id: "ids.open", label: "IDS checks", icon: "clipboard", section: "Review", hint: "Load an .ids file and validate this model", enabled: hasModel, run: () => shell.selectTab("ids") },
+  { id: "ids.open", label: "IDS check", icon: "clipboard", section: "Review", hint: "Load an IDS 1.0 file and validate the model", run: () => shell.selectTab("ids") },
 
   { id: "ai.new", label: "New chat", icon: "message", section: "Assistant", run: newChat },
 
@@ -1949,9 +2068,11 @@ const RIBBON: RibbonTab[] = [
         { kind: "cmd", id: "app.connection", size: "sm" },
       ] },
       { label: "Output", items: [
-        { kind: "cmd", id: "file.export" },
-        { kind: "cmd", id: "file.screenshot", size: "sm" },
-        { kind: "cmd", id: "file.viewpoint", size: "sm" },
+        { kind: "cmd", id: "file.export", label: "IFC" },
+        { kind: "cmd", id: "file.mesh", label: "Mesh" },
+        { kind: "cmd", id: "file.screenshot", size: "sm", label: "Image" },
+        { kind: "cmd", id: "file.plan", size: "sm", label: "Plan" },
+        { kind: "cmd", id: "file.viewpoint", size: "sm", label: "View" },
       ] },
       { label: "App", items: [
         { kind: "cmd", id: "app.settings", size: "sm" },
@@ -1967,7 +2088,7 @@ const RIBBON: RibbonTab[] = [
     groups: [
       { label: "Assistant", items: [
         { kind: "cmd", id: "panel.ai" },
-        { kind: "cmd", id: "ai.new", size: "sm" },
+        { kind: "cmd", id: "ai.new", size: "sm", label: "New" },
       ] },
       { label: "Selection", items: [
         { kind: "cmd", id: "cam.fitsel" },
@@ -1977,18 +2098,18 @@ const RIBBON: RibbonTab[] = [
         { kind: "cmd", id: "vis.isolate" },
         { kind: "cmd", id: "vis.hide" },
         { kind: "cmd", id: "vis.all" },
-        { kind: "cmd", id: "vis.undo", size: "sm" },
-        { kind: "cmd", id: "vis.redo", size: "sm" },
+        { kind: "cmd", id: "vis.undo", size: "sm", label: "Undo vis." },
+        { kind: "cmd", id: "vis.redo", size: "sm", label: "Redo vis." },
       ] },
       { label: "Find", items: [
         { kind: "cmd", id: "vis.filters" },
-        { kind: "cmd", id: "vis.clear", size: "sm" },
+        { kind: "cmd", id: "vis.clear", size: "sm", label: "Clear" },
       ] },
       { label: "Edit", items: [
         { kind: "cmd", id: "edit.undo", size: "sm" },
         { kind: "cmd", id: "edit.redo", size: "sm" },
         { kind: "cmd", id: "edit.rename", size: "sm" },
-        { kind: "cmd", id: "edit.property", size: "sm" },
+        { kind: "cmd", id: "edit.property", size: "sm", label: "Property" },
         { kind: "cmd", id: "edit.apply", size: "sm" },
         { kind: "cmd", id: "edit.discard", size: "sm" },
         { kind: "cmd", id: "edit.delete", size: "sm" },
@@ -2005,11 +2126,32 @@ const RIBBON: RibbonTab[] = [
         { kind: "cmd", id: "cam.top", size: "sm" },
         { kind: "cmd", id: "cam.right", size: "sm" },
         { kind: "cmd", id: "cam.iso", size: "sm" },
+        { kind: "cmd", id: "cam.back", size: "sm" },
+        { kind: "cmd", id: "cam.left", size: "sm" },
+        { kind: "cmd", id: "cam.bottom", size: "sm" },
+      ] },
+      // Ribbon labels are deliberately shorter than the command labels the
+      // palette and tooltips show, so a tab fits without a scroll.
+      { label: "Navigate", items: [
+        { kind: "cmd", id: "cam.fly", label: "Fly" },
+        { kind: "cmd", id: "cam.ortho", label: "Ortho" },
+        { kind: "cmd", id: "cam.perp", size: "sm", label: "Perp." },
+        { kind: "cmd", id: "cam.rotl", size: "sm", label: "Rot. left" },
+        { kind: "cmd", id: "cam.rotr", size: "sm", label: "Rot. right" },
       ] },
       { label: "Display", items: [
-        { kind: "cmd", id: "vis.ghost", size: "sm" },
+        { kind: "cmd", id: "vis.ghost", size: "sm", label: "Ghost" },
         { kind: "cmd", id: "vis.spaces", size: "sm" },
         { kind: "cmd", id: "vis.openings", size: "sm" },
+        { kind: "cmd", id: "vis.grids", size: "sm", label: "Grids" },
+        { kind: "cmd", id: "vis.edges", size: "sm" },
+      ] },
+      { label: "Transparency", items: [
+        { kind: "cmd", id: "vis.xray", label: "Transp." },
+        { kind: "cmd", id: "vis.xrayrest", size: "sm", label: "Transp. rest" },
+        { kind: "cmd", id: "vis.xrayclear", size: "sm", label: "Opaque" },
+        { kind: "cmd", id: "vis.picksolid", size: "sm", label: "Ignore transp." },
+        { kind: "cmd", id: "vis.showthrough", size: "sm", label: "See through" },
       ] },
       { label: "Render", items: [
         { kind: "control", build: buildScaleControl },
@@ -2024,24 +2166,30 @@ const RIBBON: RibbonTab[] = [
     groups: [
       { label: "Measure", items: [
         { kind: "cmd", id: "tool.measure" },
-        { kind: "cmd", id: "analysis.smart-measure" },
+        { kind: "cmd", id: "analysis.smart-measure", label: "Smart" },
       ] },
       { label: "Cut", items: [
         { kind: "cmd", id: "tool.section" },
-        { kind: "cmd", id: "tool.box" },
+        { kind: "cmd", id: "tool.box", label: "Box" },
         { kind: "cmd", id: "tool.plan", size: "sm" },
-        { kind: "cmd", id: "analysis.section-workspace", size: "sm" },
+        { kind: "cmd", id: "analysis.section-workspace", size: "sm", label: "Drawing" },
       ] },
       { label: "Inspect", items: [
         { kind: "cmd", id: "cam.fitsel" },
         { kind: "cmd", id: "vis.isolate", size: "sm" },
-        { kind: "cmd", id: "panel.props", size: "sm" },
+        { kind: "cmd", id: "panel.props", size: "sm", label: "Props" },
       ] },
       { label: "Geometry", items: [
-        { kind: "cmd", id: "analysis.clash" },
-        { kind: "cmd", id: "analysis.health", size: "sm" },
-        { kind: "cmd", id: "analysis.compare", size: "sm" },
+        { kind: "cmd", id: "analysis.clash", label: "Clash" },
+        { kind: "cmd", id: "analysis.geo", size: "sm", label: "Geo" },
+        { kind: "cmd", id: "analysis.health", size: "sm", label: "Health" },
+        { kind: "cmd", id: "analysis.compare", size: "sm", label: "Compare" },
         { kind: "cmd", id: "analysis.takeoff", size: "sm" },
+      ] },
+      { label: "Requirements", items: [
+        { kind: "cmd", id: "analysis.ids", label: "IDS" },
+        { kind: "cmd", id: "analysis.ids-studio", size: "sm", label: "Author" },
+        { kind: "cmd", id: "analysis.schedule-4d", size: "sm", label: "4D" },
       ] },
     ],
   },
@@ -2109,6 +2257,11 @@ function buildScaleControl(): RibbonControl {
 }
 
 const ribbon = new Ribbon($("ribbon-tabs"), $("ribbon"), registry, RIBBON);
+
+viewer.onFlyChange((on) => {
+  ribbon.sync();
+  if (on) shell.log("Fly mode: WASD moves, Q/E down and up, wheel zooms, Shift+wheel sets speed, the plan shows where you are, Esc exits", "info", true);
+});
 
 // ---------------------------------------------------------------------------
 // Command palette: registry commands plus the model's own element classes
@@ -2350,6 +2503,15 @@ shell.viewerHost.addEventListener("contextmenu", (e) => {
       { separator: true },
       ...(count === 2 ? [{ label: "Measure shortest clearance", run: openSmartMeasure }] : []),
       { label: `Section box around selection${scope}`, run: sectionBoxAroundSelection },
+      { label: "Cut on this face", run: () => { if (!viewer.addSectionFromPick()) toast("No usable face normal here", "info"); } },
+      {
+        label: "Add note here",
+        run: () => promptForm("Add note", [{ key: "text", label: "Note", value: "", placeholder: "What should this say?" }], "Add", (values) => {
+          if (!values.text?.trim()) return void toast("A note needs text", "info");
+          viewer.addAnnotation({ text: values.text, at: pick.point, elementId: pick.expressID });
+          toast("Note added", "success");
+        }),
+      },
       { label: "Open section drawing", run: () => void plugins.open("section-workspace") },
       { separator: true },
       { label: `Isolate all ${type}`, run: () => isolateByType(type) },
@@ -2360,6 +2522,18 @@ shell.viewerHost.addEventListener("contextmenu", (e) => {
       { label: `Delete${scope}…`, run: deleteSelection },
       { separator: true },
       { label: "Properties", run: () => shell.selectTab("properties") },
+      ...((): Array<{ label: string; run: () => void }> => {
+        const guid = props?.attributes.find((a) => a.name === "GlobalId")?.value;
+        return typeof guid === "string" && guid
+          ? [{
+              label: "Copy GUID",
+              run: () => {
+                void navigator.clipboard.writeText(guid);
+                toast("GUID copied", "success");
+              },
+            }]
+          : [];
+      })(),
       {
         label: "Copy express ID",
         run: () => {

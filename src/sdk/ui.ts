@@ -43,6 +43,14 @@ export const nextFrame = (): Promise<void> =>
     });
   });
 
+/** The heading every panel opens with: what it does, plus an optional tag. */
+export function header(title: string, sub: string, tag = ""): HTMLElement {
+  return h("header", { class: "plug-head" }, [
+    h("div", { class: "grow" }, [h("h3", { text: title }), h("p", { text: sub })]),
+    ...(tag ? [h("span", { class: "plug-tag", text: tag })] : []),
+  ]);
+}
+
 /** A row of controls across the top of a panel. Strings become labels. */
 export function bar(...children: Array<Node | string>): HTMLElement {
   return h("div", { class: "plug-bar" }, children.map((c) =>

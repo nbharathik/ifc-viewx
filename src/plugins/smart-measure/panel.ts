@@ -1,5 +1,5 @@
 import {
-  bar, button, emptyState, field, formatLength, h, hint, number, page,
+  bar, button, emptyState, field, formatLength, h, header, hint, number, page,
 } from "@ifcviewx/sdk";
 import type {
   DistanceResult, ExtensionContext, ExtensionInstance, LaserAxisResult, LaserResult,
@@ -358,10 +358,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
     workflowButtons[1].addEventListener("click", () => selectWorkflow("laser"));
 
     root.append(
-      h("header", { class: "sm-head" }, [
-        h("div", {}, [h("h3", { text: "Smart measure" }), h("p", { text: "Check a pair or scan from one surface." })]),
-        h("span", { class: "sm-fidelity", text: precise ? "IFC" : "MESH" }),
-      ]),
+      header("Smart measure", "Check a pair or scan from one surface.", precise ? "IFC" : "MESH"),
       switcher,
     );
 

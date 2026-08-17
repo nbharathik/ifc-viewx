@@ -270,7 +270,9 @@ function sectionLabel(viewer: Viewer): string {
   if (box) return "section box";
   const planes = viewer.getSections();
   if (planes.length === 0) return "none";
-  return planes.map((plane) => `${plane.axis.toUpperCase()} at ${plane.offset.toFixed(2)} m`).join(", ");
+  return planes
+    .map((plane) => `${plane.axis ? plane.axis.toUpperCase() : plane.name} at ${plane.offset.toFixed(2)} m`)
+    .join(", ");
 }
 
 async function shot(viewer: Viewer, width: number): Promise<string | null> {

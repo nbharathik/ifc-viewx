@@ -7,11 +7,14 @@ import {
   CancelledError,
   type AsyncIfcEngine,
   type AsyncLoadOptions,
+  type IfcGridInfo,
   type IfcMesh,
+  type IfcTaskGraph,
   type ItemProperties,
   type LazyCategory,
   type LoadSource,
   type LoadedModelMeta,
+  type OrganizeIndex,
   type SpatialNode,
 } from './types.js';
 
@@ -76,6 +79,7 @@ export class InlineEngine implements AsyncIfcEngine {
       bounds: model.bounds,
       stats: { ...model.stats, downloadMs },
       tree,
+      geo: model.geo,
     };
   }
 
@@ -94,6 +98,18 @@ export class InlineEngine implements AsyncIfcEngine {
 
   async getCountsByType(modelID: number): Promise<Record<string, number>> {
     return this.adapter.getCountsByType(modelID);
+  }
+
+  async getTaskGraph(modelID: number): Promise<IfcTaskGraph> {
+    return this.adapter.getTaskGraph(modelID);
+  }
+
+  async getOrganizeIndex(modelID: number): Promise<OrganizeIndex> {
+    return this.adapter.getOrganizeIndex(modelID);
+  }
+
+  async getGridAxes(modelID: number): Promise<IfcGridInfo[]> {
+    return this.adapter.getGridAxes(modelID);
   }
 
   dispose(modelID: number): void {

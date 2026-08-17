@@ -2,6 +2,8 @@ import { modelOf } from "../viewer-core/ids.js";
 import { DoubleSide, Matrix3, Matrix4, Ray, Vector3 } from "three";
 import type { BvhPlacement, GeometryIndex } from "./geometryIndex.js";
 import type { LaserAxis, LaserAxisResult, LaserHit, LaserResult, LaserSpec } from "./types.js";
+import { scenePlacementMatrix, unpackModelTransforms } from "./modelTransform.js";
+import type { ModelTransform } from "../viewer-core/engine/types.js";
 
 export interface LaserRunOptions {
   cancelled?: () => boolean;
@@ -19,23 +21,6 @@ const DIRECTIONS: Array<{ axis: LaserAxis; index: number; sign: -1 | 1; vector: 
   { axis: "z", index: 2, sign: -1, vector: [0, 0, -1] },
   { axis: "z", index: 2, sign: 1, vector: [0, 0, 1] },
 ];
-
-function offsetsOf(values: Float64Array): Map<number, Point> {
-  const offsets = new Map<number, Point>();
-  for (let i = 0; i + 3 < values.length; i += 4) {
-    offsets.set(values[i], [values[i + 1], values[i + 2], values[i + 3]]);
-  }
-  return offsets;
-}
-
-function sceneMatrix(matrix: Float64Array, modelOrigin: Point, offset: Point, target: Matrix4): Matrix4 {
-  target.fromArray(matrix);
-  const values = target.elements;
-  values[12] = matrix[12] - modelOrigin[0] + offset[0];
-  values[13] = matrix[13] - modelOrigin[1] + offset[1];
-  values[14] = matrix[14] - modelOrigin[2] + offset[2];
-  return target;
-}
 
 function placementNormal(
   placement: BvhPlacement,
@@ -89,7 +74,7 @@ export async function runLaser(
   options: LaserRunOptions = {},
 ): Promise<LaserResult> {
   const started = Date.now();
-  const offsets = offsetsOf(spec.offsets);
+  const transforms = unpackModelTransforms(spec.transforms, spec.offsets);
   const epsilon = Math.max(1e-6, spec.epsilon ?? 1e-4);
   const maxDistance = Math.max(epsilon, spec.maxDistance ?? Infinity);
   const ids = [...spec.ids];
@@ -109,8 +94,10 @@ export async function runLaser(
     if (options.cancelled?.()) throw new DOMException("Geometry query cancelled", "AbortError");
     if (elementIndex > 0 && elementIndex % 128 === 0) await options.yieldTurn?.();
     const id = ids[elementIndex];
-    const offset = offsets.get(modelOf(id)) ?? [0, 0, 0];
-    const bounds = index.worldBounds(id, spec.modelOrigin, offset);
+    const transform: ModelTransform = transforms.get(modelOf(id)) ?? {
+      translation: [0, 0, 0], rotationZ: 0, scale: 1, source: "none",
+    };
+    const bounds = index.worldBounds(id, spec.modelOrigin, transform);
     if (!bounds) {
       missing += 1;
       continue;
@@ -121,7 +108,7 @@ export async function runLaser(
     if (!findSource && candidates.every((candidate) => !candidate)) continue;
     const placements = index.bvhPlacements(id);
     for (const placement of placements) {
-      const matrix = sceneMatrix(placement.matrix, spec.modelOrigin, offset, worldMatrix);
+      const matrix = scenePlacementMatrix(placement.matrix, spec.modelOrigin, transform, worldMatrix);
       inverseMatrix.copy(matrix).invert();
       normalMatrix.getNormalMatrix(matrix);
       if (findSource) {

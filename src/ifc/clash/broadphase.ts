@@ -20,12 +20,30 @@ const MAX_SPAN = 64;
 
 /** Grid pitch from the median box, so a cell holds a handful of items. */
 export function cellSize(items: BroadItem[]): number {
-  if (items.length === 0) return 1;
-  const sizes = items.map((item) =>
-    Math.max(item.max[0] - item.min[0], item.max[1] - item.min[1], item.max[2] - item.min[2]),
-  );
+  const sizes = items.flatMap((item) => {
+    const size = Math.max(
+      item.max[0] - item.min[0], item.max[1] - item.min[1], item.max[2] - item.min[2],
+    );
+    return Number.isFinite(size) && size >= 0 ? [size] : [];
+  });
+  if (sizes.length === 0) return 1;
   sizes.sort((a, b) => a - b);
   return Math.max(0.25, sizes[Math.floor(sizes.length / 2)] * 2);
+}
+
+function validItem(item: BroadItem): boolean {
+  return Number.isFinite(item.id) && item.min.every(Number.isFinite) && item.max.every(Number.isFinite) &&
+    item.min[0] <= item.max[0] && item.min[1] <= item.max[1] && item.min[2] <= item.max[2];
+}
+
+/** Invalid and repeated ids can otherwise create infinite grids or duplicate results. */
+function uniqueItems(items: BroadItem[]): BroadItem[] {
+  const ids = new Set<number>();
+  return items.filter((item) => {
+    if (!validItem(item) || ids.has(item.id)) return false;
+    ids.add(item.id);
+    return true;
+  });
 }
 
 function cellsOf(min: number[], max: number[], cell: number, keys: number[]): number[] {
@@ -71,13 +89,16 @@ export function candidatePairs(
   margin: number,
   visit: (item: BroadItem, candidates: BroadItem[]) => void,
 ): void {
-  if (a.length === 0 || b.length === 0) return;
-  const cell = cellSize(b);
+  const left = uniqueItems(a);
+  const right = uniqueItems(b);
+  if (left.length === 0 || right.length === 0) return;
+  const safeMargin = Number.isFinite(margin) ? Math.max(0, margin) : 0;
+  const cell = cellSize(right);
   const buckets = new Map<number, BroadItem[]>();
   const oversized: BroadItem[] = [];
   const keys: number[] = [];
 
-  for (const item of b) {
+  for (const item of right) {
     const span = cellsOf(item.min, item.max, cell, keys);
     if (span.length > MAX_SPAN) {
       oversized.push(item);
@@ -93,29 +114,29 @@ export function candidatePairs(
   // When the two sets share elements, a pair turns up from both directions.
   // Emitting only from the lower id keeps each one once, and costs a pair of
   // id sets that are not built at all when the sets are disjoint.
-  const bIds = new Set(b.map((item) => item.id));
-  const shared = a.some((item) => bIds.has(item.id));
-  const aIds = shared ? new Set(a.map((item) => item.id)) : null;
+  const bIds = new Set(right.map((item) => item.id));
+  const shared = left.some((item) => bIds.has(item.id));
+  const aIds = shared ? new Set(left.map((item) => item.id)) : null;
 
   const seen = new Set<number>();
-  for (const item of a) {
+  for (const item of left) {
     const candidates: BroadItem[] = [];
     seen.clear();
     const collect = (other: BroadItem): void => {
       if (other.id === item.id || seen.has(other.id)) return;
       seen.add(other.id);
       if (aIds && item.id > other.id && aIds.has(other.id) && bIds.has(item.id)) return;
-      if (boxesOverlap(item, other, margin)) candidates.push(other);
+      if (boxesOverlap(item, other, safeMargin)) candidates.push(other);
     };
     const span = cellsOf(
-      [item.min[0] - margin, item.min[1] - margin, item.min[2] - margin],
-      [item.max[0] + margin, item.max[1] + margin, item.max[2] + margin],
+      [item.min[0] - safeMargin, item.min[1] - safeMargin, item.min[2] - safeMargin],
+      [item.max[0] + safeMargin, item.max[1] + safeMargin, item.max[2] + safeMargin],
       cell,
       keys,
     );
     // Too big to bucket sensibly: it has to see everything, or it would be
     // compared against an arbitrary handful of cells.
-    if (span.length > MAX_SPAN) for (const other of b) collect(other);
+    if (span.length > MAX_SPAN) for (const other of right) collect(other);
     else for (const key of span) for (const other of buckets.get(key) ?? []) collect(other);
     for (const other of oversized) collect(other);
     if (candidates.length) visit(item, candidates);

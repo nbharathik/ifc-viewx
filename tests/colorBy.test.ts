@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { applyColors, computeColors, cssColor, type ColorResult } from "../src/ui/colorBy.js";
-import type { SpatialNode, Viewer } from "../src/viewer-core/viewer.js";
+import { applyColors, computeColors, computeColorsFromEntries, cssColor, CustomColors, materialColorEntries, type ColorResult } from "../src/ui/colorBy.js";
+import type { OrganizeIndex, SpatialNode, Viewer } from "../src/viewer-core/viewer.js";
 import type { ElementRow } from "../src/sdk/data.js";
 
 /** A tree with two storeys, so class and storey rules both have something. */
@@ -28,6 +28,10 @@ function fakeViewer(withGeometry: Set<number>): Viewer {
     hasGeometry: (id: number) => withGeometry.has(id),
     setColorOverride: () => undefined,
     clearColorOverride: () => undefined,
+    getModels: () => [
+      { index: 0, name: "arch.ifc" },
+      { index: 1, name: "mep.ifc" },
+    ],
   } as unknown as Viewer;
 }
 
@@ -105,6 +109,116 @@ describe("colour by property", () => {
   it("returns nothing when the rule points at a property no element carries", () => {
     const result = computeColors(fakeViewer(ALL), { kind: "property", key: "Nope.Missing" }, [row(10, {})]);
     expect(result.groups.map((g) => g.label)).toEqual(["(not set)"]);
+  });
+});
+
+describe("colour by model", () => {
+  it("groups every element under the model that owns its packed id", () => {
+    // The test tree's ids are all small, so they pack to model 0.
+    const result = computeColors(fakeViewer(ALL), { kind: "model" }, []);
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0].label).toBe("arch.ifc");
+    expect(result.groups[0].count).toBe(5);
+  });
+});
+
+describe("colour random per element", () => {
+  it("assigns every element a palette slot and ships the full palette", () => {
+    const result = computeColors(fakeViewer(ALL), { kind: "random" }, []);
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0].count).toBe(5);
+    expect(result.assignment.size).toBe(5);
+    expect(result.colors).toHaveLength(254);
+    for (const index of result.assignment.values()) {
+      expect(index).toBeGreaterThanOrEqual(1);
+      expect(index).toBeLessThanOrEqual(254);
+    }
+  });
+
+  it("is deterministic for the same ids", () => {
+    const a = computeColors(fakeViewer(ALL), { kind: "random" }, []);
+    const b = computeColors(fakeViewer(ALL), { kind: "random" }, []);
+    expect([...a.assignment.entries()]).toEqual([...b.assignment.entries()]);
+  });
+});
+
+describe("colour from prepared entries", () => {
+  it("orders groups largest first and assigns 1-based palette indices", () => {
+    const entries = new Map<string, number[]>([
+      ["Steel", [1, 2]],
+      ["Concrete", [3, 4, 5]],
+      ["Timber", [6]],
+    ]);
+    const result = computeColorsFromEntries(entries, () => true);
+    expect(result.groups.map((g) => g.label)).toEqual(["Concrete", "Steel", "Timber"]);
+    expect(result.assignment.get(3)).toBe(1);
+    expect(result.assignment.get(1)).toBe(2);
+    expect(result.assignment.get(6)).toBe(3);
+    expect([...result.assignment.values()].every((index) => index >= 1)).toBe(true);
+  });
+
+  it("skips ids without geometry and drops emptied groups", () => {
+    const entries = new Map<string, number[]>([
+      ["Concrete", [1, 2]],
+      ["Steel", [3]],
+    ]);
+    const result = computeColorsFromEntries(entries, (id) => id !== 3);
+    expect(result.groups.map((g) => g.label)).toEqual(["Concrete"]);
+    expect(result.assignment.has(3)).toBe(false);
+  });
+
+  it("turns organize materials into entries, merging duplicate names", () => {
+    const index: OrganizeIndex = {
+      groups: [],
+      layers: [],
+      classifications: [],
+      materials: [
+        { name: "Concrete", ids: [1, 2] },
+        { name: "Concrete", ids: [3] },
+        { name: "", ids: [4] },
+      ],
+    };
+    const entries = materialColorEntries(index);
+    expect(entries.get("Concrete")).toEqual([1, 2, 3]);
+    expect(entries.get("(unnamed)")).toEqual([4]);
+  });
+
+  it("keeps the material rule inert in computeColors; the dock feeds it entries", () => {
+    const result = computeColors(fakeViewer(ALL), { kind: "material" }, []);
+    expect(result.groups).toHaveLength(0);
+    expect(result.assignment.size).toBe(0);
+  });
+});
+
+describe("custom colours", () => {
+  it("stacks the picked colour over the active rule and steals its ids", () => {
+    const custom = new CustomColors();
+    custom.set([10, 11], [255, 0, 0]);
+    const base = computeColors(fakeViewer(ALL), { kind: "class" }, []);
+    const merged = custom.overlay(base);
+    const last = merged.groups[merged.groups.length - 1];
+    expect(last.label).toBe("Custom colour");
+    expect(last.count).toBe(2);
+    expect(merged.assignment.get(10)).toBe(merged.colors!.length);
+    // The rule's own groups keep their palette slots.
+    expect(merged.assignment.get(12)).toBe(base.assignment.get(12));
+  });
+
+  it("moves an element between colours instead of double-counting it", () => {
+    const custom = new CustomColors();
+    custom.set([10], [255, 0, 0]);
+    custom.set([10], [0, 255, 0]);
+    const merged = custom.overlay({ groups: [], assignment: new Map(), unset: 0 });
+    expect(merged.groups).toHaveLength(1);
+    expect(merged.groups[0].color).toEqual([0, 255, 0]);
+  });
+
+  it("overlays onto an empty rule as custom-only colouring", () => {
+    const custom = new CustomColors();
+    custom.set([10], [1, 2, 3]);
+    const merged = custom.overlay({ groups: [], assignment: new Map(), unset: 0 });
+    expect(merged.groups).toHaveLength(1);
+    expect(merged.assignment.get(10)).toBe(1);
   });
 });
 

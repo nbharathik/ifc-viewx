@@ -16,6 +16,7 @@ import type { ModelElement } from "../sdk/types.js";
 import type { Viewer } from "../viewer-core/viewer.js";
 import { geometryService } from "../geometry/service.js";
 import { clashClassPair } from "./clash/workflow.js";
+import { packedModelTransforms } from "../geometry/modelTransform.js";
 
 export type { ClashKind, ClashPair, SweepProgress, SweepResult } from "./clash/types.js";
 export { CLASH_LIMIT } from "./clash/types.js";
@@ -83,14 +84,22 @@ function sweepSpec(viewer: Viewer, a: number[], b: number[], options: ClashOptio
     b: Float64Array.from(b),
     origin: viewer.getModelOrigin(),
     offsets: modelOffsets(viewer),
+    transforms: packedModelTransforms(viewer.getModels()),
     toleranceMm: options.toleranceMm ?? DEFAULT_TOLERANCE_MM,
     clearanceMm: Math.max(0, options.clearanceMm ?? 0),
     limit: options.limit ?? CLASH_LIMIT,
   };
 }
 
-export function detectClashes(viewer: Viewer, a: number[], b: number[], options: ClashOptions = {}): Promise<SweepResult> {
-  return geometryService(viewer).clash(sweepSpec(viewer, a, b, options), options.onProgress, options.signal);
+export async function detectClashes(viewer: Viewer, a: number[], b: number[], options: ClashOptions = {}): Promise<SweepResult> {
+  const result = await geometryService(viewer).clash(sweepSpec(viewer, a, b, options), options.onProgress, options.signal);
+  for (const hit of result.hits) {
+    const projected = typeof viewer.sceneToGeoreferenced === 'function'
+      ? viewer.sceneToGeoreferenced(hit.point)
+      : null;
+    if (projected) hit.georeferenced = projected;
+  }
+  return result;
 }
 
 export function cancelClash(viewer: Viewer): void {
@@ -147,6 +156,10 @@ export async function clashReport(
       primary: `${hit.aType.replace(/^Ifc/, "")} #${hit.a}`,
       [hit.kind === "hard" ? "penetrationMm" : "gapMm"]: Math.round(hit.distance * MM),
       at: hit.point.map((value) => Number(value.toFixed(3))),
+      ...(hit.georeferenced ? {
+        projectedAt: hit.georeferenced.coordinates.map((value) => Number(value.toFixed(3))),
+        crs: hit.georeferenced.crs,
+      } : {}),
     };
   };
   const rows = result.hits.map(row);

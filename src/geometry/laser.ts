@@ -1,6 +1,7 @@
 import type { Viewer } from "../viewer-core/viewer.js";
 import { geometryService } from "./service.js";
 import type { LaserResult, LaserSpec } from "./types.js";
+import { packedModelTransforms } from "./modelTransform.js";
 
 export type { LaserAxis, LaserAxisResult, LaserHit, LaserResult } from "./types.js";
 
@@ -41,6 +42,7 @@ export function measureLaser(
     ids: new Float64Array(ids),
     modelOrigin: viewer.getModelOrigin(),
     offsets: modelOffsets(viewer),
+    transforms: packedModelTransforms(viewer.getModels()),
     maxDistance: options.maxDistance,
     epsilon: options.epsilon,
   };

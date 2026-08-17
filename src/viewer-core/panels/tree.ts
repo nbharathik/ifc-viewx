@@ -115,7 +115,19 @@ export class TreePanel {
     const glass = this.doc.createElement('span');
     glass.className = 'ifc-search__icon';
     glass.innerHTML = SEARCH_ICON;
-    field.append(glass, this.search, this.count, this.clearBtn, this.isolateBtn);
+    // BIMVision-style expand level: open the tree to a fixed depth in one go.
+    const levels = this.doc.createElement('span');
+    levels.className = 'ifc-tree-levels';
+    for (const [label, level, title] of [
+      ['1', 4, 'Expand to storeys'],
+      ['2', 5, 'Expand to element groups'],
+      ['*', Number.POSITIVE_INFINITY, 'Expand everything'],
+    ] as Array<[string, number, string]>) {
+      const btn = this.iconBtn('', title, () => this.expandToLevel(level));
+      btn.textContent = label;
+      levels.appendChild(btn);
+    }
+    field.append(glass, this.search, this.count, levels, this.clearBtn, this.isolateBtn);
     if (!this.source.isolate) this.isolateBtn.classList.add('ifc-hidden');
     head.appendChild(field);
     this.root.appendChild(head);
@@ -598,6 +610,18 @@ export class TreePanel {
   expand(expressID: number): void {
     if (this.expanded.has(expressID)) return;
     this.expanded.add(expressID);
+    this.flatten();
+    this.repaint();
+  }
+
+  /** Open every branch above `level` and close the rest; Infinity opens all. */
+  expandToLevel(level: number): void {
+    this.expanded.clear();
+    for (let i = 0; i < this.nodes.length; i++) {
+      if (this.nodes[i].children.length && this.depth[i] < level) {
+        this.expanded.add(this.nodes[i].expressID);
+      }
+    }
     this.flatten();
     this.repaint();
   }

@@ -1,50 +1,14 @@
 IFCViewX
-Copyright 2026 Bharathi Kannan N
+Copyright 2026 the IFCViewX authors
 
-This product includes software developed by Bharathi Kannan N.
+Licensed under the Apache License, Version 2.0.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+This product depends on third-party packages distributed under their own
+licenses, none of which are bundled as source in this repository:
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
---------------------------------------------------------------------------
-Third-party components
-
-This product bundles or depends on the following third-party software.
-Each remains under its own license and copyright.
-
-  three.js - MIT License
-  Copyright (c) 2010-present three.js authors
-  https://github.com/mrdoob/three.js
-
-  web-ifc - Mozilla Public License 2.0
-  Copyright (c) That Open Company
-  https://github.com/ThatOpen/engine_web-ifc
-
-  IfcOpenShell - GNU Lesser General Public License v3.0
-  Copyright (c) IfcOpenShell contributors
-  https://github.com/IfcOpenShell/IfcOpenShell
-
-  Pyodide - Mozilla Public License 2.0
-  Copyright (c) Pyodide contributors and Mozilla
-  https://github.com/pyodide/pyodide
-
-  Model Context Protocol Python SDK - MIT License
-  Copyright (c) Anthropic, PBC
-  https://github.com/modelcontextprotocol/python-sdk
-
-  FastAPI - MIT License
-  Copyright (c) Sebastian Ramirez
-  https://github.com/fastapi/fastapi
-
-  Uvicorn - BSD 3-Clause License
-  Copyright (c) Encode OSS Ltd.
-  https://github.com/encode/uvicorn
+- three (MIT), three-mesh-bvh (MIT), fflate (MIT), exceljs (MIT): npm
+  dependencies.
+- web-ifc (MPL-2.0): used as an unmodified npm dependency.
+- Pyodide (MPL-2.0) and IfcOpenShell (LGPL-3.0): optional runtime downloads,
+  loaded as separate artifacts when the Python features are used; never
+  bundled into the viewer build.

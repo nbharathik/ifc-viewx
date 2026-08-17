@@ -11,11 +11,14 @@ import {
   CancelledError,
   type AsyncIfcEngine,
   type AsyncLoadOptions,
+  type IfcGridInfo,
   type IfcMesh,
+  type IfcTaskGraph,
   type ItemProperties,
   type LazyCategory,
   type LoadSource,
   type LoadedModelMeta,
+  type OrganizeIndex,
 } from './types.js';
 
 export const FORMAT_VERSION = 1;
@@ -167,7 +170,16 @@ interface CacheManifest {
   stats: LoadedModelMeta['stats'];
   bounds: LoadedModelMeta['bounds'];
   tree: LoadedModelMeta['tree'];
+  geo?: LoadedModelMeta['geo'];
 }
+
+const emptyGeo = (): LoadedModelMeta['geo'] => ({
+  schema: '',
+  projectedCrs: null,
+  operation: null,
+  trueNorth: null,
+  warnings: ['Georeferencing metadata is unavailable in this converted cache.'],
+});
 
 interface CacheHit {
   manifest: CacheManifest;
@@ -599,7 +611,7 @@ export class CachedEngine implements AsyncIfcEngine {
       slot.live = meta.modelID;
       if (writer) {
         void writer
-          .commit({ stats: meta.stats, bounds: meta.bounds, tree: meta.tree })
+          .commit({ stats: meta.stats, bounds: meta.bounds, tree: meta.tree, geo: meta.geo })
           .catch(() => undefined);
       }
       // The slot, not the inner handle: callers address models through here.
@@ -651,7 +663,13 @@ export class CachedEngine implements AsyncIfcEngine {
       options.onProgress?.({ phase: 'geometry', entities: meshes, totalEntities, meshes });
     }
     options.onProgress?.({ phase: 'done', entities: totalEntities, totalEntities, meshes });
-    return { modelID: slotID, bounds: manifest.bounds, stats: manifest.stats, tree: manifest.tree };
+    return {
+      modelID: slotID,
+      bounds: manifest.bounds,
+      stats: manifest.stats,
+      tree: manifest.tree,
+      geo: manifest.geo ?? emptyGeo(),
+    };
   }
 
   private async replay(
@@ -677,6 +695,7 @@ export class CachedEngine implements AsyncIfcEngine {
       bounds: hit.manifest.bounds,
       stats: { ...hit.manifest.stats, parseMs: 0, geometryMs: 0 },
       tree: hit.manifest.tree,
+      geo: hit.manifest.geo ?? emptyGeo(),
     };
   }
 
@@ -728,6 +747,21 @@ export class CachedEngine implements AsyncIfcEngine {
   async getCountsByType(modelID: number): Promise<Record<string, number>> {
     const id = await this.ensureLive(modelID);
     return this.inner.getCountsByType(id);
+  }
+
+  async getTaskGraph(modelID: number): Promise<IfcTaskGraph> {
+    const id = await this.ensureLive(modelID);
+    return this.inner.getTaskGraph(id);
+  }
+
+  async getOrganizeIndex(modelID: number): Promise<OrganizeIndex> {
+    const id = await this.ensureLive(modelID);
+    return this.inner.getOrganizeIndex(id);
+  }
+
+  async getGridAxes(modelID: number): Promise<IfcGridInfo[]> {
+    const id = await this.ensureLive(modelID);
+    return this.inner.getGridAxes(id);
   }
 
   dispose(modelID: number): void {

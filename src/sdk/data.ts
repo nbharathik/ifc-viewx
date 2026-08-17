@@ -173,6 +173,74 @@ export function saveCsv(name: string, headers: string[], rows: Array<Array<Value
   download(name, `\uFEFF${toCsv(headers, rows)}`, "text/csv;charset=utf-8");
 }
 
+export interface XlsxOptions {
+  /** Worksheet name. Excel rejects []:*?/\ and anything past 31 characters. */
+  sheet?: string;
+  /** Widest an auto-sized column may grow, in characters. */
+  maxWidth?: number;
+}
+
+const XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+/** Rows sampled for column widths; a takeoff of 100k rows should not be scanned twice. */
+const WIDTH_SAMPLE = 500;
+
+/**
+ * The saveCsv call with a real workbook behind it: numbers stay numbers, so a
+ * column sums in Excel. exceljs is 900 kB, so it is imported here and nowhere
+ * else, which keeps it out of the main chunk.
+ */
+export async function saveXlsx(
+  name: string,
+  headers: string[],
+  rows: Array<Array<Value | undefined>>,
+  options: XlsxOptions = {},
+): Promise<void> {
+  download(name, await toXlsx(headers, rows, options), XLSX_TYPE);
+}
+
+/** The same workbook as bytes, for a caller that ships it somewhere other than a download. */
+export async function toXlsx(
+  headers: string[],
+  rows: Array<Array<Value | undefined>>,
+  options: XlsxOptions = {},
+): Promise<ArrayBuffer> {
+  const module = await import("exceljs");
+  const Workbook = module.Workbook ?? (module as unknown as { default: typeof module }).default.Workbook;
+  const book = new Workbook();
+  const sheet = book.addWorksheet(sheetName(options.sheet), {
+    views: [{ state: "frozen", ySplit: 1 }],
+  });
+  sheet.addRow(headers.map((header) => String(header)));
+  for (const row of rows) sheet.addRow(headers.map((_, at) => cell(row[at])));
+  const head = sheet.getRow(1);
+  head.font = { bold: true };
+  head.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEDF1F6" } };
+  head.border = { bottom: { style: "thin", color: { argb: "FFC7D0DA" } } };
+  const max = Math.max(10, options.maxWidth ?? 56);
+  const sample = rows.slice(0, WIDTH_SAMPLE);
+  headers.forEach((header, at) => {
+    let width = String(header).length;
+    for (const row of sample) width = Math.max(width, String(row[at] ?? "").length);
+    sheet.getColumn(at + 1).width = Math.min(max, width + 2);
+  });
+  if (headers.length) {
+    sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: headers.length } };
+  }
+  return book.xlsx.writeBuffer();
+}
+
+/** Never a formula: a leading "=" in model data is text, not something to evaluate. */
+function cell(value: Value | undefined): string | number | boolean | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "boolean") return value;
+  return String(value);
+}
+
+function sheetName(value = "Sheet1"): string {
+  return (value.replace(/[[\]:*?/\\]/g, " ").trim() || "Sheet1").slice(0, 31);
+}
+
 /** Tab separated, which is what a spreadsheet expects from the clipboard. */
 export function copyTable(headers: string[], rows: Array<Array<Value | undefined>>): void {
   const text = [headers, ...rows].map((row) => row.map((cell) => String(cell ?? "")).join("\t")).join("\n");

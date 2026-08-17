@@ -3,7 +3,7 @@
 // One click isolates a level and leaves the camera alone, which is what makes
 // stepping up and down readable. The ceiling cut puts a horizontal section at
 // the level above so you look down into the storey instead of at its slab.
-import { bar, button, emptyState, h, iconButton, note, page } from "@ifcviewx/sdk";
+import { bar, button, emptyState, h, header, iconButton, note, page } from "@ifcviewx/sdk";
 import type { ExtensionContext, ExtensionInstance, SpatialNode } from "@ifcviewx/sdk";
 
 interface Storey {
@@ -21,7 +21,11 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
 
   const list = h("div", { class: "plug-results" });
   const head = h("div", {});
-  const root = page(head, list);
+  const root = page(
+    header("Storey navigator", "Walk the building one level at a time. The camera stays put."),
+    head,
+    list,
+  );
 
   const collect = (): Storey[] => {
     const tree = ctx.model.tree();

@@ -35,19 +35,19 @@ export const SHORTCUTS: CatalogShortcut[] = [
   defineShortcut({
     id: "bcf",
     name: "Issue Tracker",
-    tagline: "Capture issues on the model and export them as BCF",
+    tagline: "Keep BCF local or sync it with an OpenCDE project",
     about:
-      "Every topic stores the camera, the section planes, the selection and a snapshot of the viewport, so reopening one puts you back exactly where it was raised. Topics live in this browser beside the model and export as a BCF 2.1 archive other BIM tools can read.",
+      "Every topic stores the camera, section planes, selection and viewport snapshot, so reopening one returns to the place it was raised. Review locally, export a BCF 2.1 archive, or connect a buildingSMART OpenCDE BCF 3.0 project. Server changes stay in a visible queue until you press Sync.",
     icon: "flag",
     category: "Collaboration",
-    keywords: "bcf topics comments markup review snapshot viewpoint coordination issues",
+    keywords: "bcf opencde cde topics comments markup review snapshot viewpoint coordination issues sync",
     tier: "core",
     command: "panel.bcf",
     does: [
       "One capture keeps view, section, selection and snapshot",
-      "Status, priority and assignee, with filtering",
-      "Reopen a topic to restore the exact viewpoint",
-      "Export a BCF 2.1 zip for other tools",
+      "OpenCDE BCF 3.0 projects, server fields and assignees",
+      "Explicit, retryable sync with a visible offline queue",
+      "BCF 2.1 zip import and export for other BIM tools",
     ],
   }),
   defineShortcut({

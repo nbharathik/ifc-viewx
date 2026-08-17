@@ -5,6 +5,10 @@ export { extractSectionContours, type SectionContourOptions } from "./section.js
 export type { SectionAxis, SectionContourResult, SectionPolyline } from "./types.js";
 export { geometrySignatures, type GeometrySignatureOptions } from "./signatures.js";
 export type { GeometrySignature, GeometrySignatureResult } from "./types.js";
+export { measureVolumes, type VolumeOptions } from "./volumes.js";
+export { classifyByPlane, classifyByPlanes, type ClassifyPlane, type PlaneClassifyOptions } from "./plane.js";
+export type { ElementVolume, VolumesResult, PlaneClassifyResult } from "./types.js";
+export { elementMeshes, type MeshesOptions, type MeshesResult } from "./meshes.js";
 export { GeometryService, geometryService } from "./service.js";
 export { GeometryIndex, type GeometryBounds } from "./geometryIndex.js";
 export type { GeometryDiagnostics } from "./types.js";

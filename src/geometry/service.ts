@@ -3,11 +3,12 @@ import { chunkTransfers, type TriangleStore } from "../viewer-core/scene/triangl
 import type { Viewer } from "../viewer-core/viewer.js";
 import type {
   DistanceResult, DistanceSpec, GeometryDiagnostics, GeometryRequest, GeometryResponse, LaserResult, LaserSpec,
-  SectionContourResult, SectionContourSpec, GeometrySignatureResult, GeometrySignatureSpec,
+  MeshesResult, MeshesSpec, SectionContourResult, SectionContourSpec, GeometrySignatureResult, GeometrySignatureSpec,
+  VolumesResult, VolumesSpec, PlaneClassifyResult, PlaneClassifySpec,
 } from "./types.js";
 
 interface Pending {
-  kind: "clash" | "distance" | "laser" | "sectionContours" | "signatures";
+  kind: "clash" | "distance" | "laser" | "sectionContours" | "signatures" | "volumes" | "classifyPlane" | "meshes";
   resolve(value: unknown): void;
   reject(error: Error): void;
   onProgress?(progress: SweepProgress): void;
@@ -24,6 +25,9 @@ interface InlineRunner {
   laser(spec: LaserSpec, cancelled?: () => boolean): Promise<LaserResult>;
   sectionContours(spec: SectionContourSpec, cancelled?: () => boolean): Promise<SectionContourResult>;
   signatures(spec: GeometrySignatureSpec, cancelled?: () => boolean): Promise<GeometrySignatureResult>;
+  volumes(spec: VolumesSpec, cancelled?: () => boolean): Promise<VolumesResult>;
+  classifyPlane(spec: PlaneClassifySpec, cancelled?: () => boolean): Promise<PlaneClassifyResult>;
+  meshes(spec: MeshesSpec, cancelled?: () => boolean): Promise<MeshesResult>;
 }
 
 export class GeometryService {
@@ -32,6 +36,7 @@ export class GeometryService {
   private starting: Promise<void> | null = null;
   private readonly pending = new Map<number, Pending>();
   private readonly cancelled = new Set<number>();
+  private readonly inlineActive = new Map<number, Pending["kind"]>();
   private sequence = 0;
 
   constructor(private readonly store: TriangleStore) {}
@@ -63,11 +68,13 @@ export class GeometryService {
     if (this.inline) {
       const abort = (): void => void this.cancelled.add(id);
       signal?.addEventListener("abort", abort, { once: true });
+      this.inlineActive.set(id, "clash");
       try {
         const result = await this.inline.clash(spec, onProgress, () => this.cancelled.has(id));
         if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
         return result;
       } finally {
+        this.inlineActive.delete(id);
         signal?.removeEventListener("abort", abort);
         this.cancelled.delete(id);
       }
@@ -87,6 +94,7 @@ export class GeometryService {
         spec.a.buffer,
         spec.b.buffer,
         spec.offsets.buffer,
+        ...(spec.transforms ? [spec.transforms.buffer] : []),
       ] as Transferable[]);
     });
   }
@@ -113,6 +121,7 @@ export class GeometryService {
       if (signal?.aborted) return abort();
       this.worker?.postMessage({ type: "distance", id, priority: 0, spec } satisfies GeometryRequest, [
         spec.offsets.buffer,
+        ...(spec.transforms ? [spec.transforms.buffer] : []),
       ] as Transferable[]);
     });
   }
@@ -125,11 +134,13 @@ export class GeometryService {
     if (this.inline) {
       const abort = (): void => void this.cancelled.add(id);
       signal?.addEventListener("abort", abort, { once: true });
+      this.inlineActive.set(id, "laser");
       try {
         const result = await this.inline.laser(spec, () => this.cancelled.has(id));
         if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
         return result;
       } finally {
+        this.inlineActive.delete(id);
         signal?.removeEventListener("abort", abort);
         this.cancelled.delete(id);
       }
@@ -147,6 +158,7 @@ export class GeometryService {
       this.worker?.postMessage({ type: "laser", id, priority: 0, spec } satisfies GeometryRequest, [
         spec.ids.buffer,
         spec.offsets.buffer,
+        ...(spec.transforms ? [spec.transforms.buffer] : []),
       ] as Transferable[]);
     });
   }
@@ -159,11 +171,13 @@ export class GeometryService {
     if (this.inline) {
       const abort = (): void => void this.cancelled.add(id);
       signal?.addEventListener("abort", abort, { once: true });
+      this.inlineActive.set(id, "sectionContours");
       try {
         const result = await this.inline.sectionContours(spec, () => this.cancelled.has(id));
         if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
         return result;
       } finally {
+        this.inlineActive.delete(id);
         signal?.removeEventListener("abort", abort);
         this.cancelled.delete(id);
       }
@@ -181,6 +195,7 @@ export class GeometryService {
       this.worker?.postMessage({ type: "sectionContours", id, priority: 0, spec } satisfies GeometryRequest, [
         spec.ids.buffer,
         spec.offsets.buffer,
+        ...(spec.transforms ? [spec.transforms.buffer] : []),
       ] as Transferable[]);
     });
   }
@@ -193,11 +208,13 @@ export class GeometryService {
     if (this.inline) {
       const abort = (): void => void this.cancelled.add(id);
       signal?.addEventListener("abort", abort, { once: true });
+      this.inlineActive.set(id, "signatures");
       try {
         const result = await this.inline.signatures(spec, () => this.cancelled.has(id));
         if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
         return result;
       } finally {
+        this.inlineActive.delete(id);
         signal?.removeEventListener("abort", abort);
         this.cancelled.delete(id);
       }
@@ -218,6 +235,117 @@ export class GeometryService {
     });
   }
 
+  async volumes(spec: VolumesSpec, signal?: AbortSignal): Promise<VolumesResult> {
+    if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
+    await this.start();
+    const id = ++this.sequence;
+    this.cancelled.delete(id);
+    if (this.inline) {
+      const abort = (): void => void this.cancelled.add(id);
+      signal?.addEventListener("abort", abort, { once: true });
+      this.inlineActive.set(id, "volumes");
+      try {
+        const result = await this.inline.volumes(spec, () => this.cancelled.has(id));
+        if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
+        return result;
+      } finally {
+        this.inlineActive.delete(id);
+        signal?.removeEventListener("abort", abort);
+        this.cancelled.delete(id);
+      }
+    }
+    return new Promise<VolumesResult>((resolve, reject) => {
+      const abort = (): void => this.cancelRequest(id);
+      this.pending.set(id, {
+        kind: "volumes",
+        resolve,
+        reject,
+        cleanup: () => signal?.removeEventListener("abort", abort),
+      });
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) return abort();
+      this.worker?.postMessage({ type: "volumes", id, priority: 1, spec } satisfies GeometryRequest, [
+        spec.ids.buffer,
+        spec.offsets.buffer,
+        ...(spec.transforms ? [spec.transforms.buffer] : []),
+      ] as Transferable[]);
+    });
+  }
+
+  async classifyPlane(spec: PlaneClassifySpec, signal?: AbortSignal): Promise<PlaneClassifyResult> {
+    if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
+    await this.start();
+    const id = ++this.sequence;
+    this.cancelled.delete(id);
+    if (this.inline) {
+      const abort = (): void => void this.cancelled.add(id);
+      signal?.addEventListener("abort", abort, { once: true });
+      this.inlineActive.set(id, "classifyPlane");
+      try {
+        const result = await this.inline.classifyPlane(spec, () => this.cancelled.has(id));
+        if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
+        return result;
+      } finally {
+        this.inlineActive.delete(id);
+        signal?.removeEventListener("abort", abort);
+        this.cancelled.delete(id);
+      }
+    }
+    return new Promise<PlaneClassifyResult>((resolve, reject) => {
+      const abort = (): void => this.cancelRequest(id);
+      this.pending.set(id, {
+        kind: "classifyPlane",
+        resolve,
+        reject,
+        cleanup: () => signal?.removeEventListener("abort", abort),
+      });
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) return abort();
+      this.worker?.postMessage({ type: "classifyPlane", id, priority: 0, spec } satisfies GeometryRequest, [
+        spec.ids.buffer,
+        spec.offsets.buffer,
+        ...(spec.transforms ? [spec.transforms.buffer] : []),
+      ] as Transferable[]);
+    });
+  }
+
+  async meshes(spec: MeshesSpec, signal?: AbortSignal): Promise<MeshesResult> {
+    if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
+    await this.start();
+    const id = ++this.sequence;
+    this.cancelled.delete(id);
+    if (this.inline) {
+      const abort = (): void => void this.cancelled.add(id);
+      signal?.addEventListener("abort", abort, { once: true });
+      this.inlineActive.set(id, "meshes");
+      try {
+        const result = await this.inline.meshes(spec, () => this.cancelled.has(id));
+        if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
+        return result;
+      } finally {
+        this.inlineActive.delete(id);
+        signal?.removeEventListener("abort", abort);
+        this.cancelled.delete(id);
+      }
+    }
+    return new Promise<MeshesResult>((resolve, reject) => {
+      const abort = (): void => this.cancelRequest(id);
+      this.pending.set(id, {
+        kind: "meshes",
+        resolve,
+        reject,
+        cleanup: () => signal?.removeEventListener("abort", abort),
+      });
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) return abort();
+      this.worker?.postMessage({ type: "meshes", id, priority: 1, spec } satisfies GeometryRequest, [
+        spec.ids.buffer,
+        spec.offsets.buffer,
+        ...(spec.transforms ? [spec.transforms.buffer] : []),
+      ] as Transferable[]);
+    });
+  }
+
   cancelClash(): void {
     this.cancelKind("clash");
   }
@@ -232,10 +360,20 @@ export class GeometryService {
         import("./laserQuery.js"),
         import("./sectionQuery.js"),
         import("./signatureQuery.js"),
-      ]).then(([{ GeometryIndex }, { runSweep }, { runDistance }, { runLaser }, { runSectionContours }, { runGeometrySignatures }]) => {
+        import("./volumeQuery.js"),
+        import("./planeQuery.js"),
+        import("./meshQuery.js"),
+      ]).then(([
+        { GeometryIndex }, { runSweep }, { runDistance }, { runLaser },
+        { runSectionContours }, { runGeometrySignatures }, { runVolumes }, { runClassifyPlane }, { runMeshes },
+      ]) => {
         const index = new GeometryIndex();
         this.inline = {
-          clash: (spec, onProgress, cancelled) => runSweep(index, spec, { onProgress, cancelled }),
+          clash: (spec, onProgress, cancelled) => runSweep(index, spec, {
+            onProgress,
+            cancelled,
+            yieldTurn: () => new Promise((resolve) => setTimeout(resolve, 0)),
+          }),
           distance: (spec) => runDistance(index, spec),
           laser: (spec, cancelled) => runLaser(index, spec, { cancelled }),
           sectionContours: (spec, cancelled) => runSectionContours(index, spec, {
@@ -246,15 +384,27 @@ export class GeometryService {
             cancelled,
             yieldTurn: () => new Promise((resolve) => setTimeout(resolve, 0)),
           }),
+          volumes: (spec, cancelled) => runVolumes(index, spec, {
+            cancelled,
+            yieldTurn: () => new Promise((resolve) => setTimeout(resolve, 0)),
+          }),
+          classifyPlane: (spec, cancelled) => runClassifyPlane(index, spec, {
+            cancelled,
+            yieldTurn: () => new Promise((resolve) => setTimeout(resolve, 0)),
+          }),
+          meshes: (spec, cancelled) => runMeshes(index, spec, {
+            cancelled,
+            yieldTurn: () => new Promise((resolve) => setTimeout(resolve, 0)),
+          }),
         };
         this.store.connect({
           chunk: (chunk) => index.addChunk(chunk),
           dropModel: (model) => {
-            this.cancelKind("clash");
+            this.cancelInlineActive();
             index.dropModel(model);
           },
           clear: () => {
-            this.cancelKind("clash");
+            this.cancelInlineActive();
             index.clear();
           },
           dispose: () => this.shutdown(),
@@ -311,13 +461,17 @@ export class GeometryService {
       if (pending.kind !== kind) continue;
       this.pending.delete(id);
       pending.cleanup?.();
-      this.cancelled.add(id);
+      if (this.inline) this.cancelled.add(id);
       this.worker?.postMessage({ type: "cancel", id } satisfies GeometryRequest);
       pending.reject(new DOMException("Geometry query cancelled", "AbortError"));
     }
-    if (this.inline && kind === "clash") {
-      this.cancelled.add(this.sequence);
+    for (const [id, active] of this.inlineActive) {
+      if (active === kind) this.cancelled.add(id);
     }
+  }
+
+  private cancelInlineActive(): void {
+    for (const id of this.inlineActive.keys()) this.cancelled.add(id);
   }
 
   private cancelRequest(id: number): void {
@@ -325,7 +479,7 @@ export class GeometryService {
     if (!pending) return;
     this.pending.delete(id);
     pending.cleanup?.();
-    this.cancelled.add(id);
+    if (this.inline) this.cancelled.add(id);
     this.worker?.postMessage({ type: "cancel", id } satisfies GeometryRequest);
     pending.reject(new DOMException("Geometry query cancelled", "AbortError"));
   }
@@ -346,6 +500,7 @@ export class GeometryService {
     this.inline = null;
     this.starting = null;
     this.cancelled.clear();
+    this.inlineActive.clear();
   }
 }
 

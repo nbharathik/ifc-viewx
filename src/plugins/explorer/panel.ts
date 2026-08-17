@@ -4,7 +4,7 @@
 // after a takeoff costs nothing. Only a page of rows is rendered; the filter,
 // the viewport actions and the CSV all work on the whole match set.
 import {
-  bar, button, copyTable, emptyState, grid, h, iconButton, note, page, progress, select, toCsv,
+  bar, button, copyTable, emptyState, grid, h, header, iconButton, note, page, progress, saveXlsx, select, toCsv,
   type ElementRow, type ExtensionContext, type GridRow, type Value,
 } from "@ifcviewx/sdk";
 
@@ -44,12 +44,14 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): void {
   });
 
   const root = page(
+    header("Element explorer", "Every element as a row, any property as a column."),
     bar(
       search,
       button("Isolate", () => act("isolate")),
       button("Hide", () => act("hide")),
       button("Show all", () => ctx.view.showAll()),
       button("CSV", () => exportCsv()),
+      button("XLSX", () => void exportXlsx()),
       button("Copy", () => {
         const cols = columns();
         copyTable(cols.map((column) => column.label), filtered().map((row) => cols.map((column) => column.read(row))));
@@ -205,6 +207,20 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): void {
       found.map((row) => cols.map((column) => column.read(row))),
     );
     ctx.files.export("explorer.csv", `elements-${ctx.session.model().name || "model"}.csv`, `\uFEFF${csv}`, "text/csv");
+  };
+
+  const exportXlsx = async (): Promise<void> => {
+    const cols = columns();
+    const found = filtered();
+    if (found.length === 0) return void ctx.feedback.log("Nothing to export", "error");
+    const name = `elements-${ctx.session.model().name || "model"}.xlsx`;
+    try {
+      await saveXlsx(name, cols.map((column) => column.label), found.map((row) => cols.map((column) => column.read(row))), {
+        sheet: "Elements",
+      });
+    } catch {
+      ctx.feedback.log("The spreadsheet could not be written", "error");
+    }
   };
 
   ctx.events.on("model", () => {

@@ -9,10 +9,12 @@ import {
   buildElement,
   clearanceGap,
   disposeElement,
-  hardClash,
+  meshContact,
   type ElementMesh,
 } from "./narrow.js";
 import { modelOf } from "../../viewer-core/ids.js";
+import { unpackModelTransforms } from "../../geometry/modelTransform.js";
+import type { ModelTransform } from "../../viewer-core/engine/types.js";
 import { GeometryIndex } from "../../geometry/geometryIndex.js";
 import { MM, type ClashPair, type SweepProgress, type SweepResult, type SweepSpec } from "./types.js";
 
@@ -73,39 +75,52 @@ export async function runSweep(
   hooks: SweepHooks = {},
 ): Promise<SweepResult> {
   const started = Date.now();
-  const offsets = new Map<number, [number, number, number]>();
-  for (let i = 0; i + 3 < spec.offsets.length; i += 4) {
-    offsets.set(spec.offsets[i], [spec.offsets[i + 1], spec.offsets[i + 2], spec.offsets[i + 3]]);
-  }
-  const offsetOf = (id: number): [number, number, number] => offsets.get(modelOf(id)) ?? [0, 0, 0];
+  const transforms = unpackModelTransforms(spec.transforms, spec.offsets);
+  const transformOf = (id: number): ModelTransform => transforms.get(modelOf(id)) ?? {
+    translation: [0, 0, 0], rotationZ: 0, scale: 1, source: "none",
+  };
 
-  let missing = 0;
+  const missingIds = new Set<number>();
   const resolve = (ids: Float64Array): BroadItem[] => {
     const out: BroadItem[] = [];
+    const seen = new Set<number>();
     for (const id of ids) {
-      const item = index.worldBounds(id, spec.origin, offsetOf(id));
-      if (item) out.push(item);
-      else missing += 1;
+      if (!Number.isFinite(id) || id <= 0 || seen.has(id)) continue;
+      seen.add(id);
+      const item = index.worldBounds(id, spec.origin, transformOf(id));
+      if (item && item.min.every(Number.isFinite) && item.max.every(Number.isFinite) &&
+        item.min[0] <= item.max[0] && item.min[1] <= item.max[1] && item.min[2] <= item.max[2]) out.push(item);
+      else missingIds.add(id);
     }
     return out;
   };
 
   const setA = resolve(spec.a);
   const setB = resolve(spec.b);
-  const tolerance = spec.toleranceMm / MM;
-  const clearance = spec.clearanceMm / MM;
+  const tolerance = (Number.isFinite(spec.toleranceMm) ? Math.max(0, spec.toleranceMm) : 0) / MM;
+  const clearance = (Number.isFinite(spec.clearanceMm) ? Math.max(0, spec.clearanceMm) : 0) / MM;
+  const limit = Number.isFinite(spec.limit) ? Math.max(1, Math.floor(spec.limit)) : 1;
+  const unusableIds = new Set<number>();
 
   const cache = new MeshCache((id) => {
     const parts = index.placements(id);
-    if (parts.length === 0) return null;
-    const box = index.worldBounds(id, spec.origin, offsetOf(id));
-    if (!box) return null;
+    if (parts.length === 0) {
+      unusableIds.add(id);
+      return null;
+    }
+    const box = index.worldBounds(id, spec.origin, transformOf(id));
+    if (!box) {
+      unusableIds.add(id);
+      return null;
+    }
     const centre: [number, number, number] = [
       (box.min[0] + box.max[0]) / 2,
       (box.min[1] + box.max[1]) / 2,
       (box.min[2] + box.max[2]) / 2,
     ];
-    return buildElement(id, parts, spec.origin, offsetOf(id), centre);
+    const built = buildElement(id, parts, spec.origin, transformOf(id), centre);
+    if (!built) unusableIds.add(id);
+    return built;
   });
 
   const hits: ClashPair[] = [];
@@ -118,67 +133,76 @@ export async function runSweep(
   const work: Array<[BroadItem, BroadItem[]]> = [];
   candidatePairs(setA, setB, clearance, (item, candidates) => work.push([item, candidates]));
 
-  const total = work.length;
+  const total = work.reduce((sum, [, candidates]) => sum + candidates.length, 0);
+  let done = 0;
   let sinceYield = 0;
-  for (let w = 0; w < total; w++) {
-    const [item, candidates] = work[w];
-    const a = cache.get(item.id);
-    if (a) {
+  try {
+    if (hooks.cancelled?.()) cancelled = true;
+    for (let w = 0; w < work.length && !cancelled; w++) {
+      const [item, candidates] = work[w];
+      const a = cache.get(item.id);
       for (const candidate of candidates) {
-        const b = cache.get(candidate.id);
-        if (!b) continue;
-        pairsTested += 1;
-        const contact = hardClash(a, b, tolerance);
-        if (contact) {
-          hits.push({
-            a: item.id,
-            b: candidate.id,
-            aType: index.typeOf(item.id),
-            bType: index.typeOf(candidate.id),
-            kind: "hard",
-            distance: contact.depth,
-            point: contact.point,
-            extent: contact.extent,
-            triangles: contact.triangles,
-          });
-        } else if (clearance > 0) {
-          const gap = clearanceGap(a, b, clearance);
-          if (gap) {
+        const b = a ? cache.get(candidate.id) : null;
+        if (a && b) {
+          pairsTested += 1;
+          const contact = meshContact(a, b);
+          if (contact && contact.depth > tolerance) {
             hits.push({
               a: item.id,
               b: candidate.id,
               aType: index.typeOf(item.id),
               bType: index.typeOf(candidate.id),
-              kind: "clearance",
-              distance: gap.distance,
-              point: gap.point,
-              extent: [0, 0, 0],
-              triangles: 0,
+              kind: "hard",
+              distance: contact.depth,
+              point: contact.point,
+              extent: contact.extent,
+              triangles: contact.triangles,
             });
+          // A real penetration suppressed by the hard-clash tolerance is not a
+          // zero-gap clearance failure. Only misses and surface touches proceed
+          // to the distance query.
+          } else if (clearance > 0 && (!contact || contact.depth <= 1e-9)) {
+            const gap = clearanceGap(a, b, clearance);
+            if (gap) {
+              hits.push({
+                a: item.id,
+                b: candidate.id,
+                aType: index.typeOf(item.id),
+                bType: index.typeOf(candidate.id),
+                kind: "clearance",
+                distance: gap.distance,
+                point: gap.point,
+                extent: [0, 0, 0],
+                triangles: 0,
+              });
+            }
+          }
+          if (hits.length >= limit) {
+            truncated = true;
           }
         }
-        if (hits.length >= spec.limit) {
-          truncated = true;
-          break;
+        done += 1;
+        sinceYield += 1;
+        if (truncated) break;
+        if (sinceYield >= SLICE || done === total) {
+          sinceYield = 0;
+          hooks.onProgress?.({ done, total, hits: hits.length });
+          if (hooks.yieldTurn) await hooks.yieldTurn();
+          if (hooks.cancelled?.()) {
+            cancelled = true;
+            break;
+          }
         }
       }
+      // A cached A is likely to be asked for again only by its own candidates,
+      // so it is left to the cache rather than dropped here.
+      if (truncated || cancelled) break;
     }
-    // A cached A is likely to be asked for again only by its own candidates,
-    // so it is left to the cache rather than dropped here.
-    sinceYield += candidates.length;
-    if (truncated) break;
-    if (sinceYield >= SLICE || w === total - 1) {
-      sinceYield = 0;
-      hooks.onProgress?.({ done: w + 1, total, hits: hits.length });
-      if (hooks.yieldTurn) await hooks.yieldTurn();
-      if (hooks.cancelled?.()) {
-        cancelled = true;
-        break;
-      }
-    }
-  }
 
-  cache.dispose();
+    if (total === 0) hooks.onProgress?.({ done: 0, total: 0, hits: 0 });
+  } finally {
+    cache.dispose();
+  }
 
   // Hard clashes first, deepest first; then the near misses, tightest first.
   hits.sort((x, y) => {
@@ -193,7 +217,7 @@ export async function runSweep(
     elementsB: setB.length,
     truncated: truncated || cancelled,
     elapsedMs: Date.now() - started,
-    missing,
+    missing: new Set([...missingIds, ...unusableIds]).size,
     fidelity: "mesh",
     engine: "browser-bvh",
     geometryRevision: index.revision,

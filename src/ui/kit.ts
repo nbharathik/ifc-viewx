@@ -73,6 +73,8 @@ const PATHS: Record<string, string> = {
   trash: '<path d="M4.5 7h15M9.5 7V5h5v2M6.5 7l1 13h9l1-13"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5.3l3.4 2"/>',
   chevron: '<path d="m6 9 6 6 6-6"/>',
+  maximize: '<path d="M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5"/>',
+  minimize: '<path d="M8 3v5H3M16 3v5h5M21 16h-5v5M8 21v-5H3"/>',
   plug: '<path d="M9 3v6M15 3v6"/><path d="M6.5 9h11v2.5a5.5 5.5 0 0 1-11 0Z"/><path d="M12 17v4"/>',
   sliders: '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2.1"/><circle cx="10" cy="17" r="2.1"/>',
   funnel: '<path d="M3 5h18l-7 8.2V20l-4 1.6v-8.4Z"/>',
@@ -84,6 +86,9 @@ const PATHS: Record<string, string> = {
   blocks: '<rect x="3" y="3" width="7.5" height="7.5" rx="1.6"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.6"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.6"/><path d="M17.25 14v6.5M14 17.25h6.5"/>',
   calculator: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7.5h8M8 12h.01M12 12h.01M16 12h.01M8 16.5h.01M12 16.5h.01M16 16.5h.01"/>',
   compare: '<path d="M9.5 4H5.5A1.5 1.5 0 0 0 4 5.5v13A1.5 1.5 0 0 0 5.5 20h4M14.5 4h4A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-4"/><path d="M12 2.5v19" stroke-dasharray="3 2.5"/>',
+  ortho: '<rect x="3.5" y="7.5" width="13" height="13" rx="1.2"/><path d="M7.5 7.5V4.7a1.2 1.2 0 0 1 1.2-1.2h10.6a1.2 1.2 0 0 1 1.2 1.2v10.6a1.2 1.2 0 0 1-1.2 1.2H16.5"/><path d="m3.5 7.5 4-4M16.5 20.5l4-4"/>',
+  walk: '<circle cx="13" cy="4.5" r="1.8"/><path d="M12.5 8.5 10 11l1.5 3.5L9 20M12.5 8.5l3 2 2.5 1M12.5 8.5 15 14l1.5 6M10 11l-3.5 1.5"/>',
+  move: '<path d="M12 2v20M2 12h20"/><path d="m9 4.5 3-3 3 3M9 19.5l3 3 3-3M4.5 9l-3 3 3 3M19.5 9l3 3-3 3"/>',
   // The one mark that cannot be redrawn as strokes, so it fills instead and is
   // scaled from its own 16-grid onto the 24 one the rest of the set uses.
   github: '<path fill="currentColor" stroke="none" transform="translate(1 1) scale(1.375)" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>',
@@ -243,6 +248,12 @@ document.addEventListener("keydown", (e) => {
   if (layer) {
     e.stopPropagation();
     closeLayer();
+    return;
+  }
+  // Only once nothing transient is open, so Escape peels one thing at a time.
+  if (pinned) {
+    e.stopPropagation();
+    closePinned();
   }
 }, true);
 window.addEventListener("blur", () => {
@@ -285,6 +296,8 @@ export interface FormField {
   value?: string;
   placeholder?: string;
   hint?: string;
+  /** Present for a fixed set of choices, which renders a select. */
+  options?: string[];
 }
 
 /**
@@ -298,15 +311,19 @@ export function promptForm(
   onSubmit: (values: Record<string, string>) => void,
 ): void {
   const dialog = h("dialog", { class: "form-dialog" });
-  const inputs = new Map<string, HTMLInputElement>();
+  const inputs = new Map<string, HTMLInputElement | HTMLSelectElement>();
   const body = h("div", { class: "dlg-body" });
   for (const field of fields) {
-    const input = h("input", {
-      type: "text",
-      value: field.value ?? "",
-      placeholder: field.placeholder ?? "",
-    });
-    inputs.set(field.key, input);
+    const input = field.options
+      ? h("select", {}, field.options.map((option) =>
+          h("option", { value: option, text: option, ...(option === field.value ? { selected: "" } : {}) })))
+      : h("input", {
+          type: "text",
+          value: field.value ?? "",
+          placeholder: field.placeholder ?? "",
+        });
+    if (field.options && field.value) (input as HTMLSelectElement).value = field.value;
+    inputs.set(field.key, input as HTMLInputElement | HTMLSelectElement);
     body.appendChild(
       h("label", { class: "field" }, [
         h("span", { class: "field-label" }, [
@@ -344,7 +361,9 @@ export function promptForm(
   lightDismiss(dialog);
   document.body.appendChild(dialog);
   dialog.showModal();
-  inputs.values().next().value?.select();
+  const first = inputs.values().next().value;
+  if (first instanceof HTMLInputElement) first.select();
+  else first?.focus();
 }
 
 // -- dropdown menus ---------------------------------------------------------
@@ -456,16 +475,42 @@ function clipBox(node: HTMLElement): { left: number; right: number; top: number;
   return { left: 0, right: window.innerWidth, top: 0, bottom: window.innerHeight };
 }
 
+/**
+ * A panel that outlives clicks into the page. Rail tools are used against the
+ * model, so a click in the viewport must not take the panel away; it closes on
+ * its own button, on Escape, or when another pinned panel opens.
+ */
+let pinned: { close: () => void } | null = null;
+
+export function closePinned(): void {
+  const current = pinned;
+  pinned = null;
+  current?.close();
+}
+
+export interface PopoverOptions {
+  /** Called with true just before the panel is built, false once it is gone. */
+  onToggle?: (open: boolean) => void;
+  /** Survives outside clicks, scrolling and focus loss. */
+  pinned?: boolean;
+}
+
 export function attachPopover(
   button: HTMLButtonElement,
   build: (pop: HTMLElement, close: () => void) => void,
   side: PopoverSide = "above",
+  options: PopoverOptions = {},
 ): void {
+  const { onToggle, pinned: isPinned = false } = options;
   const item = button.parentElement ?? button;
   button.addEventListener("click", () => {
-    if (button.getAttribute("aria-expanded") === "true") return closeLayer();
+    if (button.getAttribute("aria-expanded") === "true") {
+      return isPinned ? closePinned() : closeLayer();
+    }
+    // Before the panel is measured, so a host can make room for it.
+    onToggle?.(true);
     const pop = h("div", { class: `pop ${side}`, role: "dialog" });
-    build(pop, () => closeLayer());
+    build(pop, () => (isPinned ? closePinned() : closeLayer()));
     item.appendChild(pop);
     button.setAttribute("aria-expanded", "true");
     // Keep the panel on screen when its anchor sits near an edge.
@@ -484,10 +529,17 @@ export function attachPopover(
       const vertical = fit(rect.top, rect.bottom, box.top, box.bottom);
       if (vertical) pop.style.marginTop = `${vertical}px`;
     }
-    openLayer([pop, button], () => {
+    const dismiss = (): void => {
       pop.remove();
       button.setAttribute("aria-expanded", "false");
-    });
+      onToggle?.(false);
+    };
+    if (!isPinned) return openLayer([pop, button], dismiss);
+    // One pinned panel at a time, and it must not sit under a menu or a
+    // dropdown opened later, so any transient layer closes it first.
+    closePinned();
+    closeLayer();
+    pinned = { close: dismiss };
   });
 }
 

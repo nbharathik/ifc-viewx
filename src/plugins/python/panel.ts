@@ -6,7 +6,7 @@
 // The static guard is deliberately not in this path. It exists to check code an
 // LLM wrote; what you type here is your own, and running natively the service
 // applies its own guard regardless of who wrote it.
-import { h, icon, iconButton, toast } from "@ifcviewx/sdk";
+import { h, header, icon, iconButton, toast } from "@ifcviewx/sdk";
 import type { ExtensionContext, ExtensionInstance } from "@ifcviewx/sdk";
 
 const START = `# The model is available as \`model\` (ifcopenshell.file).
@@ -122,6 +122,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext, payload?: unknow
   ctx.events.on("service", syncTier);
   host.appendChild(
     h("div", { class: "page" }, [
+      header("Python console", "Write IfcOpenShell against the open model. Edits run on a copy and stage for review."),
       code,
       h("div", { class: "row" }, [runBtn, editBtn, snippets, h("span", { class: "grow" }), tier]),
       status,

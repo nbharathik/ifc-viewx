@@ -4,7 +4,7 @@ import * as THREE from 'three';
 
 import { ModelBatcher } from './batcher.js';
 import { createWebGlRenderer } from './webgl.js';
-import type { IfcMesh, ModelBounds } from '../engine/types.js';
+import type { IfcMesh, ModelBounds, ModelTransform } from '../engine/types.js';
 
 /**
  * What a measured point landed on, in the order the tool prefers to catch
@@ -48,6 +48,21 @@ export interface ScenePick {
   point: [number, number, number];
 }
 
+/** One clip plane, already resolved to a unit normal in scene space. */
+export interface ClipPlaneSpec {
+  key: string;
+  normal: [number, number, number];
+  offset: number;
+  flip: boolean;
+}
+
+/** One grid axis polyline in scene space, with its bubble label. */
+export interface GridOverlayLine {
+  label: string | null;
+  /** Flat xyz triples. */
+  points: number[];
+}
+
 const DEFAULT_COLORS: SceneColors = { background: 0x1e1e1e };
 /** Scratch objects: picking and the measure overlay run on every mouse move. */
 const _size = new THREE.Vector2();
@@ -86,6 +101,37 @@ const SNAP_RADIUS = [14, 11, 9];
 /** Compared against squared screen distances, so the scan skips the sqrt. */
 const SNAP_RADIUS_SQ = SNAP_RADIUS.map((r) => r * r);
 
+/**
+ * GL reads a render target bottom-up; an image is top-down. Copy row by row
+ * into the reversed position, which a square plan makes easy to get wrong
+ * because most of them look plausible either way up.
+ */
+export function flipRows(source: Uint8Array, side: number, out: Uint8ClampedArray): void {
+  const stride = side * 4;
+  for (let row = 0; row < side; row++) {
+    out.set(source.subarray(row * stride, row * stride + stride), (side - 1 - row) * stride);
+  }
+}
+
+/**
+ * Keep the locator on the map. Inside the framed area it is the true
+ * position; beyond it the marker rides the border on the side the camera
+ * actually is, the way a map pins an off-screen target, so flying away never
+ * makes it vanish. Returns the clamped x and z plus whether it was pinned.
+ */
+export function clampToPlan(
+  x: number,
+  z: number,
+  centreX: number,
+  centreZ: number,
+  half: number,
+): { x: number; z: number; pinned: boolean } {
+  const edge = half * 0.94;
+  const dx = Math.min(edge, Math.max(-edge, x - centreX));
+  const dz = Math.min(edge, Math.max(-edge, z - centreZ));
+  return { x: centreX + dx, z: centreZ + dz, pinned: dx !== x - centreX || dz !== z - centreZ };
+}
+
 export function needsMeasureLayout(
   spans: readonly MeasureSpan[],
   live: { a: [number, number, number]; end: [number, number, number] | null } | null,
@@ -95,9 +141,15 @@ export function needsMeasureLayout(
   return spans.length > 0 || live !== null || hover !== null || visible;
 }
 
+export type ProjectionMode = 'perspective' | 'orthographic';
+
 export class SceneController {
   readonly scene: THREE.Scene;
-  readonly camera: THREE.PerspectiveCamera;
+  private readonly perspCamera: THREE.PerspectiveCamera;
+  private readonly orthoCamera: THREE.OrthographicCamera;
+  private activeCamera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
+  /** Half the world height the ortho frustum covers at zoom 1. */
+  private orthoHalfHeight = 10;
   readonly renderer: THREE.WebGLRenderer;
   private batcher: ModelBatcher;
   private colors: SceneColors;
@@ -132,6 +184,8 @@ export class SceneController {
     live: THREE.MeshBasicMaterial;
   } | null = null;
   private plan = false;
+  /** Draw the highlighted selection through occluders in a second pass. */
+  private showThrough = false;
   /** Drawing-buffer size last handed to the renderer; -1 forces the first set. */
   private sizedWidth = -1;
   private sizedHeight = -1;
@@ -150,7 +204,20 @@ export class SceneController {
   /** Section handles live in their own scene so clipping can be turned off. */
   private readonly gizmoScene = new THREE.Scene();
   private readonly gizmos = new THREE.Group();
-  private readonly handleAxes = new Map<THREE.Object3D, 'x' | 'y' | 'z'>();
+  /** Grid axes render unclipped beside the gizmos; sections never cut them. */
+  private readonly gridGroup = new THREE.Group();
+  /** Annotation anchor dots; a sibling of gizmos so handle rebuilds spare it. */
+  private readonly annotationGroup = new THREE.Group();
+  private readonly annotationPool: THREE.Mesh[] = [];
+  private annotationParts: { sphere: THREE.SphereGeometry; material: THREE.MeshBasicMaterial } | null = null;
+  private gridAxes: GridOverlayLine[] = [];
+  private gridMaterial: THREE.LineDashedMaterial | null = null;
+  private planMarkerScene: THREE.Scene | null = null;
+  private planMarker: THREE.Group | null = null;
+  private planCone: THREE.Mesh | null = null;
+  /** Marker materials with the opacity they were built at, for dimming. */
+  private readonly planMarkerParts: Array<{ material: THREE.MeshBasicMaterial; opacity: number }> = [];
+  private readonly handleAxes = new Map<THREE.Object3D, { key: string; normal: THREE.Vector3 }>();
   /** Built once and then only moved; a slider drag must not allocate. */
   private boxOutline: THREE.LineSegments | null = null;
   /** Axes the current handle set was built for, so a drag only repositions. */
@@ -175,9 +242,11 @@ export class SceneController {
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(colors.background);
 
-    this.camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
-    this.camera.position.set(10, 10, 10);
-    this.camera.lookAt(0, 0, 0);
+    this.perspCamera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
+    this.perspCamera.position.set(10, 10, 10);
+    this.perspCamera.lookAt(0, 0, 0);
+    this.orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 1000);
+    this.activeCamera = this.perspCamera;
 
     const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 1.1);
     hemi.position.set(0, 1, 0);
@@ -192,8 +261,80 @@ export class SceneController {
     this.batcher = new ModelBatcher();
     this.scene.add(this.batcher.group);
     this.gizmoScene.add(this.gizmos);
+    this.gizmoScene.add(this.gridGroup);
+    this.gridGroup.visible = false;
+    this.gizmoScene.add(this.annotationGroup);
 
     this.pickTarget = new THREE.WebGLRenderTarget(1, 1);
+  }
+
+  /** The active camera: perspective by default, orthographic after a toggle. */
+  get camera(): THREE.PerspectiveCamera | THREE.OrthographicCamera {
+    return this.activeCamera;
+  }
+
+  /** Perspective-equivalent framing parameters, valid in either projection. */
+  getFrameParams(): { fov: number; aspect: number } {
+    return { fov: this.perspCamera.fov, aspect: this.baseWidth / this.baseHeight };
+  }
+
+  getProjectionMode(): ProjectionMode {
+    return this.activeCamera === this.orthoCamera ? 'orthographic' : 'perspective';
+  }
+
+  /**
+   * Switch projection without a visual jump: the orthographic frustum height
+   * is matched to what the perspective camera sees at the orbit target, and
+   * the way back turns the accumulated ortho zoom into an equivalent dolly.
+   */
+  setProjectionMode(mode: ProjectionMode, target: [number, number, number]): void {
+    if (mode === this.getProjectionMode()) return;
+    const t = new THREE.Vector3(...target);
+    const p = this.perspCamera;
+    const o = this.orthoCamera;
+    if (mode === 'orthographic') {
+      const distance = Math.max(p.position.distanceTo(t), 1e-3);
+      this.orthoHalfHeight = Math.tan((p.fov * Math.PI) / 360) * distance;
+      o.zoom = 1;
+      o.position.copy(p.position);
+      o.quaternion.copy(p.quaternion);
+      o.up.copy(p.up);
+      o.near = p.near;
+      o.far = p.far;
+      this.syncOrthoFrustum();
+      this.activeCamera = o;
+    } else {
+      const halfH = this.orthoHalfHeight / Math.max(o.zoom, 1e-6);
+      const distance = Math.max(halfH / Math.tan((p.fov * Math.PI) / 360), 1e-3);
+      const dir = t.clone().sub(o.position);
+      if (dir.lengthSq() > 1e-12) dir.normalize();
+      else o.getWorldDirection(dir);
+      p.position.copy(t).addScaledVector(dir, -distance);
+      p.quaternion.copy(o.quaternion);
+      p.up.copy(o.up);
+      p.near = o.near;
+      p.far = o.far;
+      p.updateProjectionMatrix();
+      this.activeCamera = p;
+    }
+  }
+
+  /** Fit the ortho frustum to a pose set by perspective framing math. */
+  matchOrthoToDistance(distance: number): void {
+    if (this.getProjectionMode() !== 'orthographic') return;
+    this.orthoHalfHeight = Math.tan((this.perspCamera.fov * Math.PI) / 360) * Math.max(distance, 1e-3);
+    this.orthoCamera.zoom = 1;
+    this.syncOrthoFrustum();
+  }
+
+  private syncOrthoFrustum(): void {
+    const aspect = this.baseWidth / Math.max(1, this.baseHeight);
+    const o = this.orthoCamera;
+    o.top = this.orthoHalfHeight;
+    o.bottom = -this.orthoHalfHeight;
+    o.left = -this.orthoHalfHeight * aspect;
+    o.right = this.orthoHalfHeight * aspect;
+    o.updateProjectionMatrix();
   }
 
   /** Feed a batch of engine meshes into the GPU batcher. */
@@ -226,6 +367,90 @@ export class SceneController {
 
   isGhostHidden(): boolean {
     return this.ghostHidden;
+  }
+
+  setXray(expressIDs: Iterable<number>, on: boolean): void {
+    this.batcher.setXray(expressIDs, on);
+  }
+
+  clearXray(): void {
+    this.batcher.clearXray();
+  }
+
+  isElementXray(expressID: number): boolean {
+    return this.batcher.isElementXray(expressID);
+  }
+
+  getXrayCount(): number {
+    return this.batcher.getXrayCount();
+  }
+
+  setPickSolidOnly(on: boolean): void {
+    this.batcher.setPickSolidOnly(on);
+  }
+
+  isPickSolidOnly(): boolean {
+    return this.batcher.isPickSolidOnly();
+  }
+
+  /**
+   * Perspective zoom. Only the perspective camera has a lens, so this is a
+   * no-op reader/writer while the parallel one is active.
+   */
+  setFieldOfView(deg: number): void {
+    if (this.perspCamera.fov === deg) return;
+    this.perspCamera.fov = deg;
+    this.perspCamera.updateProjectionMatrix();
+  }
+
+  getFieldOfView(): number {
+    return this.perspCamera.fov;
+  }
+
+  /** Unit view direction, so hosts can read it without importing three. */
+  getViewDirection(): [number, number, number] {
+    const d = this.camera.getWorldDirection(_forward);
+    return [d.x, d.y, d.z];
+  }
+
+  /** Camera position in scene space, same reason. */
+  getCameraPosition(): [number, number, number] {
+    const p = this.camera.position;
+    return [p.x, p.y, p.z];
+  }
+
+  /** The world direction the top of the screen points at. */
+  getViewUp(): [number, number, number] {
+    const up = _up.set(0, 1, 0).applyQuaternion(this.camera.quaternion);
+    return [up.x, up.y, up.z];
+  }
+
+  setElementOffsets(entries: Iterable<[number, [number, number, number]]>): void {
+    this.batcher.setElementOffsets(entries);
+  }
+
+  clearElementOffsets(): void {
+    this.batcher.clearElementOffsets();
+  }
+
+  hasElementOffsets(): boolean {
+    return this.batcher.hasElementOffsets();
+  }
+
+  getElementOffset(expressID: number): [number, number, number] | null {
+    return this.batcher.getElementOffset(expressID);
+  }
+
+  getElementOffsets(): Array<[number, [number, number, number]]> {
+    return this.batcher.getElementOffsets();
+  }
+
+  setEdges(on: boolean): void {
+    this.batcher.setEdges(on);
+  }
+
+  isEdges(): boolean {
+    return this.batcher.isEdges();
   }
 
   setColorOverride(assignment: Map<number, number>, colors: Array<[number, number, number]>): void {
@@ -286,11 +511,20 @@ export class SceneController {
   }
 
   setModelTransform(modelIndex: number, offset: [number, number, number]): void {
-    this.batcher.setModelTransform(modelIndex, offset);
+    const current = this.batcher.getModelPlacement(modelIndex);
+    this.batcher.setModelPlacement(modelIndex, { ...current, translation: offset });
   }
 
   getModelTransform(modelIndex: number): [number, number, number] {
-    return this.batcher.getModelTransform(modelIndex);
+    return this.batcher.getModelPlacement(modelIndex).translation;
+  }
+
+  setModelPlacement(modelIndex: number, transform: ModelTransform): void {
+    this.batcher.setModelPlacement(modelIndex, transform);
+  }
+
+  getModelPlacement(modelIndex: number): ModelTransform {
+    return this.batcher.getModelPlacement(modelIndex);
   }
 
   removeModel(modelIndex: number): void {
@@ -305,7 +539,7 @@ export class SceneController {
 
   getViewport(): { width: number; height: number; aspect: number } {
     const size = this.renderer.getSize(new THREE.Vector2());
-    return { width: size.x, height: size.y, aspect: this.camera.aspect };
+    return { width: size.x, height: size.y, aspect: this.baseWidth / Math.max(1, this.baseHeight) };
   }
 
   /** Live GPU resource counts (for leak detection and the perf HUD). */
@@ -493,7 +727,10 @@ export class SceneController {
     const depth = near + t * (far - near);
     const ray = this.rayThrough(canvasX, canvasY);
     // Depth is measured along the view axis, the ray is not; project it back.
-    const along = depth / Math.max(ray.direction.dot(forward), 1e-6);
+    // Under an orthographic camera the ray starts on the near plane rather
+    // than at the camera position, so that head start comes off the depth.
+    const originDepth = _v2.copy(ray.origin).sub(this.camera.position).dot(forward);
+    const along = (depth - originDepth) / Math.max(ray.direction.dot(forward), 1e-6);
     const point = _v.copy(ray.origin).addScaledVector(ray.direction, along);
     return [point.x, point.y, point.z];
   }
@@ -517,19 +754,16 @@ export class SceneController {
   }
 
   /**
-   * Clip on any combination of axis-aligned planes. Materials keep three's
-   * default `clipIntersection = false`, so a fragment outside any one plane is
-   * dropped: six planes are therefore a box, with no extra clipping code.
+   * Clip on any combination of planes. Materials keep three's default
+   * `clipIntersection = false`, so a fragment outside any one plane is
+   * dropped: six axis planes are therefore a box, with no extra clipping code.
+   * The normal points at the discarded side when flip is false.
    */
-  setClipPlanes(planes: Array<{ axis: 'x' | 'y' | 'z'; offset: number; flip: boolean }>): void {
-    this.renderer.clippingPlanes = planes.map(({ axis, offset, flip }) => {
-      const normal = new THREE.Vector3(
-        axis === 'x' ? -1 : 0,
-        axis === 'y' ? -1 : 0,
-        axis === 'z' ? -1 : 0,
-      );
-      if (flip) normal.negate();
-      return new THREE.Plane(normal, flip ? -offset : offset);
+  setClipPlanes(planes: ClipPlaneSpec[]): void {
+    this.renderer.clippingPlanes = planes.map(({ normal, offset, flip }) => {
+      const n = new THREE.Vector3(...normal);
+      if (!flip) n.negate();
+      return new THREE.Plane(n, flip ? -offset : offset);
     });
     this.batcher.setCapMode(planes.length > 0);
   }
@@ -578,17 +812,30 @@ export class SceneController {
    * off (a global clipping plane would otherwise cut the handle sitting on
    * it) and without depth test, so a control is never buried in geometry.
    */
-  setSectionHandles(planes: Array<{ axis: 'x' | 'y' | 'z'; offset: number; flip: boolean }>): void {
-    // Dragging a handle calls this on every pointermove. The arrows only
-    // depend on which axes are cut, so an unchanged axis set is repositioned
-    // rather than torn down and rebuilt, which is four GPU geometries per
-    // plane per mouse move.
-    const key = planes.map((plane) => plane.axis).sort().join(',');
+  setSectionHandles(planes: ClipPlaneSpec[]): void {
+    // Dragging a handle calls this on every pointermove. The arrows depend on
+    // which planes exist and where they point, so an unchanged set is
+    // repositioned rather than torn down and rebuilt, which is four GPU
+    // geometries per plane per mouse move.
+    const key = planes
+      .map((plane) => `${plane.key}@${plane.normal.map((v) => v.toFixed(3)).join(',')}`)
+      .sort()
+      .join('|');
+    const b = this.batcher.getBounds();
+    const center = new THREE.Vector3(
+      (b.min.x + b.max.x) / 2,
+      (b.min.y + b.max.y) / 2,
+      (b.min.z + b.max.z) / 2,
+    );
+    const place = (group: THREE.Object3D, spec: ClipPlaneSpec): void => {
+      const n = _v.set(spec.normal[0], spec.normal[1], spec.normal[2]);
+      const slide = spec.offset - n.dot(center);
+      group.position.copy(center).addScaledVector(n, slide);
+    };
     if (key && key === this.handleKey) {
-      for (const [group, axis] of this.handleAxes) {
-        const plane = planes.find((entry) => entry.axis === axis);
-        if (!plane) continue;
-        group.position[axis] = plane.offset;
+      for (const [group, entry] of this.handleAxes) {
+        const plane = planes.find((spec) => spec.key === entry.key);
+        if (plane) place(group, plane);
       }
       return;
     }
@@ -605,7 +852,6 @@ export class SceneController {
       });
     }
     this.handleAxes.clear();
-    const b = this.batcher.getBounds();
     if (planes.length === 0 || !Number.isFinite(b.min.x) || b.max.x < b.min.x) return;
 
     const span = new THREE.Vector3(
@@ -617,14 +863,6 @@ export class SceneController {
     const head = shaft * 0.45;
     for (const plane of planes) {
       const group = new THREE.Group();
-      const dir = plane.axis === 'x' ? 0 : plane.axis === 'y' ? 1 : 2;
-      const center = [
-        (b.min.x + b.max.x) / 2,
-        (b.min.y + b.max.y) / 2,
-        (b.min.z + b.max.z) / 2,
-      ];
-      center[dir] = plane.offset;
-
       // Grab volume: invisible and generous, so the arrow is easy to hit.
       const grab = new THREE.Mesh(
         new THREE.SphereGeometry(head * 1.6, 10, 8),
@@ -639,67 +877,176 @@ export class SceneController {
         cone.rotateZ(sign > 0 ? 0 : Math.PI);
         group.add(cone);
       }
-      // The stem is built along Y; rotate it onto the plane normal.
-      if (plane.axis === 'x') group.rotation.z = -Math.PI / 2;
-      else if (plane.axis === 'z') group.rotation.x = Math.PI / 2;
-      group.position.set(center[0], center[1], center[2]);
+      // The stem is built along Y; swing it onto the plane normal.
+      const normal = new THREE.Vector3(...plane.normal).normalize();
+      group.quaternion.setFromUnitVectors(_up.set(0, 1, 0), normal);
+      place(group, plane);
       group.renderOrder = 1001;
       this.gizmos.add(group);
-      this.handleAxes.set(group, plane.axis);
+      this.handleAxes.set(group, { key: plane.key, normal });
     }
   }
 
-  /** Axis of the handle under these normalized device coords, if any. */
-  pickSectionHandle(ndcX: number, ndcY: number): 'x' | 'y' | 'z' | null {
+  /** Key of the handle under these normalized device coords, if any. */
+  pickSectionHandle(ndcX: number, ndcY: number): string | null {
     if (this.gizmos.children.length === 0) return null;
     this.raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
     const hit = this.raycaster.intersectObjects(this.gizmos.children, true)[0];
     if (!hit) return null;
     let node: THREE.Object3D | null = hit.object;
     while (node && !this.handleAxes.has(node)) node = node.parent;
-    return node ? (this.handleAxes.get(node) ?? null) : null;
+    return node ? (this.handleAxes.get(node)?.key ?? null) : null;
   }
 
   /**
-   * Where the pointer lands on the axis, measured on the plane that contains
-   * the axis and faces the camera most directly.
+   * Where the pointer lands along the plane normal, measured on the plane
+   * that contains the normal and faces the camera most directly.
    */
-  dragSectionOffset(axis: 'x' | 'y' | 'z', ndcX: number, ndcY: number): number | null {
-    const index = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
-    const b = this.batcher.getBounds();
-    const axisVec = new THREE.Vector3(index === 0 ? 1 : 0, index === 1 ? 1 : 0, index === 2 ? 1 : 0);
+  dragSectionOffset(normal: [number, number, number], ndcX: number, ndcY: number): number | null {
+    const n = new THREE.Vector3(...normal).normalize();
     const view = this.camera.getWorldDirection(new THREE.Vector3());
-    const normal = axisVec.clone().cross(view);
-    if (normal.lengthSq() < 1e-8) return null; // looking straight down the axis
-    normal.cross(axisVec).normalize();
+    const planeN = n.clone().cross(view);
+    if (planeN.lengthSq() < 1e-8) return null; // looking straight down the normal
+    planeN.cross(n).normalize();
+    const b = this.batcher.getBounds();
     const center = new THREE.Vector3(
       (b.min.x + b.max.x) / 2,
       (b.min.y + b.max.y) / 2,
       (b.min.z + b.max.z) / 2,
     );
-    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, center);
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(planeN, center);
     this.raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
     const hit = this.raycaster.ray.intersectPlane(plane, new THREE.Vector3());
-    return hit ? hit.getComponent(index) : null;
+    return hit ? hit.dot(n) : null;
   }
 
-  /** Keep a section offset inside the model. */
-  clampSectionOffset(axis: 'x' | 'y' | 'z', offset: number): number {
+  /** Keep a section offset inside the model along its own normal. */
+  clampSectionOffset(normal: [number, number, number], offset: number): number {
     const b = this.batcher.getBounds();
-    const index = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
-    const low = [b.min.x, b.min.y, b.min.z][index];
-    const high = [b.max.x, b.max.y, b.max.z][index];
+    let low = Infinity;
+    let high = -Infinity;
+    for (let c = 0; c < 8; c++) {
+      const d =
+        normal[0] * (c & 1 ? b.max.x : b.min.x) +
+        normal[1] * (c & 2 ? b.max.y : b.min.y) +
+        normal[2] * (c & 4 ? b.max.z : b.min.z);
+      if (d < low) low = d;
+      if (d > high) high = d;
+    }
     return Math.min(high, Math.max(low, offset));
   }
 
+  /** Selection silhouette through cover: one extra pass, only when on. */
+  private renderShowThrough(): void {
+    const prevOverride = this.scene.overrideMaterial;
+    const prevBackground = this.scene.background;
+    // Overlay meshes have no aElementIndex, so the override shader would read
+    // element 0's state for them; keep them out of the pass, as the pick does.
+    const overlayShown = this.measure?.visible ?? false;
+    if (this.measure) this.measure.visible = false;
+    const annotationsShown = this.annotationGroup.visible;
+    this.annotationGroup.visible = false;
+    this.scene.overrideMaterial = this.batcher.showThroughMaterial;
+    this.scene.background = null;
+    this.renderer.autoClear = false;
+    this.renderer.render(this.scene, this.camera);
+    this.renderer.autoClear = true;
+    this.scene.overrideMaterial = prevOverride;
+    this.scene.background = prevBackground;
+    if (this.measure) this.measure.visible = overlayShown;
+    this.annotationGroup.visible = annotationsShown;
+  }
+
+  setShowThrough(on: boolean): void {
+    this.showThrough = on;
+  }
+
+  isShowThrough(): boolean {
+    return this.showThrough;
+  }
+
+  /** Anchor dots for the annotation notes, sized from the model span. */
+  setAnnotations(points: Array<[number, number, number]>): void {
+    if (!this.annotationParts) {
+      this.annotationParts = {
+        sphere: new THREE.SphereGeometry(1, 10, 8),
+        material: new THREE.MeshBasicMaterial({ color: 0x3b82f6, depthTest: false, transparent: true, opacity: 0.95 }),
+      };
+    }
+    const b = this.batcher.getBounds();
+    const span = Number.isFinite(b.min.x)
+      ? new THREE.Vector3(b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z).length()
+      : 40;
+    const radius = Math.max(span * 0.0035, 0.03);
+    while (this.annotationPool.length < points.length) {
+      const dot = new THREE.Mesh(this.annotationParts.sphere, this.annotationParts.material);
+      dot.renderOrder = 999;
+      this.annotationGroup.add(dot);
+      this.annotationPool.push(dot);
+    }
+    this.annotationPool.forEach((dot, index) => {
+      const point = points[index];
+      dot.visible = Boolean(point);
+      if (point) {
+        dot.position.set(point[0], point[1], point[2]);
+        dot.scale.setScalar(radius);
+      }
+    });
+  }
+
   private renderGizmos(): void {
-    if (this.gizmos.children.length === 0 && !this.boxOutline?.visible) return;
+    if (
+      this.gizmos.children.length === 0 &&
+      !this.boxOutline?.visible &&
+      !this.gridGroup.visible &&
+      !this.annotationPool.some((dot) => dot.visible)
+    ) return;
     const saved = this.renderer.clippingPlanes;
     this.renderer.clippingPlanes = [];
     this.renderer.autoClear = false;
     this.renderer.render(this.gizmoScene, this.camera);
     this.renderer.autoClear = true;
     this.renderer.clippingPlanes = saved;
+  }
+
+  // -- grid axes overlay ----------------------------------------------------
+  setGridAxes(axes: GridOverlayLine[]): void {
+    for (const child of [...this.gridGroup.children]) {
+      this.gridGroup.remove(child);
+      (child as THREE.Line).geometry?.dispose();
+    }
+    this.gridAxes = axes;
+    this.gridGroup.visible = axes.length > 0;
+    if (!axes.length) return;
+    const b = this.batcher.getBounds();
+    const span = Number.isFinite(b.min.x)
+      ? new THREE.Vector3(b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z).length()
+      : 40;
+    if (!this.gridMaterial) {
+      this.gridMaterial = new THREE.LineDashedMaterial({
+        color: 0x8899aa,
+        transparent: true,
+        opacity: 0.6,
+        depthTest: false,
+      });
+    }
+    this.gridMaterial.dashSize = span * 0.012;
+    this.gridMaterial.gapSize = span * 0.008;
+    for (const axis of axes) {
+      const points: THREE.Vector3[] = [];
+      for (let i = 0; i + 2 < axis.points.length; i += 3) {
+        points.push(new THREE.Vector3(axis.points[i], axis.points[i + 1], axis.points[i + 2]));
+      }
+      if (points.length < 2) continue;
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), this.gridMaterial);
+      line.computeLineDistances();
+      line.renderOrder = 998;
+      this.gridGroup.add(line);
+    }
+  }
+
+  getGridOverlay(): GridOverlayLine[] {
+    return this.gridAxes;
   }
 
   // -- plan inset -----------------------------------------------------------
@@ -728,13 +1075,19 @@ export class SceneController {
    * Aim the plan camera at the model from directly above. Shared by the inset
    * render and the inset pick, so a click can never resolve against a
    * different framing than the one on screen.
+   *
+   * `locator` gives the inset a little more margin than the exported sheet,
+   * so the position marker has somewhere to sit when the camera is just
+   * outside the walls. The frame stays fixed to the model either way: sizing
+   * it to the camera instead would keep the marker at the same spot on the
+   * inset however far you flew, which reads as though nothing moved.
    */
-  private configurePlanCamera(): boolean {
+  private configurePlanCamera(locator = false): boolean {
     const b = this.batcher.getBounds();
     if (!Number.isFinite(b.min.x) || b.max.x < b.min.x) return false;
     const cx = (b.min.x + b.max.x) / 2;
     const cz = (b.min.z + b.max.z) / 2;
-    const half = (Math.max(b.max.x - b.min.x, b.max.z - b.min.z) * 0.54) || 1;
+    const half = (Math.max(b.max.x - b.min.x, b.max.z - b.min.z) * (locator ? 0.68 : 0.54)) || 1;
     const height = Math.max(b.max.y - b.min.y, 1);
     const cam = this.planCamera;
     cam.left = -half;
@@ -758,7 +1111,8 @@ export class SceneController {
    */
   pickInPlan(insetX: number, insetY: number): ScenePick | null {
     const rect = this.getPlanRect();
-    if (!rect || !this.configurePlanCamera()) return null;
+    // Same framing the inset drew with, or a click lands somewhere else.
+    if (!rect || !this.configurePlanCamera(true)) return null;
     if (insetX < 0 || insetY < 0 || insetX > rect.size || insetY > rect.size) return null;
     const scale = this.resolutionScale * this.userScale;
     const side = Math.max(1, Math.round(rect.size * scale));
@@ -782,12 +1136,112 @@ export class SceneController {
     return { expressID, point };
   }
 
+  /**
+   * The locator: a dot for where the camera stands and a wedge for what it
+   * can see, the way a map shows heading. Both are built in the XZ plane
+   * facing -Z, which is plan screen-up, and rotated about Y to the heading.
+   */
+  private ensurePlanMarker(): THREE.Group {
+    if (this.planMarker) return this.planMarker;
+    this.planMarkerScene = new THREE.Scene();
+    const group = new THREE.Group();
+
+    const cone = new THREE.BufferGeometry();
+    const half = Math.PI / 5;
+    const segments = 12;
+    const wedge: number[] = [];
+    for (let i = 0; i < segments; i++) {
+      const a = -half + (i / segments) * half * 2;
+      const b = -half + ((i + 1) / segments) * half * 2;
+      wedge.push(0, 0, 0, Math.sin(a) * 5.5, 0, -Math.cos(a) * 5.5, Math.sin(b) * 5.5, 0, -Math.cos(b) * 5.5);
+    }
+    cone.setAttribute('position', new THREE.Float32BufferAttribute(wedge, 3));
+    this.planCone = new THREE.Mesh(
+      cone,
+      new THREE.MeshBasicMaterial({
+        color: 0xff8c1a, depthTest: false, transparent: true, opacity: 0.32, side: THREE.DoubleSide,
+      }),
+    );
+    group.add(this.planCone);
+
+    // A dark halo under the dot, so the locator reads on a pale floor as well
+    // as a dark one.
+    const halo = new THREE.CircleGeometry(1.75, 20).rotateX(-Math.PI / 2);
+    group.add(new THREE.Mesh(halo, new THREE.MeshBasicMaterial({
+      color: 0x11151c, depthTest: false, transparent: true, opacity: 0.55, side: THREE.DoubleSide,
+    })));
+    const dot = new THREE.CircleGeometry(1.15, 20).rotateX(-Math.PI / 2);
+    group.add(new THREE.Mesh(dot, new THREE.MeshBasicMaterial({
+      color: 0xff8c1a, depthTest: false, transparent: true, opacity: 1, side: THREE.DoubleSide,
+    })));
+    const tip = new THREE.BufferGeometry();
+    tip.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, -2.6, -1.1, 0, -0.2, 1.1, 0, -0.2], 3));
+    group.add(new THREE.Mesh(tip, new THREE.MeshBasicMaterial({
+      color: 0xff8c1a, depthTest: false, transparent: true, opacity: 0.95, side: THREE.DoubleSide,
+    })));
+
+    group.traverse((node) => {
+      const material = (node as THREE.Mesh).material as THREE.MeshBasicMaterial | undefined;
+      if (material) this.planMarkerParts.push({ material, opacity: material.opacity });
+    });
+    this.planMarker = group;
+    this.planMarkerScene.add(group);
+    return group;
+  }
+
+  /** Ground position under an inset point; null when the inset is off. */
+  planPointAt(insetX: number, insetY: number): [number, number] | null {
+    const rect = this.getPlanRect();
+    if (!rect || !this.configurePlanCamera(true)) return null;
+    if (insetX < 0 || insetY < 0 || insetX > rect.size || insetY > rect.size) return null;
+    const cam = this.planCamera;
+    const half = cam.right;
+    // Screen-right is +X; screen-up is -Z (cam.up is 0,0,-1); insetY grows down.
+    return [
+      cam.position.x + ((insetX / rect.size) * 2 - 1) * half,
+      cam.position.z + ((insetY / rect.size) * 2 - 1) * half,
+    ];
+  }
+
+  /**
+   * The plan on its own, rendered square at `size` px into an offscreen
+   * target. It is a separate pass rather than a crop of the canvas so the
+   * sheet is not limited to the inset's 230 px, and it inherits the clipping
+   * planes, which is what makes it a cut rather than a roof.
+   */
+  capturePlan(size = 1600): HTMLCanvasElement | null {
+    const doc = this.renderer.domElement.ownerDocument;
+    if (!this.configurePlanCamera()) return null;
+    const side = Math.max(64, Math.min(4096, Math.floor(size)));
+    const target = new THREE.WebGLRenderTarget(side, side);
+    const previousTarget = this.renderer.getRenderTarget();
+    const pixels = new Uint8Array(side * side * 4);
+    try {
+      this.batcher.clearLod();
+      this.renderer.setRenderTarget(target);
+      this.renderer.render(this.scene, this.planCamera);
+      this.renderer.readRenderTargetPixels(target, 0, 0, side, side, pixels);
+    } finally {
+      this.renderer.setRenderTarget(previousTarget);
+      target.dispose();
+    }
+    const canvas = doc.createElement('canvas');
+    canvas.width = side;
+    canvas.height = side;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    const image = ctx.createImageData(side, side);
+    flipRows(pixels, side, image.data);
+    ctx.putImageData(image, 0, 0);
+    return canvas;
+  }
+
   private renderPlan(): void {
     // The inset looks down its own orthographic camera, so the main camera's
     // size decisions do not apply to it.
     this.batcher.clearLod();
     const rect = this.getPlanRect();
-    if (!rect || !this.configurePlanCamera()) return;
+    if (!rect || !this.configurePlanCamera(true)) return;
 
     const scale = this.resolutionScale * this.userScale;
     const px = Math.round(rect.x * scale);
@@ -798,6 +1252,36 @@ export class SceneController {
     r.setViewport(px, py, size, size);
     r.setScissor(px, py, size, size);
     r.render(this.scene, this.planCamera);
+    // Camera marker: where the main camera stands and which way it looks.
+    const marker = this.ensurePlanMarker();
+    const d = this.camera.getWorldDirection(_forward);
+    const b = this.batcher.getBounds();
+    const height = Number.isFinite(b.min.y) ? Math.max(b.max.y - b.min.y, 1) : 1;
+    const at = clampToPlan(
+      this.camera.position.x,
+      this.camera.position.z,
+      this.planCamera.position.x,
+      this.planCamera.position.z,
+      this.planCamera.right,
+    );
+    marker.position.set(at.x, (Number.isFinite(b.max.y) ? b.max.y : 0) + height * 0.5, at.z);
+    marker.rotation.y = Math.atan2(-d.x, -d.z);
+    // Pinned at the border it is a "you are over there" hint, so it dims.
+    for (const part of this.planMarkerParts) {
+      part.material.opacity = at.pinned ? part.opacity * 0.55 : part.opacity;
+    }
+    marker.scale.setScalar(this.planCamera.right * 0.07);
+    // The wedge stretches with the lens, so a zoomed view reads as a narrower
+    // cone, matching what the main view can actually see.
+    if (this.planCone) {
+      this.planCone.scale.setScalar(Math.tan((this.getFieldOfView() * Math.PI) / 360) / Math.tan(Math.PI / 7.2));
+    }
+    const savedClip = r.clippingPlanes;
+    r.clippingPlanes = [];
+    r.autoClear = false;
+    r.render(this.planMarkerScene!, this.planCamera);
+    r.autoClear = true;
+    r.clippingPlanes = savedClip;
     r.setScissorTest(false);
     const buffer = r.getDrawingBufferSize(new THREE.Vector2());
     r.setViewport(0, 0, buffer.x, buffer.y);
@@ -962,8 +1446,14 @@ export class SceneController {
   }
 
   private pixelScale(x: number, y: number, z: number): number {
-    const distance = this.camera.position.distanceTo(_scale.set(x, y, z));
-    const vFov = (this.camera.fov * Math.PI) / 180;
+    const cam = this.activeCamera;
+    if ((cam as THREE.OrthographicCamera).isOrthographicCamera) {
+      const o = cam as THREE.OrthographicCamera;
+      return (o.top - o.bottom) / o.zoom / Math.max(1, this.baseHeight);
+    }
+    const p = cam as THREE.PerspectiveCamera;
+    const distance = p.position.distanceTo(_scale.set(x, y, z));
+    const vFov = (p.fov * Math.PI) / 180;
     return (2 * Math.tan(vFov / 2) * distance) / Math.max(1, this.baseHeight);
   }
 
@@ -1002,8 +1492,18 @@ export class SceneController {
     viewChanged = remember(this.measureView, 4, camera.quaternion.y) || viewChanged;
     viewChanged = remember(this.measureView, 5, camera.quaternion.z) || viewChanged;
     viewChanged = remember(this.measureView, 6, camera.quaternion.w) || viewChanged;
-    viewChanged = remember(this.measureView, 7, camera.fov) || viewChanged;
-    viewChanged = remember(this.measureView, 8, camera.aspect) || viewChanged;
+    const ortho = (camera as THREE.OrthographicCamera).isOrthographicCamera
+      ? (camera as THREE.OrthographicCamera)
+      : null;
+    // Slot 7 tracks whatever controls the world-per-pixel scale in the active
+    // projection; slot 8 flips when the projection itself changes.
+    viewChanged =
+      remember(
+        this.measureView,
+        7,
+        ortho ? (ortho.top - ortho.bottom) / ortho.zoom : (camera as THREE.PerspectiveCamera).fov,
+      ) || viewChanged;
+    viewChanged = remember(this.measureView, 8, ortho ? 1 : 0) || viewChanged;
     viewChanged = remember(this.measureView, 9, this.baseWidth) || viewChanged;
     viewChanged = remember(this.measureView, 10, this.baseHeight) || viewChanged;
     const placedChanged = viewChanged || spans !== this.laidOutMeasureSpans;
@@ -1110,8 +1610,9 @@ export class SceneController {
     }
     // Outside the guard: the aspect follows the CSS size, which can change
     // without the floored buffer size changing.
-    this.camera.aspect = this.baseWidth / this.baseHeight;
-    this.camera.updateProjectionMatrix();
+    this.perspCamera.aspect = this.baseWidth / this.baseHeight;
+    this.perspCamera.updateProjectionMatrix();
+    this.syncOrthoFrustum();
   }
 
   /** Persistent render scale from settings (0.5 to 2 of CSS pixels). */
@@ -1161,6 +1662,7 @@ export class SceneController {
       ? this.batcher.applyLod(this.camera, this.renderer.domElement.height, this.lodThreshold)
       : 0;
     this.renderer.render(this.scene, this.camera);
+    if (this.showThrough && this.batcher.hasHighlight()) this.renderShowThrough();
     this.renderGizmos();
     if (this.plan) this.renderPlan();
     this.lastRenderMs = performance.now() - t0;

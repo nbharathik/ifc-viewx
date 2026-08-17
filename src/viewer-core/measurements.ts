@@ -218,6 +218,37 @@ export function formatArea(squareMetres: number, value?: Partial<MeasurementForm
   return `${decimal(squareMetres * scale, format.precision, format.zeroSuppression)} ${suffix}`;
 }
 
+export function formatVolume(cubicMetres: number, value?: Partial<MeasurementFormat>): string {
+  if (!Number.isFinite(cubicMetres)) return "-";
+  const format = cleanFormat(value);
+  const imperial =
+    format.unit === "decimal-feet" ||
+    format.unit === "decimal-inches" ||
+    format.unit === "engineering" ||
+    format.unit === "architectural";
+  if (imperial) {
+    return `${decimal(cubicMetres / 0.3048 ** 3, format.precision, format.zeroSuppression)} ft3`;
+  }
+  if (format.unit === "auto" && Math.abs(cubicMetres) < 0.001) {
+    return `${Math.round(cubicMetres * 1_000_000)} cm3`;
+  }
+  const digits = Math.abs(cubicMetres) >= 100 ? 1 : 3;
+  return `${cubicMetres.toFixed(digits)} m3`;
+}
+
+export function formatWeight(kilograms: number, value?: Partial<MeasurementFormat>): string {
+  if (!Number.isFinite(kilograms)) return "-";
+  const format = cleanFormat(value);
+  const imperial =
+    format.unit === "decimal-feet" ||
+    format.unit === "decimal-inches" ||
+    format.unit === "engineering" ||
+    format.unit === "architectural";
+  if (imperial) return `${(kilograms * 2.20462).toFixed(1)} lb`;
+  if (Math.abs(kilograms) >= 1000) return `${(kilograms / 1000).toFixed(2)} t`;
+  return `${kilograms.toFixed(1)} kg`;
+}
+
 export function formatCoordinate(point: Point3, value?: Partial<MeasurementFormat>): string {
   return `X ${formatLength(point[0], value)}  Y ${formatLength(point[1], value)}  Z ${formatLength(point[2], value)}`;
 }

@@ -5,7 +5,7 @@
 // f32 cast so georeferenced models do not jitter.
 import * as THREE from 'three';
 
-import type { IfcMesh, MeshGeometry, ModelBounds, Vec3 } from '../engine/types.js';
+import type { IfcMesh, MeshGeometry, ModelBounds, ModelTransform, Vec3 } from '../engine/types.js';
 import { modelOf, packId } from '../ids.js';
 
 /** Free a subtree's GPU buffers. Shared materials are owned by the batcher. */
@@ -34,6 +34,8 @@ const HIGHLIGHT_GLSL = 'vec3(1.0, 0.26225, 0.01033) * 0.55';
 const STATE_TEX_WIDTH = 1024;
 /** State R channel: hidden, ghosted, visible. Read as thresholds in the shader. */
 const STATE_HIDDEN = 0;
+/** Visible but see-through: a denser screen-door than ghost, own colour kept. */
+const STATE_XRAY = 200;
 const STATE_GHOST = 140;
 const STATE_VISIBLE = 255;
 /** Colour override palette entries. Index 0 means "no override". */
@@ -44,6 +46,9 @@ const PALETTE_SIZE = 256;
  * material to fade.
  */
 const GHOST_KEPT = 3;
+/** Pixels of every 16 an x-rayed element keeps; half reads as glass. */
+const XRAY_KEPT = 8;
+const ZERO_OFFSET: [number, number, number] = [0, 0, 0];
 
 /** Flat fill for a cut face. Neutral, so it reads as material, not as colour. */
 const CAP_GLSL = 'vec3(0.42, 0.44, 0.47)';
@@ -237,6 +242,7 @@ export class ModelBatcher {
    * accumulators are flushed at the end of every ingest, which is per model.
    */
   private readonly modelGroups = new Map<number, THREE.Group>();
+  private readonly modelTransforms = new Map<number, ModelTransform>();
   /** The model the current ingest belongs to; packed into every id it mints. */
   private activeModel = 0;
 
@@ -253,6 +259,11 @@ export class ModelBatcher {
   private origin: Vec3 | null = null;
   private boundsMin: Vec3 | null = null;
   private boundsMax: Vec3 | null = null;
+  /** Local-frame bounds per model, so the aggregate transforms 8 corners per
+   * model instead of 8 per element on every read. */
+  private readonly modelLocalBounds = new Map<number, { min: [number, number, number]; max: [number, number, number] }>();
+  /** getBounds() sits on hover and drag paths; recompute only when dirty. */
+  private aggregateBounds: ModelBounds | null = null;
 
   // Per-element state texture: R = visible, G = highlighted.
   private stateData: Uint8Array;
@@ -270,6 +281,22 @@ export class ModelBatcher {
   private ghostHidden = false;
   /** Pick-pass reading, and the view-depth range mode 1 packs into 24 bits. */
   private readonly depthModeUniform = { value: 0 };
+  private readonly pickSolidUniform = { value: 0 };
+  /** CPU copy of per-element display offsets, keyed by packed id. */
+  private readonly offsets = new Map<number, [number, number, number]>();
+  /** Parallel to the state texture; allocated on the first real offset. */
+  private offsetData: Float32Array | null = null;
+  private offsetTexture: THREE.DataTexture | null = null;
+  private readonly offsetTexUniform: { value: THREE.Texture };
+  private readonly offsetOnUniform = { value: 0 };
+  private offsetActive = false;
+  /** Longest active offset; pads culling spheres so displaced chunks draw. */
+  private maxOffset = 0;
+  private edgesOn = false;
+  /** One line mesh per model, parented in its group so placement applies. */
+  private readonly edgesMeshes = new Map<number, THREE.LineSegments>();
+  private edgesMaterial: THREE.ShaderMaterial | null = null;
+  private edgesBuiltFloats = -1;
   private readonly depthRangeUniform = { value: new THREE.Vector2(0, 1) };
 
   private readonly mergedOpaque: THREE.MeshLambertMaterial;
@@ -277,6 +304,7 @@ export class ModelBatcher {
   private readonly instOpaque: THREE.MeshLambertMaterial;
   private readonly instTransparentByAlpha = new Map<string, THREE.MeshLambertMaterial>();
   readonly pickMaterial: THREE.ShaderMaterial;
+  readonly showThroughMaterial: THREE.ShaderMaterial;
 
   // Duplicate detection: geometry occurrences and where the first one went.
   /** Per repeated geometry: how often it has been baked, until it instances. */
@@ -284,6 +312,7 @@ export class ModelBatcher {
 
   private highlighted = new Set<number>();
   private hiddenSet = new Set<number>();
+  private xraySet = new Set<number>();
   /** Whether any element is currently hidden or ghosted, so the shader needs
    *  its discards compiled in at all. */
   private hideActive = false;
@@ -307,10 +336,19 @@ export class ModelBatcher {
     this.paletteTexture.needsUpdate = true;
     this.paletteTexUniform = { value: this.paletteTexture };
 
+    // A 1x1 zero placeholder keeps every shader valid before any offset is
+    // set; the real texture replaces it on first use and grows with capacity.
+    const zero = new THREE.DataTexture(new Float32Array(4), 1, 1, THREE.RGBAFormat, THREE.FloatType);
+    zero.minFilter = THREE.NearestFilter;
+    zero.magFilter = THREE.NearestFilter;
+    zero.needsUpdate = true;
+    this.offsetTexUniform = { value: zero };
+
     this.mergedOpaque = this.makeLambert(false, true);
     this.mergedTransparent = this.makeLambert(true, true);
     this.instOpaque = this.makeLambert(false, false);
     this.pickMaterial = this.makePickMaterial();
+    this.showThroughMaterial = this.makeShowThroughMaterial();
   }
 
   /**
@@ -381,15 +419,29 @@ export class ModelBatcher {
     const stateSizeUniform = this.stateSizeUniform;
     const paletteTexUniform = this.paletteTexUniform;
     const overrideOnUniform = this.overrideOnUniform;
+    const offsetTexUniform = this.offsetTexUniform;
     material.onBeforeCompile = (shader) => {
       shader.uniforms.uStateTex = stateTexUniform;
       shader.uniforms.uStateSize = stateSizeUniform;
       shader.uniforms.uPaletteTex = paletteTexUniform;
       shader.uniforms.uOverrideOn = overrideOnUniform;
+      shader.uniforms.uOffsetTex = offsetTexUniform;
+      // The offset is world-space and applied in view space after
+      // project_vertex, so one path serves merged chunks and instances alike
+      // (adding to `transformed` would rotate the offset by instanceMatrix).
       shader.vertexShader = shader.vertexShader
         .replace(
           'void main() {',
-          'attribute float aElementIndex;\nvarying float vElementIndex;\nvoid main() {\n\tvElementIndex = aElementIndex;',
+          'attribute float aElementIndex;\nvarying float vElementIndex;\nuniform sampler2D uOffsetTex;\nuniform vec2 uStateSize;\nvoid main() {\n\tvElementIndex = aElementIndex;',
+        )
+        .replace(
+          '#include <project_vertex>',
+          '#include <project_vertex>\n' +
+            '\t#ifdef IFC_OFFSET\n' +
+            '\tvec2 ifcOffUv = (vec2(mod(aElementIndex, uStateSize.x), floor(aElementIndex / uStateSize.x)) + 0.5) / uStateSize;\n' +
+            '\tmvPosition.xyz += (viewMatrix * vec4(texture2D(uOffsetTex, ifcOffUv).xyz, 0.0)).xyz;\n' +
+            '\tgl_Position = projectionMatrix * mvPosition;\n' +
+            '\t#endif',
         );
       // The discards are behind IFC_HIDE on purpose. A fragment shader that
       // can discard loses early-Z on every draw, and a freshly loaded model
@@ -403,11 +455,13 @@ export class ModelBatcher {
             '\tvec4 ifcState = texture2D(uStateTex, stUv);\n' +
             '\t#ifdef IFC_HIDE\n' +
             '\tif (ifcState.r < 0.25) discard;\n' +
-            '\tfloat ifcGhost = step(ifcState.r, 0.75);\n' +
-            '\tif (ifcGhost > 0.5 && mod(floor(gl_FragCoord.x) * 3.0 + floor(gl_FragCoord.y) * 5.0, 16.0) >= ' +
-            `${GHOST_KEPT.toFixed(1)}) discard;\n` +
+            '\tfloat ifcGhost = step(ifcState.r, 0.7);\n' +
+            '\tfloat ifcXray = step(0.7, ifcState.r) * (1.0 - step(0.95, ifcState.r));\n' +
+            `\tfloat ifcKept = mix(${XRAY_KEPT.toFixed(1)}, ${GHOST_KEPT.toFixed(1)}, ifcGhost);\n` +
+            '\tif (max(ifcGhost, ifcXray) > 0.5 && mod(floor(gl_FragCoord.x) * 3.0 + floor(gl_FragCoord.y) * 5.0, 16.0) >= ifcKept) discard;\n' +
             '\t#else\n' +
             '\tfloat ifcGhost = 0.0;\n' +
+            '\tfloat ifcXray = 0.0;\n' +
             '\t#endif',
         )
         // The cap: a clipped solid shows its inside, so the back faces left
@@ -422,7 +476,8 @@ export class ModelBatcher {
             '\t#ifdef IFC_CAP\n' +
             `\tif (!gl_FrontFacing) diffuseColor.rgb = ${CAP_GLSL};\n` +
             '\t#endif\n' +
-            '\tif (ifcGhost > 0.5) diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.62), 0.72);',
+            '\tif (ifcGhost > 0.5) diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.62), 0.72);\n' +
+            '\tif (ifcXray > 0.5) diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.6), 0.22);',
         )
         .replace(
           '#include <emissivemap_fragment>',
@@ -449,17 +504,28 @@ export class ModelBatcher {
         uStateSize: this.stateSizeUniform,
         uDepthMode: this.depthModeUniform,
         uDepthRange: this.depthRangeUniform,
+        uPickSolid: this.pickSolidUniform,
+        uOffsetTex: this.offsetTexUniform,
+        uOffsetOn: this.offsetOnUniform,
       },
       vertexShader: `
         attribute float aElementIndex;
         varying float vElementIndex;
         varying float vViewDepth;
+        uniform sampler2D uOffsetTex;
+        uniform float uOffsetOn;
+        uniform vec2 uStateSize;
         #include <common>
         #include <clipping_planes_pars_vertex>
         void main() {
           vElementIndex = aElementIndex;
           #include <begin_vertex>
           #include <project_vertex>
+          if (uOffsetOn > 0.5) {
+            vec2 ifcOffUv = (vec2(mod(aElementIndex, uStateSize.x), floor(aElementIndex / uStateSize.x)) + 0.5) / uStateSize;
+            mvPosition.xyz += (viewMatrix * vec4(texture2D(uOffsetTex, ifcOffUv).xyz, 0.0)).xyz;
+            gl_Position = projectionMatrix * mvPosition;
+          }
           vViewDepth = -mvPosition.z;
           #include <clipping_planes_vertex>
         }
@@ -469,13 +535,16 @@ export class ModelBatcher {
         uniform vec2 uStateSize;
         uniform float uDepthMode;
         uniform vec2 uDepthRange;
+        uniform float uPickSolid;
         varying float vElementIndex;
         varying float vViewDepth;
         #include <clipping_planes_pars_fragment>
         void main() {
           #include <clipping_planes_fragment>
           vec2 stUv = (vec2(mod(vElementIndex, uStateSize.x), floor(vElementIndex / uStateSize.x)) + 0.5) / uStateSize;
-          if (texture2D(uStateTex, stUv).r < 0.75) discard;
+          float ifcR = texture2D(uStateTex, stUv).r;
+          if (ifcR < 0.7) discard;
+          if (uPickSolid > 0.5 && ifcR < 0.95) discard;
           if (uDepthMode > 0.5) {
             float t = clamp((vViewDepth - uDepthRange.x) / uDepthRange.y, 0.0, 1.0);
             vec3 enc = fract(vec3(1.0, 255.0, 65025.0) * t);
@@ -499,6 +568,64 @@ export class ModelBatcher {
   setDepthPick(on: boolean, near = 0, span = 1): void {
     this.depthModeUniform.value = on ? 1 : 0;
     this.depthRangeUniform.value.set(near, Math.max(span, 1e-6));
+  }
+
+  /**
+   * Highlighted elements only, drawn without a depth test: the selection
+   * reads through whatever covers it. Used as an override material for one
+   * extra pass, so it costs nothing while the toggle is off.
+   */
+  private makeShowThroughMaterial(): THREE.ShaderMaterial {
+    return new THREE.ShaderMaterial({
+      side: THREE.DoubleSide,
+      clipping: true,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      uniforms: {
+        uStateTex: this.stateTexUniform,
+        uStateSize: this.stateSizeUniform,
+        uOffsetTex: this.offsetTexUniform,
+        uOffsetOn: this.offsetOnUniform,
+      },
+      vertexShader: `
+        attribute float aElementIndex;
+        varying float vElementIndex;
+        uniform sampler2D uOffsetTex;
+        uniform float uOffsetOn;
+        uniform vec2 uStateSize;
+        #include <common>
+        #include <clipping_planes_pars_vertex>
+        void main() {
+          vElementIndex = aElementIndex;
+          #include <begin_vertex>
+          #include <project_vertex>
+          if (uOffsetOn > 0.5) {
+            vec2 ifcOffUv = (vec2(mod(aElementIndex, uStateSize.x), floor(aElementIndex / uStateSize.x)) + 0.5) / uStateSize;
+            mvPosition.xyz += (viewMatrix * vec4(texture2D(uOffsetTex, ifcOffUv).xyz, 0.0)).xyz;
+            gl_Position = projectionMatrix * mvPosition;
+          }
+          #include <clipping_planes_vertex>
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D uStateTex;
+        uniform vec2 uStateSize;
+        varying float vElementIndex;
+        #include <clipping_planes_pars_fragment>
+        void main() {
+          #include <clipping_planes_fragment>
+          vec2 stUv = (vec2(mod(vElementIndex, uStateSize.x), floor(vElementIndex / uStateSize.x)) + 0.5) / uStateSize;
+          vec4 ifcState = texture2D(uStateTex, stUv);
+          if (ifcState.g < 0.5 || ifcState.r < 0.25) discard;
+          gl_FragColor = vec4(1.0, 0.55, 0.1, 0.3);
+        }
+      `,
+    });
+  }
+
+  hasHighlight(): boolean {
+    return this.highlighted.size > 0;
   }
 
   // -- ingest --------------------------------------------------------------
@@ -591,6 +718,8 @@ export class ModelBatcher {
     }
     const host = this.groupFor(modelIndex);
     for (const chunk of chunks) host.add(chunk);
+    // A batch landing while the layer is on shows its edges right away.
+    if (this.edgesOn) this.buildEdges();
   }
 
   /** This model's group, created on first sight. */
@@ -603,6 +732,7 @@ export class ModelBatcher {
       group.matrixAutoUpdate = false;
       this.modelGroups.set(modelIndex, group);
       this.group.add(group);
+      this.applyModelTransform(modelIndex, group);
     }
     return group;
   }
@@ -622,16 +752,40 @@ export class ModelBatcher {
     return this.modelGroups.get(modelIndex)?.visible ?? true;
   }
 
-  /** Nudge one discipline, for files that disagree about the shared origin. */
-  setModelTransform(modelIndex: number, offset: [number, number, number]): void {
-    const group = this.groupFor(modelIndex);
-    group.position.set(offset[0], offset[1], offset[2]);
-    group.updateMatrix();
+  setModelPlacement(modelIndex: number, transform: ModelTransform): void {
+    this.modelTransforms.set(modelIndex, {
+      ...transform,
+      translation: [...transform.translation],
+    });
+    this.applyModelTransform(modelIndex, this.groupFor(modelIndex));
   }
 
-  getModelTransform(modelIndex: number): [number, number, number] {
-    const group = this.modelGroups.get(modelIndex);
-    return group ? [group.position.x, group.position.y, group.position.z] : [0, 0, 0];
+  getModelPlacement(modelIndex: number): ModelTransform {
+    const transform = this.modelTransforms.get(modelIndex);
+    return transform
+      ? { ...transform, translation: [...transform.translation] }
+      : { translation: [0, 0, 0], rotationZ: 0, scale: 1, source: 'none' };
+  }
+
+  private applyModelTransform(modelIndex: number, group: THREE.Group): void {
+    const transform = this.getModelPlacement(modelIndex);
+    const origin = this.origin ?? { x: 0, y: 0, z: 0 };
+    // The scene is Y-up, so a model rotation is a plan rotation about Y in
+    // the XZ ground plane; translation components are scene axes throughout.
+    const cosine = Math.cos(transform.rotationZ) * transform.scale;
+    const sine = Math.sin(transform.rotationZ) * transform.scale;
+    const ox = cosine * origin.x + sine * origin.z;
+    const oy = transform.scale * origin.y;
+    const oz = -sine * origin.x + cosine * origin.z;
+    group.position.set(
+      transform.translation[0] + ox - origin.x,
+      transform.translation[1] + oy - origin.y,
+      transform.translation[2] + oz - origin.z,
+    );
+    group.rotation.set(0, transform.rotationZ, 0);
+    group.scale.setScalar(transform.scale);
+    group.updateMatrix();
+    this.aggregateBounds = null;
   }
 
   /**
@@ -647,13 +801,24 @@ export class ModelBatcher {
       this.group.remove(group);
       this.modelGroups.delete(modelIndex);
     }
-    for (const id of [...this.elements.keys()]) {
+    // Its edge mesh went down with the group tree; drop the dead entry.
+    this.edgesMeshes.delete(modelIndex);
+    this.modelTransforms.delete(modelIndex);
+    this.modelLocalBounds.delete(modelIndex);
+    this.aggregateBounds = null;
+    let droppedOffsets = false;
+    for (const [id, record] of [...this.elements]) {
       if (modelOf(id) !== modelIndex) continue;
       this.elements.delete(id);
       this.segmentsByElement.delete(id);
       this.hiddenSet.delete(id);
+      this.xraySet.delete(id);
       this.highlighted.delete(id);
       this.overrideIndex.delete(id);
+      if (this.offsets.delete(id)) {
+        droppedOffsets = true;
+        this.offsetData?.fill(0, record.index * 4, record.index * 4 + 4);
+      }
     }
     // The instanced meshes themselves went with the group; this drops the
     // dedup records that would otherwise keep matching a model that is gone.
@@ -661,9 +826,19 @@ export class ModelBatcher {
       if (key.startsWith(`${modelIndex}:`)) this.geometrySeen.delete(key);
     }
     for (let i = 0; i < this.elementsByIndex.length; i++) {
-      if (modelOf(this.elementsByIndex[i]) === modelIndex) this.elementsByIndex[i] = -1;
+      if (modelOf(this.elementsByIndex[i]) !== modelIndex) continue;
+      this.elementsByIndex[i] = -1;
+      // Zeroed so surviving edge fragments of the slot discard; the hide
+      // scan skips tombstones, so the stale byte cannot latch the define.
+      this.stateData.fill(0, i * 4, i * 4 + 4);
+    }
+    this.stateTexture.needsUpdate = true;
+    if (droppedOffsets) {
+      if (this.offsetTexture) this.offsetTexture.needsUpdate = true;
+      this.syncOffsetState();
     }
     this.rewriteAllStates();
+    if (this.edgesOn) this.buildEdges();
   }
 
   /** Coarse spatial cell (0..7) of a mesh's AABB center, in shifted space. */
@@ -757,6 +932,16 @@ export class ModelBatcher {
       this.boundsMax.y = Math.max(this.boundsMax.y, max[1]);
       this.boundsMax.z = Math.max(this.boundsMax.z, max[2]);
     }
+    const local = this.modelLocalBounds.get(this.activeModel);
+    if (!local) {
+      this.modelLocalBounds.set(this.activeModel, { min: [...min], max: [...max] });
+    } else {
+      for (let i = 0; i < 3; i++) {
+        if (min[i] < local.min[i]) local.min[i] = min[i];
+        if (max[i] > local.max[i]) local.max[i] = max[i];
+      }
+    }
+    this.aggregateBounds = null;
   }
 
   /** Bake one mesh (matrix applied, origin subtracted, f64 math) into a chunk. */
@@ -853,6 +1038,10 @@ export class ModelBatcher {
     // otherwise compute it lazily after onUpload freed the array, and the
     // sphere is what makes per-chunk frustum culling work.
     geometry.computeBoundingSphere();
+    if (this.maxOffset > 0 && geometry.boundingSphere) {
+      (geometry.userData ??= {}).ifcBaseRadius = geometry.boundingSphere.radius;
+      geometry.boundingSphere.radius += this.maxOffset;
+    }
 
     const mesh = new THREE.Mesh(
       geometry,
@@ -912,6 +1101,12 @@ export class ModelBatcher {
       material = this.makeLambert(true, false);
       material.opacity = alpha;
       material.customProgramCacheKey = () => 'ifc-batch-true-false';
+      // The define syncs are transition-gated, so a material minted after a
+      // transition has to catch up with the active state here.
+      if (this.hideActive) material.defines = { ...material.defines, IFC_HIDE: '' };
+      if (this.capped) material.defines = { ...material.defines, IFC_CAP: '' };
+      if (this.offsetActive) material.defines = { ...material.defines, IFC_OFFSET: '' };
+      material.side = this.userDoubleSided || this.capped ? THREE.DoubleSide : THREE.FrontSide;
       this.instTransparentByAlpha.set(key, material);
     }
     return material;
@@ -1011,6 +1206,10 @@ export class ModelBatcher {
     if (ty > entry.tMax[1]) entry.tMax[1] = ty;
     if (tz > entry.tMax[2]) entry.tMax[2] = tz;
 
+    this.refreshInstancedSphere(entry);
+  }
+
+  private refreshInstancedSphere(entry: InstancedEntry): void {
     const target = entry.mesh!;
     if (!target.boundingSphere) target.boundingSphere = new THREE.Sphere();
     const sphere = target.boundingSphere;
@@ -1024,7 +1223,8 @@ export class ModelBatcher {
       (entry.tMax[1] - entry.tMin[1]) / 2,
       (entry.tMax[2] - entry.tMin[2]) / 2,
     );
-    sphere.radius = half + entry.geometryRadius * entry.maxScale;
+    // maxOffset pads for display offsets, so a displaced copy stays drawn.
+    sphere.radius = half + entry.geometryRadius * entry.maxScale + this.maxOffset;
   }
 
   // -- element state -------------------------------------------------------
@@ -1041,6 +1241,9 @@ export class ModelBatcher {
     this.stateTexture = this.makeStateTexture(data, height);
     this.stateTexUniform.value = this.stateTexture;
     this.stateSizeUniform.value.set(STATE_TEX_WIDTH, height);
+    // The offset texture indexes by the same element ordinals, so it grows
+    // in step once it exists at all.
+    if (this.offsetData) this.ensureOffsetCapacity();
   }
 
   private isVisible(record: ElementRecord, expressID: number): boolean {
@@ -1055,7 +1258,9 @@ export class ModelBatcher {
    * order to see every space and opening faintly behind it.
    */
   private stateFor(record: ElementRecord, expressID: number): number {
-    if (this.isVisible(record, expressID)) return STATE_VISIBLE;
+    if (this.isVisible(record, expressID)) {
+      return this.xraySet.has(expressID) ? STATE_XRAY : STATE_VISIBLE;
+    }
     const categoryOff =
       record.ifcType in this.categoryVisible && !this.categoryVisible[record.ifcType];
     return this.ghostHidden && !categoryOff ? STATE_GHOST : STATE_HIDDEN;
@@ -1072,6 +1277,7 @@ export class ModelBatcher {
     // so a set-based test would claim a fresh model hides something.
     let needed = false;
     for (let i = 0; i < this.elementsByIndex.length; i++) {
+      if (this.elementsByIndex[i] === -1) continue;
       if (this.stateData[i * 4] !== STATE_VISIBLE) {
         needed = true;
         break;
@@ -1111,6 +1317,276 @@ export class ModelBatcher {
 
   isGhostHidden(): boolean {
     return this.ghostHidden;
+  }
+
+  /** Draw visible elements as a see-through screen-door hatch. */
+  setXray(expressIDs: Iterable<number>, on: boolean): void {
+    for (const id of expressIDs) {
+      if (on) this.xraySet.add(id);
+      else this.xraySet.delete(id);
+      const record = this.elements.get(id);
+      if (record) this.writeState(record);
+    }
+    this.syncHideDefine();
+  }
+
+  clearXray(): void {
+    if (this.xraySet.size === 0) return;
+    this.xraySet.clear();
+    this.rewriteAllStates();
+  }
+
+  isElementXray(expressID: number): boolean {
+    return this.xraySet.has(expressID);
+  }
+
+  getXrayCount(): number {
+    return this.xraySet.size;
+  }
+
+  /** When on, the pick pass skips x-rayed elements and hits what is behind. */
+  setPickSolidOnly(on: boolean): void {
+    this.pickSolidUniform.value = on ? 1 : 0;
+  }
+
+  isPickSolidOnly(): boolean {
+    return this.pickSolidUniform.value > 0;
+  }
+
+  // -- display offsets ------------------------------------------------------
+
+  private ensureOffsetCapacity(): void {
+    const needed = this.stateCapacity * 4;
+    if (this.offsetData && this.offsetData.length >= needed) return;
+    const height = this.stateCapacity / STATE_TEX_WIDTH;
+    const data = new Float32Array(needed);
+    if (this.offsetData) data.set(this.offsetData);
+    // The placeholder (or any texture the uniform still points at) goes too.
+    const previous = this.offsetTexUniform.value;
+    if (previous !== this.offsetTexture) previous.dispose();
+    this.offsetTexture?.dispose();
+    this.offsetData = data;
+    this.offsetTexture = new THREE.DataTexture(data, STATE_TEX_WIDTH, height, THREE.RGBAFormat, THREE.FloatType);
+    this.offsetTexture.minFilter = THREE.NearestFilter;
+    this.offsetTexture.magFilter = THREE.NearestFilter;
+    this.offsetTexture.needsUpdate = true;
+    this.offsetTexUniform.value = this.offsetTexture;
+  }
+
+  /**
+   * Display-only translation per element: storey slide, explode and the
+   * BIMVision-style offsets. Geometry queries and snapping keep model
+   * positions; the pick pass applies the same shift, so clicking follows.
+   */
+  setElementOffsets(entries: Iterable<[number, [number, number, number]]>): void {
+    this.ensureOffsetCapacity();
+    const data = this.offsetData!;
+    for (const [id, offset] of entries) {
+      const record = this.elements.get(id);
+      if (!record) continue;
+      if (offset[0] === 0 && offset[1] === 0 && offset[2] === 0) this.offsets.delete(id);
+      else this.offsets.set(id, [offset[0], offset[1], offset[2]]);
+      const base = record.index * 4;
+      data[base] = offset[0];
+      data[base + 1] = offset[1];
+      data[base + 2] = offset[2];
+    }
+    if (this.offsetTexture) this.offsetTexture.needsUpdate = true;
+    this.syncOffsetState();
+  }
+
+  clearElementOffsets(): void {
+    if (this.offsets.size === 0 && !this.offsetActive) return;
+    this.offsets.clear();
+    this.offsetData?.fill(0);
+    if (this.offsetTexture) this.offsetTexture.needsUpdate = true;
+    this.syncOffsetState();
+  }
+
+  hasElementOffsets(): boolean {
+    return this.offsets.size > 0;
+  }
+
+  getElementOffset(expressID: number): [number, number, number] | null {
+    const offset = this.offsets.get(expressID);
+    return offset ? [offset[0], offset[1], offset[2]] : null;
+  }
+
+  /** Snapshot for viewpoints. */
+  getElementOffsets(): Array<[number, [number, number, number]]> {
+    return [...this.offsets.entries()].map(([id, o]) => [id, [o[0], o[1], o[2]]]);
+  }
+
+  // -- feature edge layer ---------------------------------------------------
+
+  /**
+   * Draw the cached snap edges as one line layer over the shading. The edges
+   * were already extracted for snapping, so showing them costs one concat and
+   * a small state-aware material; hidden and ghosted elements drop their
+   * edges through the same state texture the meshes read.
+   */
+  setEdges(on: boolean): void {
+    this.edgesOn = on;
+    if (!on) {
+      for (const mesh of this.edgesMeshes.values()) mesh.visible = false;
+      return;
+    }
+    this.buildEdges();
+  }
+
+  isEdges(): boolean {
+    return this.edgesOn;
+  }
+
+  private buildEdges(): void {
+    let total = 0;
+    for (const [id, segments] of this.segmentsByElement) {
+      if (this.elements.has(id)) total += segments.length;
+    }
+    if (this.edgesBuiltFloats === total) {
+      for (const mesh of this.edgesMeshes.values()) mesh.visible = true;
+      return;
+    }
+    this.disposeEdges();
+    this.edgesBuiltFloats = total;
+    if (total === 0) return;
+    // Segments are model-local; one mesh per model, parented in that model's
+    // group, picks up the placement matrix the merged chunks already get.
+    const floatsByModel = new Map<number, number>();
+    for (const [id, segments] of this.segmentsByElement) {
+      if (!this.elements.has(id)) continue;
+      const model = modelOf(id);
+      floatsByModel.set(model, (floatsByModel.get(model) ?? 0) + segments.length);
+    }
+    const writers = new Map<number, { positions: Float32Array; elementIndex: Float32Array; offset: number }>();
+    for (const [model, floats] of floatsByModel) {
+      writers.set(model, {
+        positions: new Float32Array(floats),
+        elementIndex: new Float32Array(floats / 3),
+        offset: 0,
+      });
+    }
+    for (const [id, segments] of this.segmentsByElement) {
+      const record = this.elements.get(id);
+      if (!record) continue;
+      const writer = writers.get(modelOf(id))!;
+      writer.positions.set(segments, writer.offset);
+      writer.elementIndex.fill(record.index, writer.offset / 3, writer.offset / 3 + segments.length / 3);
+      writer.offset += segments.length;
+    }
+    this.edgesMaterial ??= this.makeEdgesMaterial();
+    for (const [model, writer] of writers) {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(writer.positions, 3));
+      geometry.setAttribute('aElementIndex', new THREE.BufferAttribute(writer.elementIndex, 1));
+      const mesh = new THREE.LineSegments(geometry, this.edgesMaterial);
+      // One geometry spans a whole model; per-chunk culling gains nothing.
+      mesh.frustumCulled = false;
+      mesh.matrixAutoUpdate = false;
+      this.edgesMeshes.set(model, mesh);
+      this.groupFor(model).add(mesh);
+    }
+  }
+
+  private disposeEdges(): void {
+    for (const mesh of this.edgesMeshes.values()) {
+      mesh.removeFromParent();
+      mesh.geometry.dispose();
+    }
+    this.edgesMeshes.clear();
+  }
+
+  private makeEdgesMaterial(): THREE.ShaderMaterial {
+    return new THREE.ShaderMaterial({
+      clipping: true,
+      transparent: true,
+      uniforms: {
+        uStateTex: this.stateTexUniform,
+        uStateSize: this.stateSizeUniform,
+        uOffsetTex: this.offsetTexUniform,
+        uOffsetOn: this.offsetOnUniform,
+        uEdgeColor: { value: new THREE.Color(0x1f2937) },
+        uEdgeOpacity: { value: 0.45 },
+      },
+      vertexShader: `
+        attribute float aElementIndex;
+        varying float vElementIndex;
+        uniform sampler2D uOffsetTex;
+        uniform float uOffsetOn;
+        uniform vec2 uStateSize;
+        #include <common>
+        #include <clipping_planes_pars_vertex>
+        void main() {
+          vElementIndex = aElementIndex;
+          #include <begin_vertex>
+          #include <project_vertex>
+          if (uOffsetOn > 0.5) {
+            vec2 ifcOffUv = (vec2(mod(aElementIndex, uStateSize.x), floor(aElementIndex / uStateSize.x)) + 0.5) / uStateSize;
+            mvPosition.xyz += (viewMatrix * vec4(texture2D(uOffsetTex, ifcOffUv).xyz, 0.0)).xyz;
+            gl_Position = projectionMatrix * mvPosition;
+          }
+          gl_Position.z -= 0.0005 * gl_Position.w;
+          #include <clipping_planes_vertex>
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D uStateTex;
+        uniform vec2 uStateSize;
+        uniform vec3 uEdgeColor;
+        uniform float uEdgeOpacity;
+        varying float vElementIndex;
+        #include <clipping_planes_pars_fragment>
+        void main() {
+          #include <clipping_planes_fragment>
+          vec2 stUv = (vec2(mod(vElementIndex, uStateSize.x), floor(vElementIndex / uStateSize.x)) + 0.5) / uStateSize;
+          if (texture2D(uStateTex, stUv).r < 0.7) discard;
+          gl_FragColor = vec4(uEdgeColor, uEdgeOpacity);
+        }
+      `,
+    });
+  }
+
+  private syncOffsetState(): void {
+    this.aggregateBounds = null;
+    const active = this.offsets.size > 0;
+    this.offsetOnUniform.value = active ? 1 : 0;
+    let max = 0;
+    for (const [x, y, z] of this.offsets.values()) {
+      const len = Math.hypot(x, y, z);
+      if (len > max) max = len;
+    }
+    this.maxOffset = max;
+    if (active !== this.offsetActive) {
+      this.offsetActive = active;
+      for (const material of this.batchMaterials()) {
+        if (active) material.defines = { ...material.defines, IFC_OFFSET: '' };
+        else if (material.defines) delete material.defines.IFC_OFFSET;
+        material.needsUpdate = true;
+      }
+    }
+    this.applyCullPadding();
+  }
+
+  /**
+   * Culling spheres are built from undisplaced geometry; pad them by the
+   * longest active offset so a displaced element is never frustum-culled by
+   * the bounds it moved out of.
+   */
+  private applyCullPadding(): void {
+    const pad = this.maxOffset;
+    for (const group of this.modelGroups.values()) {
+      group.traverse((node) => {
+        const sphere = (node as THREE.Mesh).geometry?.boundingSphere;
+        if (!sphere) return;
+        const data = ((node as THREE.Mesh).geometry.userData ??= {});
+        if (typeof data.ifcBaseRadius !== 'number') data.ifcBaseRadius = sphere.radius;
+        sphere.radius = (data.ifcBaseRadius as number) + pad;
+      });
+    }
+    for (const entry of this.geometrySeen.values()) {
+      if (!('mesh' in entry) || !entry.mesh?.boundingSphere) continue;
+      this.refreshInstancedSphere(entry);
+    }
   }
 
   /**
@@ -1282,9 +1758,34 @@ export class ModelBatcher {
   elementBounds(expressID: number): ModelBounds | null {
     const record = this.elements.get(expressID);
     if (!record || record.min[0] === Infinity) return null;
+    // Display offsets shift where the element is drawn, so framing, ray
+    // points and boxes should land on the displaced position.
+    const shift = this.offsets.get(expressID) ?? ZERO_OFFSET;
+    const group = this.modelGroups.get(modelOf(expressID));
+    if (!group) return {
+      min: { x: record.min[0] + shift[0], y: record.min[1] + shift[1], z: record.min[2] + shift[2] },
+      max: { x: record.max[0] + shift[0], y: record.max[1] + shift[1], z: record.max[2] + shift[2] },
+    };
+    const min: [number, number, number] = [Infinity, Infinity, Infinity];
+    const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+    const matrix = group.matrix.elements;
+    for (let corner = 0; corner < 8; corner++) {
+      const x = corner & 1 ? record.max[0] : record.min[0];
+      const y = corner & 2 ? record.max[1] : record.min[1];
+      const z = corner & 4 ? record.max[2] : record.min[2];
+      const px = matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12];
+      const py = matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13];
+      const pz = matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14];
+      min[0] = Math.min(min[0], px);
+      min[1] = Math.min(min[1], py);
+      min[2] = Math.min(min[2], pz);
+      max[0] = Math.max(max[0], px);
+      max[1] = Math.max(max[1], py);
+      max[2] = Math.max(max[2], pz);
+    }
     return {
-      min: { x: record.min[0], y: record.min[1], z: record.min[2] },
-      max: { x: record.max[0], y: record.max[1], z: record.max[2] },
+      min: { x: min[0] + shift[0], y: min[1] + shift[1], z: min[2] + shift[2] },
+      max: { x: max[0] + shift[0], y: max[1] + shift[1], z: max[2] + shift[2] },
     };
   }
 
@@ -1312,9 +1813,56 @@ export class ModelBatcher {
   }
 
   getBounds(): ModelBounds {
-    return this.boundsMin && this.boundsMax
-      ? { min: { ...this.boundsMin }, max: { ...this.boundsMax } }
-      : { min: { x: 0, y: 0, z: 0 }, max: { x: 0, y: 0, z: 0 } };
+    if (!this.aggregateBounds) {
+      let min: Vec3 | null = null;
+      let max: Vec3 | null = null;
+      const expand = (x: number, y: number, z: number): void => {
+        if (!min || !max) {
+          min = { x, y, z };
+          max = { x, y, z };
+          return;
+        }
+        if (x < min.x) min.x = x;
+        if (y < min.y) min.y = y;
+        if (z < min.z) min.z = z;
+        if (x > max.x) max.x = x;
+        if (y > max.y) max.y = y;
+        if (z > max.z) max.z = z;
+      };
+      for (const [modelIndex, local] of this.modelLocalBounds) {
+        const m = this.modelGroups.get(modelIndex)?.matrix.elements;
+        for (let corner = 0; corner < 8; corner++) {
+          const x = corner & 1 ? local.max[0] : local.min[0];
+          const y = corner & 2 ? local.max[1] : local.min[1];
+          const z = corner & 4 ? local.max[2] : local.min[2];
+          if (m) expand(
+            m[0] * x + m[4] * y + m[8] * z + m[12],
+            m[1] * x + m[5] * y + m[9] * z + m[13],
+            m[2] * x + m[6] * y + m[10] * z + m[14],
+          );
+          else expand(x, y, z);
+        }
+      }
+      // Displaced elements can poke out of the resting box by at most the
+      // longest offset; padding keeps the cache a safe superset.
+      if (min && max && this.maxOffset > 0) {
+        const safeMin = min as Vec3;
+        const safeMax = max as Vec3;
+        safeMin.x -= this.maxOffset;
+        safeMin.y -= this.maxOffset;
+        safeMin.z -= this.maxOffset;
+        safeMax.x += this.maxOffset;
+        safeMax.y += this.maxOffset;
+        safeMax.z += this.maxOffset;
+      }
+      this.aggregateBounds = min && max
+        ? { min, max }
+        : { min: { x: 0, y: 0, z: 0 }, max: { x: 0, y: 0, z: 0 } };
+    }
+    return {
+      min: { ...this.aggregateBounds.min },
+      max: { ...this.aggregateBounds.max },
+    };
   }
 
   getOrigin(): Vec3 {
@@ -1328,7 +1876,24 @@ export class ModelBatcher {
   segmentsOf(expressID: number): Float32Array | undefined {
     const record = this.elements.get(expressID);
     if (!record || !this.isVisible(record, expressID)) return undefined;
-    return this.segmentsByElement.get(expressID);
+    const source = this.segmentsByElement.get(expressID);
+    const group = this.modelGroups.get(modelOf(expressID));
+    if (!source || !group) return source;
+    const matrix = group.matrix.elements;
+    if (matrix[0] === 1 && matrix[5] === 1 && matrix[10] === 1 &&
+      matrix[1] === 0 && matrix[4] === 0 && matrix[12] === 0 && matrix[13] === 0 && matrix[14] === 0) {
+      return source;
+    }
+    const out = new Float32Array(source.length);
+    for (let index = 0; index < source.length; index += 3) {
+      const x = source[index];
+      const y = source[index + 1];
+      const z = source[index + 2];
+      out[index] = matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12];
+      out[index + 1] = matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13];
+      out[index + 2] = matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14];
+    }
+    return out;
   }
 
   /**
@@ -1385,13 +1950,19 @@ export class ModelBatcher {
   dispose(): void {
     disposeTree(this.group);
     this.modelGroups.clear();
+    this.modelTransforms.clear();
     this.mergedOpaque.dispose();
     this.mergedTransparent.dispose();
     this.instOpaque.dispose();
     for (const material of this.instTransparentByAlpha.values()) material.dispose();
     this.instTransparentByAlpha.clear();
     this.pickMaterial.dispose();
+    this.showThroughMaterial.dispose();
     this.stateTexture.dispose();
+    this.offsetTexture?.dispose();
+    (this.offsetTexUniform.value as THREE.Texture | null)?.dispose();
+    this.disposeEdges();
+    this.edgesMaterial?.dispose();
     this.paletteTexture.dispose();
     this.elements.clear();
     this.segmentsByElement.clear();

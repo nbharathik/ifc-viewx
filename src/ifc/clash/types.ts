@@ -25,6 +25,8 @@ export interface ClashPair {
   extent: [number, number, number];
   /** Intersecting triangle pairs found, capped per pair. */
   triangles: number;
+  /** Projected coordinate attached by the viewer after the geometry sweep. */
+  georeferenced?: { crs: string; coordinates: [number, number, number] };
 }
 
 export interface SweepSpec {
@@ -35,6 +37,8 @@ export interface SweepSpec {
   origin: [number, number, number];
   /** Per-model nudges, as model index followed by xyz. */
   offsets: Float64Array;
+  /** Full per-model translation, Z rotation and scale. */
+  transforms?: Float64Array;
   /** Intersections thinner than this are grazes and are dropped. */
   toleranceMm: number;
   /** Above zero, pairs that miss are also tested for a gap under this. */

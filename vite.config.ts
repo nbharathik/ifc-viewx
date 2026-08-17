@@ -59,9 +59,12 @@ export default defineConfig({
         // reason and so the inline fallback shares it with the workers.
         // three-mesh-bvh is deliberately excluded: it belongs to the clash
         // worker, and folding it into the always-loaded three chunk would
-        // make every session pay for a panel most never open.
+        // make every session pay for a panel most never open. The three
+        // example exporters are excluded for the same reason: src/export
+        // imports them dynamically and they must stay lazy.
         manualChunks: (id) =>
           id.includes("node_modules/three-mesh-bvh") ? undefined
+          : id.includes("node_modules/three/examples/jsm/exporters") ? undefined
           : id.includes("node_modules/three") ? "three"
           : id.includes("node_modules/web-ifc") ? "web-ifc"
           : undefined,

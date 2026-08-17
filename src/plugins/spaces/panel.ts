@@ -4,7 +4,7 @@
 // footprint stands in and the row says so, because an area schedule quoted from
 // an estimate without knowing it is worse than one with gaps in it.
 import {
-  bar, button, copyTable, emptyState, grid, h, hint, note, page, progress, search, select, stats, toCsv,
+  bar, button, copyTable, emptyState, grid, h, header, hint, note, page, progress, saveXlsx, search, select, stats, toCsv,
   type ElementRow, type ExtensionContext, type GridRow,
 } from "@ifcviewx/sdk";
 
@@ -275,7 +275,18 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): void {
     ctx.files.export("spaces.csv", `rooms-${ctx.session.model().name || "model"}.csv`, `\uFEFF${csv}`, "text/csv");
   };
 
+  const exportXlsx = async (): Promise<void> => {
+    if (roomsOf().length === 0) return void ctx.feedback.log("Nothing to export yet", "error");
+    const name = `rooms-${ctx.session.model().name || "model"}.xlsx`;
+    try {
+      await saveXlsx(name, REPORT, reportRows(), { sheet: "Rooms" });
+    } catch {
+      ctx.feedback.log("The spreadsheet could not be written", "error");
+    }
+  };
+
   root.append(
+    header("Room book", "Every space with its area, volume and occupancy. Estimated rows are marked."),
     bar(
       select(
         [["storey", "By storey"], ["category", "By category"], ["none", "Flat list"]],
@@ -293,6 +304,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): void {
       button("Rebuild", () => void load(true)),
       button("Show all", () => ctx.view.showAll()),
       button("CSV", () => exportCsv()),
+      button("XLSX", () => void exportXlsx()),
       button("Copy", () => (roomsOf().length ? copyTable(REPORT, reportRows()) : ctx.feedback.log("Nothing to copy yet", "error"))),
     ),
     hint(

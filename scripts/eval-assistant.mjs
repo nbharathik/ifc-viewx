@@ -74,7 +74,7 @@ export const TOOLS = [
   ["unhide", "make these elements visible again without showing everything", { ids: { type: "array", items: { type: "integer" } } }, ["ids"]],
   ["categories", "spaces and openings are off by default and carry no geometry until switched on", { IfcSpace: { type: "boolean" }, IfcOpeningElement: { type: "boolean" } }, []],
   ["color", "paint groups of elements; omit groups to take the colouring off", { groups: { type: "array", items: { type: "object" } } }, []],
-  ["section", "one axis-aligned cut; pass clear to remove", { axis: { type: "string" }, offset: { type: "number" }, flip: { type: "boolean" }, clear: { type: "boolean" } }, []],
+  ["section", "an axis cut, an arbitrary plane via normal, or a cut on the picked face; pass clear to remove", { axis: { type: "string" }, offset: { type: "number" }, normal: { type: "array", items: { type: "number" } }, fromPick: { type: "boolean" }, flip: { type: "boolean" }, clear: { type: "boolean" } }, []],
   ["sectionContours", "build element-owned 2D contour summaries at a cut and synchronize the 3D plane", { axis: { type: "string" }, offset: { type: "number" }, flip: { type: "boolean" }, includeHidden: { type: "boolean" }, maxSegments: { type: "integer" } }, []],
   ["sectionBox", "clip to a box around these elements; pass clear to remove it", { ids: { type: "array", items: { type: "integer" } }, clear: { type: "boolean" } }, []],
   ["camera", "move to a preset viewpoint, or read where the camera is", { view: { type: "string" } }, []],

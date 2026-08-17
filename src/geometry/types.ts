@@ -41,6 +41,7 @@ export interface DistanceSpec {
   b: number;
   origin: [number, number, number];
   offsets: Float64Array;
+  transforms?: Float64Array;
   maxDistance?: number;
 }
 
@@ -84,6 +85,7 @@ export interface LaserSpec {
   ids: Float64Array;
   modelOrigin: [number, number, number];
   offsets: Float64Array;
+  transforms?: Float64Array;
   maxDistance?: number;
   epsilon?: number;
 }
@@ -117,6 +119,7 @@ export interface SectionContourSpec {
   ids: Float64Array;
   modelOrigin: [number, number, number];
   offsets: Float64Array;
+  transforms?: Float64Array;
   tolerance?: number;
   maxSegments?: number;
 }
@@ -138,6 +141,81 @@ export interface SectionContourResult {
   geometryRevision: number;
 }
 
+export interface VolumesSpec {
+  ids: Float64Array;
+  offsets: Float64Array;
+  transforms?: Float64Array;
+}
+
+export interface ElementVolume {
+  id: number;
+  volume: number;
+  triangles: number;
+  closed: boolean;
+}
+
+export interface VolumesResult {
+  volumes: ElementVolume[];
+  missing: number;
+  elapsedMs: number;
+  fidelity: "mesh";
+  engine: "browser-volume";
+  geometryRevision: number;
+}
+
+export interface PlaneClassifySpec {
+  normal: [number, number, number];
+  constant: number;
+  /**
+   * Conjunctive plane set: a point is inside only when it satisfies every
+   * plane. Supersedes the single normal/constant when present. The runner
+   * normalizes all planes.
+   */
+  planes?: Array<{ normal: [number, number, number]; constant: number }>;
+  ids: Float64Array;
+  modelOrigin: [number, number, number];
+  offsets: Float64Array;
+  transforms?: Float64Array;
+  epsilon?: number;
+}
+
+export interface PlaneClassifyResult {
+  kept: number[];
+  cut: number[];
+  dropped: number[];
+  testedElements: number;
+  missing: number;
+  elapsedMs: number;
+  fidelity: "mesh";
+  engine: "browser-plane";
+  geometryRevision: number;
+}
+
+export interface MeshesSpec {
+  ids: Float64Array;
+  modelOrigin: [number, number, number];
+  offsets: Float64Array;
+  transforms?: Float64Array;
+  /** Batch ceiling; the run stops at the element that would cross it. */
+  maxTriangles?: number;
+}
+
+/** One element per entry, its placements merged and baked into scene space. */
+export interface MeshesResult {
+  ids: Float64Array;
+  types: string[];
+  vertexCounts: Uint32Array;
+  indexCounts: Uint32Array;
+  positions: Float32Array;
+  indices: Uint32Array;
+  missing: number;
+  truncated: boolean;
+  elapsedMs: number;
+  fidelity: "mesh";
+  engine: "browser-mesh";
+  geometryRevision: number;
+}
+
 export interface GeometryDiagnostics {
   active: boolean;
   pending: number;
@@ -155,6 +233,9 @@ export type GeometryRequest =
   | { type: "laser"; id: number; priority: 0; spec: LaserSpec }
   | { type: "sectionContours"; id: number; priority: 0; spec: SectionContourSpec }
   | { type: "signatures"; id: number; priority: 1; spec: GeometrySignatureSpec }
+  | { type: "volumes"; id: number; priority: 1; spec: VolumesSpec }
+  | { type: "classifyPlane"; id: number; priority: 0; spec: PlaneClassifySpec }
+  | { type: "meshes"; id: number; priority: 1; spec: MeshesSpec }
   | { type: "cancel"; id: number };
 
 export type GeometryResponse =
@@ -164,4 +245,7 @@ export type GeometryResponse =
   | { type: "laserResult"; id: number; result: LaserResult }
   | { type: "sectionContourResult"; id: number; result: SectionContourResult }
   | { type: "signatureResult"; id: number; result: GeometrySignatureResult }
+  | { type: "volumesResult"; id: number; result: VolumesResult }
+  | { type: "classifyPlaneResult"; id: number; result: PlaneClassifyResult }
+  | { type: "meshesResult"; id: number; result: MeshesResult }
   | { type: "fail"; id: number; message: string };

@@ -32,7 +32,10 @@ export interface ViewerContextSnapshot {
   selection: Array<{ id: number; type: string; name: string; storey: string }>;
   view: {
     camera: { position: number[]; target: number[] };
-    sections: Array<{ axis: "x" | "y" | "z"; offset: number; flip: boolean }>;
+    sections: Array<
+      | { axis: "x" | "y" | "z"; offset: number; flip: boolean }
+      | { axis?: undefined; id: string; name: string; normal: [number, number, number]; offset: number; flip: boolean }
+    >;
     sectionBox: { min: number[]; max: number[] } | null;
     plan: boolean;
     visibility: { total: number; hidden: number; manualHidden: number; rules: Array<{ label: string; mode: string; count: number }> };

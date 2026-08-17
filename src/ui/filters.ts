@@ -129,7 +129,7 @@ export class FilterStore {
     if (sections.length) {
       out.push({
         label: "Section planes",
-        detail: sections.map((section) => section.axis.toUpperCase()).join(", "),
+        detail: sections.map((section) => (section.axis ? section.axis.toUpperCase() : section.name)).join(", "),
         remove: () => this.viewer.clearSection(),
       });
     }

@@ -1,7 +1,7 @@
 import {
   bar, button, classCounts, classPicker, clashClassPair, CLASH_LIMIT, confirmAction, copyTable,
-  emptyState, field, groupClashes, h, hint, idsOfTypes, MEP, note, number, OPENINGS, page,
-  progress, resolvedClashes, reviewClashes, select, STRUCTURE, toCsv, worstDepth,
+  emptyState, field, groupClashes, h, header, hint, idsOfTypes, MEP, note, number, OPENINGS, page,
+  progress, resolvedClashes, reviewClashes, saveXlsx, select, STRUCTURE, toCsv, worstDepth,
 } from "@ifcviewx/sdk";
 import type {
   ClashDecision, ClashElementIdentity, ClashGroupMode, ClashIgnoreRule, ClashPair,
@@ -44,6 +44,8 @@ interface SavedClashDefinition {
 interface ClashHistory {
   version: 1;
   definitionId: string;
+  /** Scope and thresholds used for this baseline. */
+  signature?: string;
   runAt: string;
   fingerprints: string;
   total: number;
@@ -88,11 +90,17 @@ function decodeHistory(history: ClashHistory | null): Set<string> {
   return new Set(history.fingerprints.split(",").filter(Boolean).map((value) => `CL-${value}`));
 }
 
-function encodeHistory(definitionId: string, rows: readonly ClashReviewRow[], limit: number): ClashHistory {
+function encodeHistory(
+  definitionId: string,
+  rows: readonly ClashReviewRow[],
+  limit: number,
+  signature: string,
+): ClashHistory {
   const fingerprints = [...new Set(rows.map((row) => row.fingerprint))].sort();
   return {
     version: 1,
     definitionId,
+    signature,
     runAt: now(),
     fingerprints: fingerprints.slice(0, limit).map((value) => value.replace(/^CL-/, "")).join(","),
     total: fingerprints.length,
@@ -124,6 +132,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   let previousRunAt = "";
   let historyPartial = false;
   let resultHandle = "";
+  let resultSignature = "";
   let running = false;
   let sweepController: AbortController | null = null;
   let modelGeneration = 0;
@@ -142,11 +151,24 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   const status = progress();
   const results = h("div", { class: "plug-results clash-results" });
   const summary = h("div", { class: "clash-summary" });
+  const freshness = h("div", { class: "clash-freshness" });
   const pickers = h("div", { class: "plug-two" });
   const root = page();
   root.classList.add("clash-workflow");
 
   const definition = (): SavedClashDefinition => definitions.find((item) => item.id === activeDefinitionId) ?? definitions[0];
+
+  const checkSignature = (): string => JSON.stringify({
+    definition: definition().id,
+    a: [...setA].sort(),
+    b: [...setB].sort(),
+    modelsA: [...modelsA].sort((a, b) => a - b),
+    modelsB: [...modelsB].sort((a, b) => a - b),
+    tolerance,
+    clearance,
+  });
+
+  const resultIsStale = (): boolean => result !== null && resultSignature !== checkSignature();
 
   const loadDefinition = (): void => {
     const item = definition();
@@ -193,6 +215,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   const clearResult = (): void => {
     if (resultHandle) ctx.results.dispose(resultHandle);
     resultHandle = "";
+    resultSignature = "";
     result = null;
     reviewRows = [];
     identities = new Map();
@@ -302,13 +325,11 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       name.value = current.name;
     });
 
-    const head = h("div", { class: "clash-head" }, [
-      h("div", {}, [
-        h("h3", { text: "Clash checks" }),
-        h("p", { text: "Define a comparison, run it, then review only the open results." }),
-      ]),
-      h("span", { class: "clash-fidelity", text: "BROWSER MESH" }),
-    ]);
+    const head = header(
+      "Clash checks",
+      "Test real mesh contact, track revisions, and turn coordination findings into issues.",
+      "TRIANGLE BVH · LOCAL",
+    );
     const definitionBar = bar(
       select(definitions.map((item) => [item.id, item.name]), activeDefinitionId, activateDefinition),
       name,
@@ -316,6 +337,14 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
     );
     definitionBar.classList.add("clash-definition-bar");
 
+    const toleranceInput = number(tolerance, (value) => {
+      tolerance = Number.isFinite(value) ? Math.max(0, value) : 0;
+      build();
+    }, 0.5);
+    const clearanceInput = number(clearance, (value) => {
+      clearance = Number.isFinite(value) ? Math.max(0, value) : 0;
+      build();
+    }, 5);
     const runBar = bar(
       select(presets, "", (value) => {
         const preset = PRESETS.find(([label]) => label === value);
@@ -324,12 +353,31 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
         apply(setB, preset[2], counts);
         build();
       }),
-      field("Tolerance mm", number(tolerance, (value) => { tolerance = Math.max(0, value); }, 1)),
-      field("Clearance mm", number(clearance, (value) => { clearance = Math.max(0, value); }, 5)),
+      field("Ignore penetration ≤", toleranceInput),
+      field("Required clearance", clearanceInput),
       running
         ? button("Stop", () => sweepController?.abort(), "warn")
-        : button("Run check", () => void sweep(), "accent"),
+        : button(resultIsStale() ? "Run updated check" : "Run check", () => void sweep(), "accent"),
     );
+    runBar.classList.add("clash-run-bar");
+    runBar.querySelectorAll("select, input").forEach((control) => {
+      (control as HTMLInputElement | HTMLSelectElement).disabled = running;
+    });
+
+    const thresholdRail = h("div", { class: "clash-threshold-rail", "aria-label": "Clash classification thresholds" }, [
+      h("span", { class: "graze" }, [
+        h("b", { text: `≤ ${tolerance.toLocaleString()} mm` }),
+        h("small", { text: "ignored penetration" }),
+      ]),
+      h("span", { class: "hard" }, [
+        h("b", { text: "Mesh intersection" }),
+        h("small", { text: `hard clash above ${tolerance.toLocaleString()} mm` }),
+      ]),
+      h("span", { class: clearance > 0 ? "clearance" : "clearance off" }, [
+        h("b", { text: clearance > 0 ? `< ${clearance.toLocaleString()} mm` : "Off" }),
+        h("small", { text: "clearance zone" }),
+      ]),
+    ]);
 
     const modelIndices = [...new Set(elements.map((element) => ctx.model.modelOf(element.id)))].sort((a, b) => a - b);
     const matrix = modelIndices.length > 1
@@ -360,33 +408,50 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
           : "Triangle intersections use stable element references when GlobalIds are available."),
       ]),
     ]);
+    if (running) advanced.inert = true;
     const resultBar = bar(
       button("Isolate open", isolateHits),
       button("Reset view", () => { ctx.view.setSectionBox(null); ctx.view.showAll(); }),
       button("Export CSV", () => void exportCsv()),
+      button("XLSX", () => void exportXlsx()),
       button("Copy", () => void copyRows()),
     );
     resultBar.classList.add("clash-result-actions");
 
+    const selectedCount = (selected: Set<string>): number => counts.reduce(
+      (total, [type, count]) => total + (selected.has(type) ? count : 0), 0,
+    );
     pickers.replaceChildren(
-      h("div", { class: "plug-col" }, [
-        h("div", { class: "group-title" }, [h("span", { text: `Set A  ${setA.size || "none"}` })]),
+      h("div", { class: "plug-col clash-set-card set-a" }, [
+        h("div", { class: "group-title" }, [
+          h("span", { class: "clash-set-token", text: "A" }),
+          h("span", { text: "Primary set" }),
+          h("small", { text: `${setA.size} classes · ${selectedCount(setA).toLocaleString()} elements` }),
+        ]),
         classPicker(counts, setA, build),
       ]),
-      h("div", { class: "plug-col" }, [
-        h("div", { class: "group-title" }, [h("span", { text: `Set B  ${setB.size || "none"}` })]),
+      h("div", { class: "plug-col clash-set-card set-b" }, [
+        h("div", { class: "group-title" }, [
+          h("span", { class: "clash-set-token", text: "B" }),
+          h("span", { text: "Compared set" }),
+          h("small", { text: `${setB.size} classes · ${selectedCount(setB).toLocaleString()} elements` }),
+        ]),
         classPicker(counts, setB, build),
       ]),
     );
+    pickers.inert = running;
+    definitionBar.inert = running;
 
     root.append(
       head,
       definitionBar,
       runBar,
+      thresholdRail,
       advanced,
-      h("div", { class: "clash-sets-head" }, [h("b", { text: "Elements to compare" }), h("span", { text: "Choose at least one class in each set" })]),
+      h("div", { class: "clash-sets-head" }, [h("b", { text: "Comparison scope" }), h("span", { text: "Choose at least one class on each side" })]),
       pickers,
       status.root,
+      freshness,
       summary,
       resultBar,
       results,
@@ -433,11 +498,11 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
     }));
   };
 
-  const writeHistory = (rows: readonly ClashReviewRow[]): ClashHistory => {
+  const writeHistory = (rows: readonly ClashReviewRow[], signature: string): ClashHistory => {
     const key = `history.${definition().id}`;
-    const full = encodeHistory(definition().id, rows, HISTORY_LIMIT);
+    const full = encodeHistory(definition().id, rows, HISTORY_LIMIT, signature);
     if (persist(key, full)) return full;
-    const fallback = encodeHistory(definition().id, rows, HISTORY_FALLBACK);
+    const fallback = encodeHistory(definition().id, rows, HISTORY_FALLBACK, signature);
     persist(key, fallback);
     return fallback;
   };
@@ -466,6 +531,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       return;
     }
     saveDefinition(false);
+    const runSignature = checkSignature();
     const generation = modelGeneration;
     const elements = ctx.model.elements();
     const has = (id: number): boolean => ctx.model.bounds(id) !== null;
@@ -493,14 +559,16 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       const nextIdentities = await resolveIdentities(swept.hits);
       if (generation !== modelGeneration || controller.signal.aborted) return;
       const stored = ctx.storage.read<ClashHistory | null>(`history.${definition().id}`, null);
-      previousFingerprints = stored?.definitionId === definition().id ? decodeHistory(stored) : new Set();
-      previousRunAt = stored?.runAt ?? "";
+      const comparable = stored?.definitionId === definition().id && stored.signature === runSignature;
+      previousFingerprints = comparable ? decodeHistory(stored) : new Set();
+      previousRunAt = comparable ? stored.runAt : "";
       result = swept;
+      resultSignature = runSignature;
       identities = nextIdentities;
       reviewRows = reviewClashes(swept.hits, identities, previousFingerprints, decisions, rules);
       resolved = resolvedClashes(previousFingerprints, reviewRows);
-      const written = writeHistory(reviewRows);
-      historyPartial = written.partial || Boolean(stored?.partial);
+      const written = writeHistory(reviewRows, runSignature);
+      historyPartial = written.partial || Boolean(comparable && stored?.partial);
       refreshResultHandle();
     } catch (error) {
       if (generation === modelGeneration && (!(error instanceof DOMException) || error.name !== "AbortError")) {
@@ -615,6 +683,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       `Element A: ${row.aIdentity.globalId || `#${ctx.model.expressOf(row.a)}`} ${row.aIdentity.name}`,
       `Element B: ${row.bIdentity.globalId || `#${ctx.model.expressOf(row.b)}`} ${row.bIdentity.name}`,
       `Contact: ${row.point.map((value) => value.toFixed(3)).join(", ")}`,
+      ...(row.georeferenced ? [`Projected: ${row.georeferenced.coordinates.map((value) => value.toFixed(3)).join(", ")} (${row.georeferenced.crs})`] : []),
     ].join("\n");
     try {
       const created = await ctx.issues.create({
@@ -623,7 +692,12 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
         elementIds: [row.a, row.b],
         point: row.point,
         priority: row.kind === "hard" && depth > SEVERE_MM ? "Critical" : row.kind === "hard" ? "High" : "Normal",
-        metadata: { definition: definition().name, clashReference: row.fingerprint, engine: "browser-bvh" },
+        metadata: {
+          definition: definition().name,
+          clashReference: row.fingerprint,
+          engine: "browser-bvh",
+          ...(row.georeferenced ? { crs: row.georeferenced.crs, projectedCoordinate: row.georeferenced.coordinates.join(",") } : {}),
+        },
       });
       ctx.feedback.toast(`Created BCF issue ${created.id.slice(0, 8)}`, "success");
     } catch (error) {
@@ -634,15 +708,20 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   };
 
   const rowCard = (row: ClashReviewRow): HTMLElement => {
-    const value = `${Math.round(row.distance * 1000)} mm ${row.kind === "hard" ? "penetration" : "gap"}`;
+    const value = `${Math.round(row.distance * 1000)} mm`;
+    const state = row.state === "assigned" && row.assignee ? `Assigned · ${row.assignee}` : row.state;
     const main = h("button", {
       class: "clash-docket-main",
       type: "button",
       title: `${row.aIdentity.name || row.aType} vs ${row.bIdentity.name || row.bType}`,
     }, [
       h("span", { class: "clash-docket-ref", text: docket(row.fingerprint), title: row.fingerprint }),
-      h("span", { class: "clash-docket-pair", text: `${shortType(row.aType)} #${ctx.model.expressOf(row.a)} / ${shortType(row.bType)} #${ctx.model.expressOf(row.b)}` }),
-      h("span", { class: "clash-docket-meta", text: `${row.aIdentity.storey || row.bIdentity.storey || "No level"} · ${value}` }),
+      h("span", { class: "clash-docket-pair", text: `${shortType(row.aType)} #${ctx.model.expressOf(row.a)} ↔ ${shortType(row.bType)} #${ctx.model.expressOf(row.b)}` }),
+      h("span", { class: "clash-docket-meta", text: row.aIdentity.storey || row.bIdentity.storey || "No level" }),
+      h("span", { class: `clash-docket-value ${row.kind}` }, [
+        h("b", { text: value }), h("small", { text: row.kind === "hard" ? "penetration" : "gap" }),
+      ]),
+      h("span", { class: `clash-state state-${row.state}`, text: state }),
     ]);
     main.addEventListener("click", () => show(row));
     const issueControl = button("Issue", () => void issue(row, issueControl));
@@ -664,13 +743,31 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       ignored: reviewRows.filter((row) => row.state === "ignored").length,
     };
     const open = counts.new + counts.unchanged + counts.assigned;
+    const openRows = reviewRows.filter((row) => row.state !== "ignored");
+    const hard = openRows.filter((row) => row.kind === "hard").length;
+    const near = openRows.length - hard;
+    const stale = resultIsStale();
+    freshness.replaceChildren(...(stale ? [h("div", { class: "clash-stale", role: "alert" }, [
+      h("span", {}, [
+        h("b", { text: "Settings changed" }),
+        h("small", { text: "Results below belong to the previous scope or thresholds." }),
+      ]),
+      button("Run updated check", () => void sweep(), "accent"),
+    ])] : []));
+    summary.classList.toggle("is-stale", stale);
     summary.replaceChildren(h("div", { class: "clash-summary-line", role: "status" }, [
       h("span", { class: open ? "open" : "clean" }, [h("b", { text: open.toLocaleString() }), h("small", { text: "open" })]),
+      h("span", { class: hard ? "hard" : "" }, [h("b", { text: hard.toLocaleString() }), h("small", { text: "hard" })]),
+      h("span", { class: near ? "near" : "" }, [h("b", { text: near.toLocaleString() }), h("small", { text: "clearance" })]),
       h("span", {}, [h("b", { text: counts.new.toLocaleString() }), h("small", { text: "new" })]),
-      h("span", {}, [h("b", { text: counts.assigned.toLocaleString() }), h("small", { text: "assigned" })]),
       h("span", {}, [h("b", { text: resolved.length.toLocaleString() }), h("small", { text: "resolved" })]),
       h("span", { class: "elapsed" }, [h("b", { text: result ? `${(result.elapsedMs / 1000).toFixed(1)} s` : "-" }), h("small", { text: "last run" })]),
-    ]));
+    ]), ...(result ? [h("div", { class: "clash-run-meta" }, [
+      h("span", { text: `${result.elementsA.toLocaleString()} A elements` }),
+      h("span", { text: `${result.elementsB.toLocaleString()} B elements` }),
+      h("span", { text: `${result.pairsTested.toLocaleString()} candidate pairs tested` }),
+      h("span", { text: `${result.fidelity === "mesh" ? "triangle mesh" : "geometry"} · revision ${result.geometryRevision ?? "n/a"}` }),
+    ])] : []));
     results.replaceChildren();
     if (reviewRows.length === 0) {
       const nothingTested = result !== null && result.pairsTested === 0;
@@ -781,6 +878,16 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       toCsv(REPORT, reportRows()),
       "text/csv",
     );
+  };
+
+  const exportXlsx = async (): Promise<void> => {
+    if (reviewRows.length === 0) return void ctx.feedback.log("Run a check first", "error");
+    const name = `clashes-${ctx.session.model().name || "model"}.xlsx`;
+    try {
+      await saveXlsx(name, REPORT, reportRows(), { sheet: "Clashes" });
+    } catch {
+      ctx.feedback.log("The spreadsheet could not be written", "error");
+    }
   };
 
   const exportRules = (): void => {

@@ -30,6 +30,7 @@ export function measurementValue(item: MeasurementObject, format: MeasurementFor
   if (item.kind === "angle") return formatAngle(item.angle ?? 0);
   if (item.kind === "area") return formatArea(item.area ?? 0, format);
   if (item.kind === "path") return formatLength(item.perimeter, format);
+  if (item.kind === "count") return "1";
   return formatCoordinate(item.points[0], format);
 }
 
@@ -132,11 +133,11 @@ export function measurementsFromCsv(text: string): MeasurementState[] {
       states.push({ kind: "distance", ...(id > 0 ? { id } : {}), label, visible, a: points[0], b: points[1], ends });
       continue;
     }
-    if (!["path", "angle", "area", "coordinate"].includes(kind ?? "") || !Array.isArray(points) || !points.every(isPoint)) continue;
-    const minimum = kind === "coordinate" ? 1 : kind === "path" ? 2 : 3;
+    if (!["path", "angle", "area", "coordinate", "count"].includes(kind ?? "") || !Array.isArray(points) || !points.every(isPoint)) continue;
+    const minimum = kind === "coordinate" || kind === "count" ? 1 : kind === "path" ? 2 : 3;
     if (points.length < minimum) continue;
     states.push({
-      kind: kind as "path" | "angle" | "area" | "coordinate",
+      kind: kind as "path" | "angle" | "area" | "coordinate" | "count",
       ...(id > 0 ? { id } : {}),
       label,
       visible,

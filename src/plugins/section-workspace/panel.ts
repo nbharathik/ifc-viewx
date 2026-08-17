@@ -1,5 +1,5 @@
 import {
-  button, emptyState, field, h, hint, icon, iconButton, number, page, select,
+  button, emptyState, field, h, header, hint, icon, iconButton, number, page, select,
 } from "@ifcviewx/sdk";
 import type {
   ExtensionContext, ExtensionInstance, SectionAxis, SectionContourResult, SectionPolyline, SectionState, SpatialNode,
@@ -66,7 +66,7 @@ export function scaleStep(worldWidth: number, pixelWidth: number, targetPixels =
 export function withWorkspacePlane(
   states: readonly SectionState[],
   plane: SectionState,
-  previousAxis: SectionAxis | null = plane.axis,
+  previousAxis: SectionAxis | null = plane.axis ?? null,
 ): SectionState[] {
   return [...states.filter((state) => state.axis !== plane.axis && state.axis !== previousAxis), plane];
 }
@@ -154,10 +154,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   const scale = h("div", { class: "sw-scale", "aria-label": "Drawing scale" }, [scaleFill, scaleLabel]);
   const drawingWrap = h("div", { class: "sw-drawing" }, [drawing, drawingTools, scale, hover]);
   const root = page(
-    h("header", { class: "sw-head" }, [
-      h("div", {}, [h("h3", { text: "Plans and sections" }), h("p", { text: "Create coordinated drawings directly from the visible model." })]),
-      h("span", { class: "sw-fidelity", text: "MESH" }),
-    ]),
+    header("Plans and sections", "Create coordinated drawings directly from the visible model.", "MESH"),
     controls,
     drawingWrap,
     status,
@@ -826,7 +823,9 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
     for (const element of ctx.model.elements()) elements.set(element.id, element);
     storeys = collectStoreys();
     const sections = ctx.view.sections();
-    const active = sections.find((state) => state.axis === axis) ?? sections[0];
+    // The contour engine is axis-only, so arbitrary plane entries never seed it.
+    const axisSections = sections.filter((state): state is SectionState & { axis: SectionAxis } => state.axis !== undefined);
+    const active = axisSections.find((state) => state.axis === axis) ?? axisSections[0];
     const selected = ctx.view.selection();
     const box = ctx.view.boxAround(selected.length ? selected : [...elements.keys()], 0);
     if (active) {
@@ -917,7 +916,8 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   ctx.events.on("section", () => {
     if (syncing) return;
     const sections = ctx.view.sections();
-    const active = sections.find((state) => state.axis === axis) ?? sections[0];
+    const axisSections = sections.filter((state): state is SectionState & { axis: SectionAxis } => state.axis !== undefined);
+    const active = axisSections.find((state) => state.axis === axis) ?? axisSections[0];
     if (!active) {
       window.clearTimeout(rerunTimer);
       stopCurrentRun();

@@ -225,6 +225,6 @@ export class Ribbon {
     const text = h("span", { class: "rib-label", text: label });
     // The caret rides on the label line so a large button stays two rows tall.
     if (caret) text.appendChild(icon("chevron", 10));
-    return h("button", { class: `rib-btn ${size}`, type: "button" }, [icon(name, size === "lg" ? 19 : 14), text]);
+    return h("button", { class: `rib-btn ${size}`, type: "button" }, [icon(name, size === "lg" ? 17 : 13), text]);
   }
 }

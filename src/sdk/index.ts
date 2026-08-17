@@ -67,6 +67,16 @@ export { buildIndex, tokenize } from "../llm/retrieval.js";
 // Element identity across federated models. A plugin that groups by discipline
 // unpacks ids with these rather than assuming one file.
 export { byModel, expressOf, modelOf, packId } from "../viewer-core/ids.js";
+export { isAxisSection } from "../viewer-core/viewer.js";
+// Mesh export. The three example exporters load on the first call, so a panel
+// that offers glTF/STL/OBJ costs nothing until someone uses it.
+export { exportMesh, saveMesh } from "../export/mesh.js";
+export type { MeshExportOptions, MeshExportResult, MeshFormat } from "../export/mesh.js";
+export { measureVolumes } from "../geometry/volumes.js";
+export type { VolumeOptions, VolumesResult, ElementVolume } from "../geometry/volumes.js";
+export { classifyByPlane } from "../geometry/plane.js";
+export type { PlaneClassifyOptions } from "../geometry/plane.js";
+export type { PlaneClassifyResult } from "../geometry/types.js";
 export type { Bm25Index, SearchHit, TextSource } from "../llm/retrieval.js";
 
 // What `ctx.publishFindings` takes, so a panel's results land in the report.
@@ -75,19 +85,59 @@ export type { ReportFinding } from "../ui/report.js";
 // Viewer data types used by the scoped SDK services.
 export type {
   CameraPose,
+  CoordinateOperationInfo,
+  GeoreferencedPoint,
+  IfcGeoReference,
   IfcProperty,
   IfcPropertySet,
+  IfcClassification,
+  IfcMaterial,
+  IfcRelationTarget,
+  IfcScheduleTime,
+  IfcTaskGraph,
+  IfcTaskRecord,
+  IfcTaskSequenceRecord,
+  IfcWorkScheduleRecord,
   ItemProperties,
   Measurement,
   FederatedModel,
   ModelBounds,
   ModelStats,
+  ModelTransform,
+  AxisSectionState,
+  PlaneSectionState,
+  ProjectedCrsInfo,
   SectionBox,
   SectionState,
   SpatialNode,
+  TrueNorthInfo,
   Vec3,
   Viewer,
   ViewPreset,
   VisibilityRule,
 } from "../viewer-core/viewer.js";
 export { formatLength } from "../viewer-core/viewer.js";
+
+// IDS Studio uses these through the same bounded SDK surface as every bundled
+// extension. The inspector and assistant call the same validator functions.
+export {
+  BUILTIN_IDS_TEMPLATES,
+  cloneFacet,
+  newFacet,
+  newIdsDocument,
+  parseIdsDocument,
+  serializeIdsDocument,
+} from "../ids/document.js";
+export type {
+  IdsCardinality,
+  IdsDraft,
+  IdsFacetDraft,
+  IdsFacetKind,
+  IdsRequirementTemplate,
+  IdsSpecificationDraft,
+  IdsValueRule,
+} from "../ids/document.js";
+export { searchBsdd } from "../ids/bsdd.js";
+export type { BsddHit, BsddKind } from "../ids/bsdd.js";
+export { lastIdsReport, loadIds, runIds } from "../ui/ids.js";
+export type { IdsReport, SpecResult } from "../ui/ids.js";

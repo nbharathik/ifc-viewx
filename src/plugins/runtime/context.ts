@@ -56,6 +56,7 @@ export interface HostContext {
   classes(): Array<[string, number]>;
   index(): PropertyIndex;
   properties(id: number): Promise<ItemProperties | null>;
+  taskGraph(): ReturnType<Viewer["getTaskGraph"]>;
   tree(): SpatialNode | null;
   subtree(id: number): number[];
   bounds(id: number): ModelBounds | null;
@@ -69,6 +70,7 @@ export interface HostContext {
   lastPick(): PickResult | null;
   setPickGuide(on: boolean): void;
   isVisible(id: number): boolean;
+  rules(): ReturnType<Viewer["getRules"]>;
   isolate(ids: number[], label?: string): void;
   hide(ids: number[]): void;
   showAll(): void;
@@ -153,6 +155,7 @@ export function createHostContext(manifest: { id: string; name: string }, deps: 
     classes: () => classCounts(modelElements(viewer)),
     index: () => deps.index(),
     properties: (expressID) => viewer.getProperties(expressID),
+    taskGraph: () => viewer.getTaskGraph(),
     tree: () => viewer.getSpatialTree(),
     subtree: (expressID) => viewer.getSubtreeElementIds(expressID),
     bounds: (expressID) => viewer.getElementBounds(expressID),
@@ -171,6 +174,7 @@ export function createHostContext(manifest: { id: string; name: string }, deps: 
     lastPick: () => viewer.getLastPick(),
     setPickGuide: (on) => viewer.setPickGuide(on),
     isVisible: (id) => viewer.isElementVisible(id),
+    rules: () => viewer.getRules(),
     isolate: (ids, label) => viewer.isolate(ids, label),
     hide: (ids) => viewer.setHidden(ids, true),
     showAll: () => viewer.showAll(),

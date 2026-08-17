@@ -13,6 +13,17 @@ import { LoadingOverlay, ErrorCard } from './panels/overlays.js';
 import { CancelledError } from './engine/types.js';
 import { TriangleStore } from './scene/triangleStore.js';
 import { expressOf, modelOf, packId } from './ids.js';
+import { explodeOffsets, storeyElementSets, storeySlideOffsets } from './arrange.js';
+import { compassPoint, heading, metres, speedLabel, storeyAt, type StoreyBand } from './flyStats.js';
+import {
+  canTransform,
+  compatibleCrs,
+  IDENTITY_MODEL_TRANSFORM,
+  localToProjected,
+  projectedToLocal,
+  relativeModelTransform,
+  safeModelTransform,
+} from '../geo/coordinates.js';
 import {
   DEFAULT_MEASUREMENT_FORMAT,
   constrainMeasurementPoint,
@@ -26,10 +37,14 @@ import type {
   MeasurementFormat,
   MeasurementSemantic,
 } from './measurements.js';
-import type { CameraPose, SceneInfo, SnapHit, SnapKind } from './scene/scene.js';
+import type { CameraPose, ClipPlaneSpec, ProjectionMode, SceneInfo, SnapHit, SnapKind } from './scene/scene.js';
 import type { PickResult, ViewPreset } from './scene/controls.js';
 import type {
   AsyncIfcEngine,
+  GeoreferencedPoint,
+  IfcGeoReference,
+  IfcGridInfo,
+  IfcTaskGraph,
   ItemProperties,
   LazyCategory,
   LoadProgress,
@@ -37,11 +52,13 @@ import type {
   LoadedModel,
   ModelBounds,
   ModelStats,
+  ModelTransform,
+  OrganizeIndex,
   SpatialNode,
 } from './engine/types.js';
 
 export * from './engine/types.js';
-export type { CameraPose, SceneInfo, SnapHit, SnapKind } from './scene/scene.js';
+export type { CameraPose, ProjectionMode, SceneInfo, SnapHit, SnapKind } from './scene/scene.js';
 export type { PickResult, ViewPreset } from './scene/controls.js';
 export {
   DEFAULT_MEASUREMENT_FORMAT,
@@ -49,6 +66,8 @@ export {
   formatArea,
   formatCoordinate,
   formatLength,
+  formatVolume,
+  formatWeight,
   measurementSemantic,
 } from './measurements.js';
 export type {
@@ -59,11 +78,45 @@ export type {
   MeasurementUnit,
 } from './measurements.js';
 
-export interface SectionState {
-  axis: 'x' | 'y' | 'z';
+export type SectionAxisName = 'x' | 'y' | 'z';
+
+export interface AxisSectionState {
+  axis: SectionAxisName;
   offset: number;
   flip: boolean;
 }
+
+/**
+ * Arbitrary plane: unit normal in scene space, n . p = offset on the plane.
+ * flip false discards the n . p > offset half, matching the axis convention.
+ */
+export interface PlaneSectionState {
+  axis?: undefined;
+  id: string;
+  name: string;
+  normal: [number, number, number];
+  offset: number;
+  flip: boolean;
+}
+
+export type SectionState = AxisSectionState | PlaneSectionState;
+
+export const isAxisSection = (s: SectionState): s is AxisSectionState =>
+  typeof (s as AxisSectionState).axis === 'string';
+
+const AXIS_NORMAL: Record<SectionAxisName, [number, number, number]> = {
+  x: [1, 0, 0],
+  y: [0, 1, 0],
+  z: [0, 0, 1],
+};
+
+const sectionKey = (s: SectionState): string => (isAxisSection(s) ? s.axis : s.id);
+
+const normalize3 = (v: [number, number, number]): [number, number, number] | null => {
+  const len = Math.hypot(v[0], v[1], v[2]);
+  if (!Number.isFinite(len) || len < 1e-9) return null;
+  return [v[0] / len, v[1] / len, v[2] / len];
+};
 
 /**
  * One model in a federated set. `index` is the slot packed into every id the
@@ -75,6 +128,10 @@ export interface FederatedModel {
   visible: boolean;
   /** Nudge applied to the whole model, for files that disagree on placement. */
   offset: [number, number, number];
+  transform: ModelTransform;
+  geo: IfcGeoReference;
+  geoStatus: 'ready' | 'aligned' | 'manual' | 'missing' | 'conflict';
+  diagnostics: string[];
   elements: number;
   triangles: number;
 }
@@ -88,6 +145,7 @@ interface ModelEntry {
   tree: SpatialNode | null;
   stats: ModelStats | null;
   categories: Set<LazyCategory>;
+  geo: IfcGeoReference;
 }
 
 /** A clipping volume, in scene coordinates. Corners, not centre and size. */
@@ -96,7 +154,7 @@ export interface SectionBox {
   max: [number, number, number];
 }
 
-const AXIS_ORDER: Array<SectionState['axis']> = ['x', 'y', 'z'];
+const AXIS_ORDER: SectionAxisName[] = ['x', 'y', 'z'];
 
 /**
  * A box as six half-spaces. Materials keep three's default clipIntersection,
@@ -116,8 +174,8 @@ export function packTree(node: SpatialNode, modelIndex: number): SpatialNode {
   };
 }
 
-export function boxPlanes(box: SectionBox): SectionState[] {
-  const planes: SectionState[] = [];
+export function boxPlanes(box: SectionBox): AxisSectionState[] {
+  const planes: AxisSectionState[] = [];
   AXIS_ORDER.forEach((axis, i) => {
     planes.push({ axis, offset: box.max[i], flip: false });
     planes.push({ axis, offset: box.min[i], flip: true });
@@ -190,12 +248,12 @@ export interface DistanceMeasurementState {
 }
 
 /** What the measure tool is collecting: two points, three, or a ring of them. */
-export type MeasureMode = 'distance' | 'path' | 'angle' | 'area' | 'coordinate';
+export type MeasureMode = 'distance' | 'path' | 'angle' | 'area' | 'coordinate' | 'count';
 
 /** A finished shape or coordinate. Distances are metres, angles degrees. */
 export interface ShapeMeasure {
   id: number;
-  kind: 'path' | 'angle' | 'area' | 'coordinate';
+  kind: 'path' | 'angle' | 'area' | 'coordinate' | 'count';
   label: string;
   visible: boolean;
   points: Array<[number, number, number]>;
@@ -216,6 +274,17 @@ export interface ShapeMeasurementState {
 }
 
 export type MeasurementState = DistanceMeasurementState | ShapeMeasurementState;
+
+/** A text note anchored to a scene-space point, optionally about an element. */
+export interface AnnotationState {
+  kind?: 'note';
+  id?: number;
+  text: string;
+  at: [number, number, number];
+  elementId?: number;
+  visible?: boolean;
+  createdAt?: string;
+}
 export type MeasurementObject = Measurement | ShapeMeasure;
 export interface MeasurementUpdate {
   label?: string;
@@ -391,6 +460,27 @@ export interface Viewer {
   getStats(): ModelStats | null;
   /** Entity counts per IFC class, computed on first call and then cached. */
   getCountsByType(): Promise<Record<string, number>>;
+  /** Native work schedules, task times, dependencies and product links. */
+  getTaskGraph(): Promise<IfcTaskGraph>;
+  /** Groups, layers, classifications and materials, merged across models. */
+  getOrganizeIndex(): Promise<OrganizeIndex>;
+  /** Grid axes as scene-space polylines with their bubble labels. */
+  getGridAxes(): Promise<IfcGridInfo[]>;
+  /** Show or hide the grid axes overlay; fetches the axes on first show. */
+  setGridsVisible(on: boolean): Promise<void>;
+  areGridsVisible(): boolean;
+  /** Feature-edge line layer over the shading. */
+  setEdgesVisible(on: boolean): void;
+  areEdgesVisible(): boolean;
+  // -- annotations: text notes anchored to the model ------------------------
+  addAnnotation(state: Omit<AnnotationState, 'id'>): AnnotationState;
+  updateAnnotation(id: number, patch: { text?: string; visible?: boolean }): boolean;
+  removeAnnotation(id: number): void;
+  getAnnotationStates(): AnnotationState[];
+  setAnnotationStates(states: AnnotationState[]): void;
+  /** Increments when notes are added, edited or removed. */
+  getAnnotationRevision(): number;
+  onAnnotationChange(listener: () => void): () => void;
   getLoadTimeline(): LoadTimeline | null;
   getSceneInfo(): SceneInfo;
   getSpatialTree(): SpatialNode | null;
@@ -482,6 +572,47 @@ export interface Viewer {
   fitToPoint(point: [number, number, number], radius?: number): CameraPose;
   /** Frame the model from a preset direction. */
   viewFrom(view: ViewPreset): void;
+  /** Camera projection; toggling keeps the current framing. */
+  setProjection(mode: ProjectionMode): void;
+  getProjection(): ProjectionMode;
+  /** Orbit the view about the world up axis by this many degrees. */
+  rotateView(degrees: number): void;
+  /** First-person flight: WASD moves, Q/E is down and up, wheel sets speed. */
+  setFlyMode(on: boolean): void;
+  isFlyMode(): boolean;
+  /** Fires when flight starts or stops, whatever caused it. */
+  onFlyChange(listener: (on: boolean) => void): () => void;
+  /** Draw these elements see-through (screen-door), keeping them pickable. */
+  setXray(expressIDs: Iterable<number>, on: boolean): void;
+  /** Everything visible except these ids becomes see-through. */
+  xrayAllExcept(expressIDs: Iterable<number>): void;
+  clearXray(): void;
+  getXrayCount(): number;
+  isElementXray(expressID: number): boolean;
+  /** When on, clicks and snaps skip see-through elements. */
+  setPickIgnoreXray(on: boolean): void;
+  getPickIgnoreXray(): boolean;
+  /** Draw the selection through occluders in a faint overlay pass. */
+  setShowThroughSelection(on: boolean): void;
+  getShowThroughSelection(): boolean;
+  // -- display offsets: storey slide, explode, move selection ---------------
+  /** Add a delta to the display offset of these elements. */
+  offsetElements(expressIDs: Iterable<number>, delta: [number, number, number]): void;
+  /** Absolute per-element offsets, as viewpoints and the slide tools write. */
+  setElementOffsetEntries(entries: Array<[number, [number, number, number]]>): void;
+  /** Clear all offsets, or only the given elements' offsets. */
+  clearElementOffsets(expressIDs?: Iterable<number>): void;
+  hasElementOffsets(): boolean;
+  getElementOffsets(): Array<[number, [number, number, number]]>;
+  /** Pull storeys apart along an axis; spacing 0 puts them back. */
+  setStoreySlide(axis: 'x' | 'y' | 'z', spacing: number): void;
+  /** Radial explode by factor; 0 puts everything back. */
+  setExplode(factor: number): void;
+  /**
+   * Face the last-picked surface head on, keeping the orbit distance. True
+   * when a face normal was used; false means it fell back to the nearest axis.
+   */
+  viewPerpendicular(): boolean;
   /** Axis-aligned section plane; replaces whatever is active. */
   setSection(state: SectionState): void;
   /** Any combination of the three axes at once (empty clears). */
@@ -491,6 +622,12 @@ export interface Viewer {
   onSectionChange(listener: () => void): () => void;
   clearSection(): void;
   getSection(): SectionState | null;
+  /** Cut on the last-picked face; null when nothing was picked or no normal. */
+  addSectionFromPick(name?: string): PlaneSectionState | null;
+  /** Look at a section plane head on from its kept side. */
+  viewAlongSection(key: string): boolean;
+  removeSection(key: string): void;
+  renameSection(key: string, name: string): void;
   // -- federation ------------------------------------------------------------
   /** Open a model beside the ones already loaded, rather than replacing them. */
   addModel(source: Uint8Array | LoadSource, options?: ViewerLoadOptions): Promise<FederatedModel>;
@@ -502,6 +639,14 @@ export interface Viewer {
   /** Nudge one model, for files that disagree about the shared origin. */
   setModelTransform(index: number, offset: [number, number, number]): void;
   getModelTransform(index: number): [number, number, number];
+  /** Full affine placement recorded for automatic or manual federation. */
+  setModelPlacement(index: number, transform: ModelTransform): void;
+  getModelPlacement(index: number): ModelTransform;
+  /** Re-run compatibility checks and align every model with a shared CRS. */
+  alignGeospatialModels(): number;
+  getGeoAnchor(): number | null;
+  sceneToGeoreferenced(point: [number, number, number]): GeoreferencedPoint | null;
+  georeferencedToScene(point: [number, number, number]): [number, number, number] | null;
 
   /** Six planes at once. Replaces any per-axis section, and vice versa. */
   setSectionBox(box: SectionBox | null): void;
@@ -571,12 +716,21 @@ export interface Viewer {
   removeMeasurement(id: number): void;
   /** Drop every span and the point in hand without leaving measure mode. */
   resetMeasure(): void;
+  /**
+   * Take back the last measure step: the point in hand first, then the most
+   * recently placed object. Backspace calls this while the tool is active.
+   */
+  undoLastMeasurement(): boolean;
   /** Fires when the measurement, the snap mode or the tool state changed. */
   onMeasureChange(listener: () => void): () => void;
   /** Render and download the viewport as a PNG. */
   screenshot(): void;
   /** Render the viewport to an image, optionally downscaled. */
   captureImage(maxWidth?: number, type?: string, quality?: number): Promise<Blob | null>;
+  /** The 2D plan alone, square, at its own resolution. Null when it is off. */
+  capturePlanImage(size?: number, type?: string, quality?: number): Promise<Blob | null>;
+  /** Save the plan as a PNG; false when there is no plan to save. */
+  downloadPlan(name?: string): Promise<boolean>;
   /** Performance settings. */
   setRenderScale(scale: number): void;
   setAdaptiveResolution(on: boolean): void;
@@ -630,6 +784,7 @@ class ViewerImpl implements Viewer {
   private initialized: Promise<AsyncIfcEngine> | null = null;
   /** Open models by slot index. Slot 0 is the one `load()` replaces. */
   private readonly models = new Map<number, ModelEntry>();
+  private geoAnchor: number | null = null;
   /** Triangles kept for analysis; fed by every ingest, read by the clash engine. */
   private readonly triangles = new TriangleStore();
   private nextModelIndex = 0;
@@ -694,7 +849,21 @@ class ViewerImpl implements Viewer {
   private planSize = 0;
   private sections: SectionState[] = [];
   private box: SectionBox | null = null;
-  private drag: { axis: SectionState['axis']; grabbed: number; base: number } | null = null;
+  private drag: { key: string; grabbed: number; base: number } | null = null;
+  private planeSeq = 0;
+  private gridsOn = false;
+  private readonly gridLabels: HTMLElement[] = [];
+  private flyPanel: HTMLElement | null = null;
+  private flyReadout: HTMLElement | null = null;
+  private storeyBands: StoreyBand[] = [];
+  private slideEntries: Array<[number, [number, number, number]]> = [];
+  private explodeEntries: Array<[number, [number, number, number]]> = [];
+  private readonly manualOffsets = new Map<number, [number, number, number]>();
+  private annotations: Array<Required<Pick<AnnotationState, 'id' | 'text' | 'at' | 'visible'>> & Pick<AnnotationState, 'elementId' | 'createdAt'>> = [];
+  private annotationSeq = 0;
+  private annotationRevision = 0;
+  private readonly noteLabels: HTMLElement[] = [];
+  private readonly annotationListeners = new Set<() => void>();
   private readonly sectionListeners = new Set<() => void>();
   private readonly loadedCategories = new Set<LazyCategory>();
   private readonly selectionListeners = new Set<(expressID: number | null) => void>();
@@ -752,6 +921,7 @@ class ViewerImpl implements Viewer {
           return true;
         }
         if (key === 'enter' && this.measureMode === 'path') return this.finishPath();
+        if (key === 'backspace') return this.undoLastMeasurement();
         return false;
       },
       onPick: (pick, additive, clientX, clientY) => {
@@ -785,21 +955,26 @@ class ViewerImpl implements Viewer {
       // Grabbing anywhere on the arrow drags from that point, so the plane
       // never jumps to the cursor on mouse-down.
       onHandleDown: (x, y) => {
-        const axis = this.scene.pickSectionHandle(x, y);
-        const grabbed = axis === null ? null : this.scene.dragSectionOffset(axis, x, y);
-        const base = this.sections.find((s) => s.axis === axis)?.offset;
-        if (axis === null || grabbed === null || base === undefined) return false;
-        this.drag = { axis, grabbed, base };
+        const key = this.scene.pickSectionHandle(x, y);
+        const section = key === null ? undefined : this.sections.find((s) => sectionKey(s) === key);
+        if (key === null || !section) return false;
+        const normal = isAxisSection(section) ? AXIS_NORMAL[section.axis] : section.normal;
+        const grabbed = this.scene.dragSectionOffset(normal, x, y);
+        if (grabbed === null) return false;
+        this.drag = { key, grabbed, base: section.offset };
         this.container.classList.add('ifc-dragging-section');
         return true;
       },
       onHandleDrag: (x, y) => {
         if (!this.drag) return;
-        const now = this.scene.dragSectionOffset(this.drag.axis, x, y);
+        const section = this.sections.find((s) => sectionKey(s) === this.drag?.key);
+        if (!section) return;
+        const normal = isAxisSection(section) ? AXIS_NORMAL[section.axis] : section.normal;
+        const now = this.scene.dragSectionOffset(normal, x, y);
         if (now === null) return;
-        const offset = this.scene.clampSectionOffset(this.drag.axis, this.drag.base + (now - this.drag.grabbed));
+        const offset = this.scene.clampSectionOffset(normal, this.drag.base + (now - this.drag.grabbed));
         this.setSections(
-          this.sections.map((s) => (s.axis === this.drag?.axis ? { ...s, offset } : s)),
+          this.sections.map((s) => (sectionKey(s) === this.drag?.key ? { ...s, offset } : s)),
         );
       },
       onHandleUp: () => {
@@ -823,14 +998,24 @@ class ViewerImpl implements Viewer {
         if (at && (this.measuring || this.pickGuide)) this.queueMeasureHover(at[0], at[1]);
       },
     });
-    this.axisGizmo = new AxisGizmo(this.container, this.scene.camera, {
-      getPose: () => this.controls.getPose(),
-      setPose: (pose) => this.controls.setPose(pose),
-    });
+    // A live accessor rather than the camera itself: the projection toggle
+    // swaps the active camera, and the gizmo must follow the one on screen.
+    const sceneRef = this.scene;
+    this.axisGizmo = new AxisGizmo(
+      this.container,
+      { get matrixWorld() { return sceneRef.camera.matrixWorld; } },
+      {
+        getPose: () => this.controls.getPose(),
+        setPose: (pose) => this.controls.setPose(pose),
+      },
+    );
     this.scene.onAfterRender = () => {
       this.axisGizmo.sync();
       this.syncMeasureOverlay();
+      this.syncGridOverlay();
+      this.syncAnnotationOverlay();
       this.syncPlanFrame();
+      this.syncFlyPanel();
       for (const listener of this.renderTickListeners) listener();
     };
 
@@ -939,6 +1124,7 @@ class ViewerImpl implements Viewer {
     for (const entry of this.models.values()) engine.dispose(entry.modelID);
     this.models.clear();
     this.nextModelIndex = 0;
+    this.geoAnchor = null;
     this.lastPick = null;
     if (this.selection.size) {
       this.selection.clear();
@@ -968,6 +1154,9 @@ class ViewerImpl implements Viewer {
     }
     this.setMeasuring(false);
     this.resetMeasure();
+    this.resetAnnotations();
+    this.resetGrids();
+    this.resetArrange();
     this.syncMeasureOverlay();
 
     const normalized: LoadSource =
@@ -1019,7 +1208,9 @@ class ViewerImpl implements Viewer {
         tree: meta.tree,
         stats: this.stats,
         categories: this.loadedCategories,
+        geo: meta.geo,
       });
+      this.alignGeospatialModels();
       this.nextModelIndex = 1;
       this.cachedTree = meta.tree;
       timeline.downloadMs = meta.stats.downloadMs;
@@ -1042,6 +1233,7 @@ class ViewerImpl implements Viewer {
         meshes: [],
         bounds: meta.bounds,
         stats: this.stats,
+        geo: meta.geo,
       };
     } catch (err) {
       if (token !== this.loadToken) throw err; // superseded; the newer load owns the UI
@@ -1115,7 +1307,9 @@ class ViewerImpl implements Viewer {
         tree: meta.tree ? packTree(meta.tree, index) : null,
         stats: { ...meta.stats, uploadMs },
         categories: new Set(),
+        geo: meta.geo,
       });
+      this.alignGeospatialModels();
       this.afterModelSetChanged();
       this.scene.setStreamingMode(false);
       this.scene.render();
@@ -1145,6 +1339,7 @@ class ViewerImpl implements Viewer {
     this.scene.removeModel(index);
     this.triangles.dropModel(index);
     this.models.delete(index);
+    if (this.geoAnchor === index) this.geoAnchor = null;
     // Anything pointing at its elements is stale the moment they are gone.
     for (const id of [...this.selection]) {
       if (modelOf(id) === index) this.selection.delete(id);
@@ -1159,23 +1354,47 @@ class ViewerImpl implements Viewer {
     for (const id of [...this.propsCache.keys()]) {
       if (modelOf(id) === index) this.propsCache.delete(id);
     }
+    this.slideEntries = this.slideEntries.filter(([id]) => modelOf(id) !== index);
+    this.explodeEntries = this.explodeEntries.filter(([id]) => modelOf(id) !== index);
+    for (const id of [...this.manualOffsets.keys()]) {
+      if (modelOf(id) === index) this.manualOffsets.delete(id);
+    }
     this.afterModelSetChanged();
+    this.alignGeospatialModels();
     this.emitSelection();
     this.commitVisibility();
     for (const listener of this.modelLoadedListeners) listener();
   }
 
   getModels(): FederatedModel[] {
+    const anchor = this.geoAnchor === null ? null : this.models.get(this.geoAnchor) ?? null;
     return [...this.models.values()]
       .sort((a, b) => a.index - b.index)
-      .map((entry) => ({
-        index: entry.index,
-        name: entry.name,
-        visible: this.scene.isModelVisible(entry.index),
-        offset: this.scene.getModelTransform(entry.index),
-        elements: entry.stats?.meshCount ?? 0,
-        triangles: entry.stats?.triangleCount ?? 0,
-      }));
+      .map((entry) => {
+        const transform = this.scene.getModelPlacement(entry.index);
+        const diagnostics = [...entry.geo.warnings];
+        let geoStatus: FederatedModel['geoStatus'];
+        if (transform.source === 'manual') geoStatus = 'manual';
+        else if (!canTransform(entry.geo)) geoStatus = 'missing';
+        else if (entry.index === this.geoAnchor) geoStatus = 'ready';
+        else if (anchor && compatibleCrs(anchor.geo.projectedCrs, entry.geo.projectedCrs)) geoStatus = 'aligned';
+        else {
+          geoStatus = 'conflict';
+          diagnostics.push('The projected CRS conflicts with the federation anchor.');
+        }
+        return {
+          index: entry.index,
+          name: entry.name,
+          visible: this.scene.isModelVisible(entry.index),
+          offset: [...transform.translation],
+          transform,
+          geo: entry.geo,
+          geoStatus,
+          diagnostics,
+          elements: entry.stats?.meshCount ?? 0,
+          triangles: entry.stats?.triangleCount ?? 0,
+        };
+      });
   }
 
   setModelVisible(index: number, visible: boolean): void {
@@ -1191,12 +1410,93 @@ class ViewerImpl implements Viewer {
   /** Nudge one model, for files that disagree about the shared origin. */
   setModelTransform(index: number, offset: [number, number, number]): void {
     if (!this.models.has(index)) return;
-    this.scene.setModelTransform(index, offset);
+    const current = this.scene.getModelPlacement(index);
+    this.scene.setModelPlacement(index, safeModelTransform({
+      ...current,
+      translation: offset,
+      source: 'manual',
+      recordedAt: new Date().toISOString(),
+    }));
     this.commitVisibility();
   }
 
   getModelTransform(index: number): [number, number, number] {
-    return this.scene.getModelTransform(index);
+    return this.scene.getModelPlacement(index).translation;
+  }
+
+  setModelPlacement(index: number, transform: ModelTransform): void {
+    if (!this.models.has(index) || index === this.geoAnchor) return;
+    this.scene.setModelPlacement(index, safeModelTransform(transform));
+    this.commitVisibility();
+  }
+
+  getModelPlacement(index: number): ModelTransform {
+    return this.scene.getModelPlacement(index);
+  }
+
+  alignGeospatialModels(): number {
+    const entries = [...this.models.values()].sort((a, b) => a.index - b.index);
+    const current = this.geoAnchor === null ? null : this.models.get(this.geoAnchor);
+    const anchor = current && canTransform(current.geo)
+      ? current
+      : entries.find((entry) => canTransform(entry.geo)) ?? null;
+    this.geoAnchor = anchor?.index ?? null;
+    if (!anchor) return 0;
+    let aligned = 0;
+    for (const entry of entries) {
+      const existing = this.scene.getModelPlacement(entry.index);
+      if (entry.index === anchor.index) {
+        this.scene.setModelPlacement(entry.index, { ...IDENTITY_MODEL_TRANSFORM, source: 'automatic' });
+        continue;
+      }
+      if (existing.source === 'manual') continue;
+      const engineering = relativeModelTransform(anchor.geo, entry.geo);
+      // relativeModelTransform speaks the engineering frame (east, north,
+      // height); the Y-up scene wants (east, height, -north). The rotation
+      // is about the vertical in both frames and passes through unchanged.
+      const transform = engineering
+        ? {
+            ...engineering,
+            translation: [
+              engineering.translation[0],
+              engineering.translation[2],
+              -engineering.translation[1],
+            ] as [number, number, number],
+          }
+        : null;
+      this.scene.setModelPlacement(entry.index, transform ?? IDENTITY_MODEL_TRANSFORM);
+      if (transform) aligned += 1;
+    }
+    return aligned;
+  }
+
+  getGeoAnchor(): number | null {
+    return this.geoAnchor;
+  }
+
+  sceneToGeoreferenced(point: [number, number, number]): GeoreferencedPoint | null {
+    const anchor = this.geoAnchor === null ? null : this.models.get(this.geoAnchor);
+    if (!anchor || !anchor.geo.projectedCrs) return null;
+    const origin = this.getModelOrigin();
+    // The map math works in the IFC Z-up frame; the Y-up scene point must
+    // swizzle at this seam: local = (x, -z, y).
+    const x = point[0] + origin[0];
+    const y = point[1] + origin[1];
+    const z = point[2] + origin[2];
+    const coordinates = localToProjected([x, -z, y], anchor.geo);
+    if (!coordinates) return null;
+    return { crs: anchor.geo.projectedCrs.name ?? 'Unnamed projected CRS', coordinates };
+  }
+
+  georeferencedToScene(point: [number, number, number]): [number, number, number] | null {
+    const anchor = this.geoAnchor === null ? null : this.models.get(this.geoAnchor);
+    if (!anchor) return null;
+    const local = projectedToLocal(point, anchor.geo);
+    if (!local) return null;
+    const origin = this.getModelOrigin();
+    // Inverse of the seam above: Z-up local (e, n, h) lands at scene
+    // (e, h, -n) before the origin shift comes off.
+    return [local[0] - origin[0], local[2] - origin[1], -local[1] - origin[2]];
   }
 
   /**
@@ -1254,6 +1554,7 @@ class ViewerImpl implements Viewer {
     this.triangles.clear();
     for (const entry of this.models.values()) this.engine?.dispose(entry.modelID);
     this.models.clear();
+    this.geoAnchor = null;
     this.nextModelIndex = 0;
     this.lastPick = null;
     if (this.selection.size) {
@@ -1281,6 +1582,8 @@ class ViewerImpl implements Viewer {
     this.setPlanView(false);
     this.setMeasuring(false);
     this.resetMeasure();
+    this.resetAnnotations();
+    this.resetGrids();
     this.syncMeasureOverlay();
     for (const listener of this.modelLoadedListeners) listener();
     this.commitVisibility();
@@ -1307,6 +1610,305 @@ class ViewerImpl implements Viewer {
     }
     if (this.stats) this.stats.countsByType = counts;
     return counts;
+  }
+
+  async getTaskGraph(): Promise<IfcTaskGraph> {
+    const engine = this.engine;
+    if (!engine || this.models.size === 0) return { schedules: [], tasks: [], sequences: [] };
+    const token = this.loadToken;
+    const entries = [...this.models.values()];
+    const each = await Promise.all(entries.map((entry) => engine.getTaskGraph(entry.modelID)));
+    if (token !== this.loadToken) return { schedules: [], tasks: [], sequences: [] };
+    const graph: IfcTaskGraph = { schedules: [], tasks: [], sequences: [] };
+    entries.forEach((entry, index) => {
+      const source = each[index];
+      const pack = (id: number): number => packId(entry.index, id);
+      graph.schedules.push(...source.schedules.map((schedule) => ({
+        ...schedule,
+        expressID: pack(schedule.expressID),
+        taskIds: schedule.taskIds.map(pack),
+        modelIndex: entry.index,
+        modelName: entry.name,
+      })));
+      graph.tasks.push(...source.tasks.map((task) => ({
+        ...task,
+        expressID: pack(task.expressID),
+        scheduleIds: task.scheduleIds.map(pack),
+        parentTaskId: task.parentTaskId === null ? null : pack(task.parentTaskId),
+        childTaskIds: task.childTaskIds.map(pack),
+        productIds: task.productIds.map(pack),
+        predecessorIds: task.predecessorIds.map(pack),
+        successorIds: task.successorIds.map(pack),
+        modelIndex: entry.index,
+        modelName: entry.name,
+      })));
+      graph.sequences.push(...source.sequences.map((sequence) => ({
+        ...sequence,
+        expressID: pack(sequence.expressID),
+        predecessorId: pack(sequence.predecessorId),
+        successorId: pack(sequence.successorId),
+        modelIndex: entry.index,
+        modelName: entry.name,
+      })));
+    });
+    return graph;
+  }
+
+  async getOrganizeIndex(): Promise<OrganizeIndex> {
+    const empty: OrganizeIndex = { groups: [], layers: [], classifications: [], materials: [] };
+    const engine = this.engine;
+    if (!engine || this.models.size === 0) return empty;
+    const token = this.loadToken;
+    const entries = [...this.models.values()];
+    const each = await Promise.all(entries.map((entry) => engine.getOrganizeIndex(entry.modelID)));
+    if (token !== this.loadToken) return empty;
+    const merged: OrganizeIndex = { groups: [], layers: [], classifications: [], materials: [] };
+    const layerByName = new Map<string, number[]>();
+    const classByKey = new Map<string, { system: string; code: string | null; ids: number[] }>();
+    const materialByName = new Map<string, number[]>();
+    entries.forEach((entry, index) => {
+      const source = each[index];
+      const pack = (id: number): number => packId(entry.index, id);
+      // Groups stay distinct per entity; names collide legitimately.
+      merged.groups.push(...source.groups.map((group) => ({
+        ...group,
+        expressID: pack(group.expressID),
+        ids: group.ids.map(pack),
+      })));
+      // Layers, classifications and materials merge by name across models,
+      // which is what an organize panel wants from a federation.
+      for (const layer of source.layers) {
+        const bucket = layerByName.get(layer.name) ?? [];
+        bucket.push(...layer.ids.map(pack));
+        layerByName.set(layer.name, bucket);
+      }
+      for (const item of source.classifications) {
+        const key = `${item.system}|${item.code ?? ''}`;
+        const bucket = classByKey.get(key) ?? { system: item.system, code: item.code, ids: [] };
+        bucket.ids.push(...item.ids.map(pack));
+        classByKey.set(key, bucket);
+      }
+      for (const material of source.materials) {
+        const bucket = materialByName.get(material.name) ?? [];
+        bucket.push(...material.ids.map(pack));
+        materialByName.set(material.name, bucket);
+      }
+    });
+    merged.layers = [...layerByName.entries()].map(([name, ids]) => ({ name, ids }));
+    merged.classifications = [...classByKey.values()];
+    merged.materials = [...materialByName.entries()].map(([name, ids]) => ({ name, ids }));
+    return merged;
+  }
+
+  /**
+   * Grid axes in scene space: model coordinates run through each model's
+   * placement and the shared origin shift, the same map the meshes took.
+   */
+  async getGridAxes(): Promise<IfcGridInfo[]> {
+    const engine = this.engine;
+    if (!engine || this.models.size === 0) return [];
+    const token = this.loadToken;
+    const entries = [...this.models.values()];
+    const each = await Promise.all(entries.map((entry) => engine.getGridAxes(entry.modelID)));
+    if (token !== this.loadToken) return [];
+    const origin = this.scene.getModelOrigin();
+    const out: IfcGridInfo[] = [];
+    entries.forEach((entry, index) => {
+      const transform = this.scene.getModelPlacement(entry.index);
+      // Same Y-up plan rotation the batcher applies to the model group.
+      const cos = Math.cos(transform.rotationZ);
+      const sin = Math.sin(transform.rotationZ);
+      const s = transform.scale;
+      const toScene = (x: number, y: number, z: number): [number, number, number] => [
+        s * (cos * x + sin * z) + transform.translation[0] - origin[0],
+        s * y + transform.translation[1] - origin[1],
+        s * (-sin * x + cos * z) + transform.translation[2] - origin[2],
+      ];
+      for (const grid of each[index]) {
+        out.push({
+          expressID: packId(entry.index, grid.expressID),
+          name: grid.name,
+          axes: grid.axes.map((axis) => {
+            const points: number[] = [];
+            for (let i = 0; i + 2 < axis.points.length; i += 3) {
+              points.push(...toScene(axis.points[i], axis.points[i + 1], axis.points[i + 2]));
+            }
+            return { ...axis, points };
+          }),
+        });
+      }
+    });
+    return out;
+  }
+
+  async setGridsVisible(on: boolean): Promise<void> {
+    this.gridsOn = on;
+    if (!on) {
+      this.scene.setGridAxes([]);
+      this.syncGridOverlay();
+      this.scene.render();
+      return;
+    }
+    const grids = await this.getGridAxes();
+    if (!this.gridsOn) return;
+    const lines = grids.flatMap((grid) =>
+      grid.axes.map((axis) => ({ label: axis.label, points: axis.points })),
+    );
+    this.scene.setGridAxes(lines);
+    this.scene.render();
+  }
+
+  areGridsVisible(): boolean {
+    return this.gridsOn;
+  }
+
+  private syncGridOverlay(): void {
+    const axes = this.scene.getGridOverlay();
+    const wanted: Array<{ text: string; at: [number, number, number] }> = [];
+    for (const axis of axes) {
+      if (!axis.label || axis.points.length < 6) continue;
+      const last = axis.points.length - 3;
+      wanted.push(
+        { text: axis.label, at: [axis.points[0], axis.points[1], axis.points[2]] },
+        { text: axis.label, at: [axis.points[last], axis.points[last + 1], axis.points[last + 2]] },
+      );
+    }
+    while (this.gridLabels.length < wanted.length) {
+      const node = this.container.ownerDocument.createElement('div');
+      node.className = 'ifc-grid-bubble';
+      this.container.appendChild(node);
+      this.gridLabels.push(node);
+    }
+    this.gridLabels.forEach((node, index) => this.placeLabel(node, wanted[index] ?? null));
+  }
+
+  setEdgesVisible(on: boolean): void {
+    this.scene.setEdges(on);
+    this.scene.render();
+  }
+
+  areEdgesVisible(): boolean {
+    return this.scene.isEdges();
+  }
+
+  // -- annotations ----------------------------------------------------------
+
+  /**
+   * Model-swap reset: clears state and scene dots WITHOUT notifying
+   * listeners, or the dock would persist an empty list into the outgoing
+   * model's storage key mid-load.
+   */
+  private resetAnnotations(): void {
+    if (this.annotations.length === 0) return;
+    this.annotations = [];
+    this.annotationRevision += 1;
+    this.scene.setAnnotations([]);
+  }
+
+  /** Grid axes belong to the model that authored them; a swap drops them. */
+  private resetGrids(): void {
+    if (!this.gridsOn) return;
+    this.gridsOn = false;
+    this.scene.setGridAxes([]);
+  }
+
+  private pushAnnotations(): void {
+    this.scene.setAnnotations(
+      this.annotations.filter((note) => note.visible).map((note) => note.at),
+    );
+    this.scene.render();
+    for (const listener of this.annotationListeners) listener();
+  }
+
+  addAnnotation(state: Omit<AnnotationState, 'id'>): AnnotationState {
+    const id = ++this.annotationSeq;
+    const note = {
+      id,
+      text: (state.text ?? '').trim().replace(/\s+/g, ' ').slice(0, 200) || `Note ${id}`,
+      at: [...state.at] as [number, number, number],
+      visible: state.visible !== false,
+      ...(typeof state.elementId === 'number' ? { elementId: state.elementId } : {}),
+      createdAt: state.createdAt ?? new Date().toISOString(),
+    };
+    this.annotations.push(note);
+    this.annotationRevision += 1;
+    this.pushAnnotations();
+    return { kind: 'note', ...note };
+  }
+
+  updateAnnotation(id: number, patch: { text?: string; visible?: boolean }): boolean {
+    const note = this.annotations.find((entry) => entry.id === id);
+    if (!note) return false;
+    if (typeof patch.text === 'string') {
+      const clean = patch.text.trim().replace(/\s+/g, ' ').slice(0, 200);
+      if (clean) note.text = clean;
+    }
+    if (typeof patch.visible === 'boolean') note.visible = patch.visible;
+    this.annotationRevision += 1;
+    this.pushAnnotations();
+    return true;
+  }
+
+  removeAnnotation(id: number): void {
+    const before = this.annotations.length;
+    this.annotations = this.annotations.filter((entry) => entry.id !== id);
+    if (this.annotations.length === before) return;
+    this.annotationRevision += 1;
+    this.pushAnnotations();
+  }
+
+  getAnnotationStates(): AnnotationState[] {
+    return this.annotations.map((note) => ({ kind: 'note', ...note, at: [...note.at] as [number, number, number] }));
+  }
+
+  setAnnotationStates(states: AnnotationState[]): void {
+    const point = (value: unknown): value is [number, number, number] =>
+      Array.isArray(value) && value.length === 3 && value.every(Number.isFinite);
+    const used = new Set<number>();
+    this.annotations = [];
+    for (const state of states) {
+      if (!state || typeof state !== 'object' || !point(state.at)) continue;
+      const text = typeof state.text === 'string' ? state.text.trim().slice(0, 200) : '';
+      if (!text) continue;
+      let id = Number.isInteger(state.id) && state.id! > 0 && !used.has(state.id!) ? state.id! : 0;
+      if (id) this.annotationSeq = Math.max(this.annotationSeq, id);
+      else while (used.has(++this.annotationSeq)) { /* claim the next free id */ }
+      if (!id) id = this.annotationSeq;
+      used.add(id);
+      this.annotations.push({
+        id,
+        text,
+        at: [state.at[0], state.at[1], state.at[2]],
+        visible: state.visible !== false,
+        ...(typeof state.elementId === 'number' ? { elementId: state.elementId } : {}),
+        ...(typeof state.createdAt === 'string' ? { createdAt: state.createdAt } : {}),
+      });
+    }
+    this.annotationRevision += 1;
+    this.pushAnnotations();
+  }
+
+  getAnnotationRevision(): number {
+    return this.annotationRevision;
+  }
+
+  onAnnotationChange(listener: () => void): () => void {
+    this.annotationListeners.add(listener);
+    return () => this.annotationListeners.delete(listener);
+  }
+
+  private syncAnnotationOverlay(): void {
+    const wanted = this.annotations.filter((note) => note.visible);
+    while (this.noteLabels.length < wanted.length) {
+      const node = this.container.ownerDocument.createElement('div');
+      node.className = 'ifc-note-label';
+      this.container.appendChild(node);
+      this.noteLabels.push(node);
+    }
+    this.noteLabels.forEach((node, index) => {
+      const note = wanted[index];
+      this.placeLabel(node, note ? { text: note.text, at: note.at } : null);
+    });
   }
 
   getLoadTimeline(): LoadTimeline | null {
@@ -1581,6 +2183,169 @@ class ViewerImpl implements Viewer {
     this.scene.render();
   }
 
+  setXray(expressIDs: Iterable<number>, on: boolean): void {
+    this.scene.setXray(expressIDs, on);
+    this.scene.render();
+  }
+
+  xrayAllExcept(expressIDs: Iterable<number>): void {
+    const keep = new Set(expressIDs);
+    const rest: number[] = [];
+    for (const id of this.scene.getElementTypes().keys()) {
+      if (!keep.has(id) && this.scene.isElementVisible(id)) rest.push(id);
+    }
+    // One write for the whole flip: previous x-rays that are now kept go off.
+    this.scene.setXray(keep, false);
+    this.scene.setXray(rest, true);
+    this.scene.render();
+  }
+
+  clearXray(): void {
+    this.scene.clearXray();
+    this.scene.render();
+  }
+
+  getXrayCount(): number {
+    return this.scene.getXrayCount();
+  }
+
+  isElementXray(expressID: number): boolean {
+    return this.scene.isElementXray(expressID);
+  }
+
+  setPickIgnoreXray(on: boolean): void {
+    this.scene.setPickSolidOnly(on);
+  }
+
+  getPickIgnoreXray(): boolean {
+    return this.scene.isPickSolidOnly();
+  }
+
+  setShowThroughSelection(on: boolean): void {
+    this.scene.setShowThrough(on);
+    this.scene.render();
+  }
+
+  getShowThroughSelection(): boolean {
+    return this.scene.isShowThrough();
+  }
+
+  /**
+   * Display offsets compose from three parts: storey slide, explode, and
+   * manual moves. Each writer replaces only its own part; the batcher gets
+   * the per-element sum, so the tools stack instead of clobbering each other.
+   */
+  private recomposeArrange(): void {
+    const sums = new Map<number, [number, number, number]>();
+    const add = (id: number, offset: [number, number, number]): void => {
+      const current = sums.get(id);
+      if (current) {
+        current[0] += offset[0];
+        current[1] += offset[1];
+        current[2] += offset[2];
+      } else {
+        sums.set(id, [offset[0], offset[1], offset[2]]);
+      }
+    };
+    for (const [id, offset] of this.slideEntries) add(id, offset);
+    for (const [id, offset] of this.explodeEntries) add(id, offset);
+    for (const [id, offset] of this.manualOffsets) add(id, offset);
+    const entries: Array<[number, [number, number, number]]> = [];
+    for (const [id] of this.scene.getElementOffsets()) {
+      if (!sums.has(id)) entries.push([id, [0, 0, 0]]);
+    }
+    for (const [id, offset] of sums) entries.push([id, offset]);
+    this.scene.setElementOffsets(entries);
+    this.scene.render();
+  }
+
+  private resetArrange(): void {
+    this.slideEntries = [];
+    this.explodeEntries = [];
+    this.manualOffsets.clear();
+  }
+
+  offsetElements(expressIDs: Iterable<number>, delta: [number, number, number]): void {
+    for (const id of expressIDs) {
+      const current = this.manualOffsets.get(id) ?? [0, 0, 0];
+      const next: [number, number, number] = [current[0] + delta[0], current[1] + delta[1], current[2] + delta[2]];
+      if (next.every((value) => value === 0)) this.manualOffsets.delete(id);
+      else this.manualOffsets.set(id, next);
+    }
+    this.recomposeArrange();
+  }
+
+  setElementOffsetEntries(entries: Array<[number, [number, number, number]]>): void {
+    // Viewpoints restore totals; they become the manual baseline.
+    this.resetArrange();
+    for (const [id, offset] of entries) {
+      if (offset.some((value) => value !== 0)) this.manualOffsets.set(id, [offset[0], offset[1], offset[2]]);
+    }
+    this.recomposeArrange();
+  }
+
+  clearElementOffsets(expressIDs?: Iterable<number>): void {
+    if (expressIDs) {
+      const drop = new Set(expressIDs);
+      this.slideEntries = this.slideEntries.filter(([id]) => !drop.has(id));
+      this.explodeEntries = this.explodeEntries.filter(([id]) => !drop.has(id));
+      for (const id of drop) this.manualOffsets.delete(id);
+      this.recomposeArrange();
+      return;
+    }
+    this.resetArrange();
+    this.scene.clearElementOffsets();
+    this.scene.render();
+  }
+
+  hasElementOffsets(): boolean {
+    return this.scene.hasElementOffsets();
+  }
+
+  getElementOffsets(): Array<[number, [number, number, number]]> {
+    return this.scene.getElementOffsets();
+  }
+
+  setStoreySlide(axis: 'x' | 'y' | 'z', spacing: number): void {
+    this.slideEntries = storeySlideOffsets(this.getSpatialTree(), axis, spacing)
+      .filter(([, offset]) => offset.some((value) => value !== 0));
+    this.recomposeArrange();
+  }
+
+  setExplode(factor: number): void {
+    // Everything works from resting positions (bounds minus the current
+    // offset), or dragging the slider would compound on its own output.
+    const centers = new Map<number, [number, number, number]>();
+    let minX = Infinity;
+    let minY = Infinity;
+    let minZ = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    let maxZ = -Infinity;
+    for (const id of this.scene.getElementTypes().keys()) {
+      const b = this.scene.getElementBounds(id);
+      if (!b) continue;
+      const shift = this.scene.getElementOffset(id) ?? [0, 0, 0];
+      const center: [number, number, number] = [
+        (b.min.x + b.max.x) / 2 - shift[0],
+        (b.min.y + b.max.y) / 2 - shift[1],
+        (b.min.z + b.max.z) / 2 - shift[2],
+      ];
+      centers.set(id, center);
+      if (center[0] < minX) minX = center[0];
+      if (center[1] < minY) minY = center[1];
+      if (center[2] < minZ) minZ = center[2];
+      if (center[0] > maxX) maxX = center[0];
+      if (center[1] > maxY) maxY = center[1];
+      if (center[2] > maxZ) maxZ = center[2];
+    }
+    if (centers.size === 0) return;
+    const origin: [number, number, number] = [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2];
+    this.explodeEntries = explodeOffsets(centers.keys(), (id) => centers.get(id) ?? null, origin, factor)
+      .filter(([, offset]) => offset.some((value) => value !== 0));
+    this.recomposeArrange();
+  }
+
   setLodThreshold(pixels: number): void {
     this.scene.setLodThreshold(pixels);
     this.scene.render();
@@ -1801,14 +2566,103 @@ class ViewerImpl implements Viewer {
     this.scene.render();
   }
 
+  setProjection(mode: ProjectionMode): void {
+    this.controls.setProjection(mode);
+    this.scene.render();
+  }
+
+  getProjection(): ProjectionMode {
+    return this.controls.getProjection();
+  }
+
+  rotateView(degrees: number): void {
+    this.controls.rotateView(degrees);
+    this.scene.render();
+  }
+
+  setFlyMode(on: boolean): void {
+    if (on) {
+      this.buildStoreyBands();
+      this.controls.startFly();
+    } else {
+      this.controls.stopFly();
+    }
+  }
+
+  isFlyMode(): boolean {
+    return this.controls.isFlying();
+  }
+
+  onFlyChange(listener: (on: boolean) => void): () => void {
+    return this.controls.onFlyChange(listener);
+  }
+
+  viewPerpendicular(): boolean {
+    const pick = this.lastPick;
+    if (pick) {
+      const projected = this.scene.projectPoint(pick.point);
+      if (!projected.behind) {
+        const normal = this.scene.surfaceNormalAt(projected.x, projected.y, pick.point);
+        if (normal) {
+          // Keep the camera on its own side of the face.
+          const pose = this.controls.getPose();
+          const toCam = [
+            pose.position[0] - pick.point[0],
+            pose.position[1] - pick.point[1],
+            pose.position[2] - pick.point[2],
+          ];
+          const dot = normal[0] * toCam[0] + normal[1] * toCam[1] + normal[2] * toCam[2];
+          const dir: [number, number, number] =
+            dot < 0 ? [-normal[0], -normal[1], -normal[2]] : normal;
+          this.controls.lookAlong(dir);
+          this.scene.render();
+          return true;
+        }
+      }
+    }
+    const pose = this.controls.getPose();
+    const dx = pose.position[0] - pose.target[0];
+    const dy = pose.position[1] - pose.target[1];
+    const dz = pose.position[2] - pose.target[2];
+    const ax = Math.abs(dx);
+    const ay = Math.abs(dy);
+    const az = Math.abs(dz);
+    const dir: [number, number, number] =
+      ax >= ay && ax >= az
+        ? [Math.sign(dx) || 1, 0, 0]
+        : ay >= az
+          ? [0, Math.sign(dy) || 1, 0]
+          : [0, 0, Math.sign(dz) || 1];
+    this.controls.lookAlong(dir);
+    this.scene.render();
+    return false;
+  }
+
   setSection(state: SectionState): void {
     this.setSections([state]);
   }
 
   setSections(states: SectionState[]): void {
-    // One plane per axis: a second X plane would just fight the first.
-    const byAxis = new Map(states.map((state) => [state.axis, state]));
-    this.sections = [...byAxis.values()];
+    // One plane per axis; arbitrary planes dedupe on their own id. External
+    // ids bump the counter so a restored plane-3 can never collide with the
+    // next minted id, and ids that would land in the axis keyspace regenerate.
+    const byKey = new Map<string, SectionState>();
+    for (const state of states) {
+      if (isAxisSection(state)) {
+        byKey.set(state.axis, state);
+        continue;
+      }
+      const normal = normalize3(state.normal);
+      if (!normal) continue;
+      const numbered = /^plane-(\d+)$/.exec(state.id ?? '');
+      if (numbered) this.planeSeq = Math.max(this.planeSeq, Number(numbered[1]));
+      let id = state.id === 'x' || state.id === 'y' || state.id === 'z' ? '' : state.id;
+      if (!id) do id = `plane-${++this.planeSeq}`; while (byKey.has(id));
+      byKey.set(id, { ...state, id, name: state.name || `Plane ${this.planeSeq}`, normal });
+    }
+    // Eight planes cap: three compiles shaders per clip-plane count and the
+    // box path already needs six.
+    this.sections = [...byKey.values()].slice(0, 8);
     // A box is six planes on the same three axes, so the two cannot both be
     // on; whichever the user reached for last wins.
     if (this.sections.length) this.box = null;
@@ -1856,12 +2710,20 @@ class ViewerImpl implements Viewer {
     return padBox({ min, max }, pad);
   }
 
+  private clipSpecs(states: SectionState[]): ClipPlaneSpec[] {
+    return states.map((s) =>
+      isAxisSection(s)
+        ? { key: s.axis, normal: AXIS_NORMAL[s.axis], offset: s.offset, flip: s.flip }
+        : { key: s.id, normal: s.normal, offset: s.offset, flip: s.flip },
+    );
+  }
+
   /** The one place clip planes are computed, from whichever state is active. */
   private applyClipping(): void {
-    const planes = this.box ? boxPlanes(this.box) : this.sections;
-    this.scene.setClipPlanes(planes);
-    // Arrows belong to the per-axis tool; the box shows its own wireframe.
-    this.scene.setSectionHandles(this.box ? [] : this.sections);
+    const specs = this.clipSpecs(this.box ? boxPlanes(this.box) : this.sections);
+    this.scene.setClipPlanes(specs);
+    // Arrows belong to the plane tool; the box shows its own wireframe.
+    this.scene.setSectionHandles(this.box ? [] : specs);
     this.scene.setSectionBoxOutline(this.box);
     this.scene.render();
     this.emitSection();
@@ -1892,7 +2754,64 @@ class ViewerImpl implements Viewer {
   }
 
   getSection(): SectionState | null {
-    return this.sections[0] ?? null;
+    // Legacy single-plane read: axis entries only, so viewpoints saved before
+    // arbitrary planes never resurrect one as a broken axis entry.
+    return this.sections.find(isAxisSection) ?? null;
+  }
+
+  addSectionFromPick(name?: string): PlaneSectionState | null {
+    // Eight planes is the clipping budget; a ninth would be silently sliced.
+    if (this.sections.length >= 8) return null;
+    const pick = this.lastPick;
+    if (!pick) return null;
+    const projected = this.scene.projectPoint(pick.point);
+    if (projected.behind) return null;
+    const raw = this.scene.surfaceNormalAt(projected.x, projected.y, pick.point);
+    if (!raw) return null;
+    const pose = this.controls.getPose();
+    const toCam = [
+      pose.position[0] - pick.point[0],
+      pose.position[1] - pick.point[1],
+      pose.position[2] - pick.point[2],
+    ];
+    const dot = raw[0] * toCam[0] + raw[1] * toCam[1] + raw[2] * toCam[2];
+    // Toward the camera, so flip=false discards the camera side and the cut
+    // is visible the moment the plane lands.
+    const n: [number, number, number] = dot < 0 ? [-raw[0], -raw[1], -raw[2]] : raw;
+    const plane: PlaneSectionState = {
+      id: `plane-${++this.planeSeq}`,
+      name: name ?? `Plane ${this.planeSeq}`,
+      normal: n,
+      offset: n[0] * pick.point[0] + n[1] * pick.point[1] + n[2] * pick.point[2],
+      flip: false,
+    };
+    this.setSections([...this.sections, plane]);
+    return plane;
+  }
+
+  viewAlongSection(key: string): boolean {
+    const section = this.sections.find((s) => sectionKey(s) === key);
+    if (!section) return false;
+    const n = isAxisSection(section) ? AXIS_NORMAL[section.axis] : section.normal;
+    // lookAlong's direction points from target toward the camera; the camera
+    // belongs on the kept side.
+    const dir: [number, number, number] = section.flip ? [n[0], n[1], n[2]] : [-n[0], -n[1], -n[2]];
+    this.controls.lookAlong(dir);
+    this.scene.render();
+    return true;
+  }
+
+  removeSection(key: string): void {
+    this.setSections(this.sections.filter((s) => sectionKey(s) !== key));
+  }
+
+  renameSection(key: string, name: string): void {
+    const clean = name.trim().slice(0, 60);
+    if (!clean) return;
+    this.sections = this.sections.map((s) =>
+      !isAxisSection(s) && s.id === key ? { ...s, name: clean } : s,
+    );
+    this.emitSection();
   }
 
   setPlanView(on: boolean): void {
@@ -1906,6 +2825,80 @@ class ViewerImpl implements Viewer {
   }
 
   /** Keep the framed border over the inset in step with the canvas. */
+  /** The first model's name, so a saved plan is traceable to its file. */
+  private planName(): string {
+    return [...this.models.values()][0]?.name || 'plan';
+  }
+
+  /**
+   * Storey elevations, taken once when flight starts. Walking the tree and
+   * every element bound per frame would be far too much work for a readout.
+   */
+  private buildStoreyBands(): void {
+    this.storeyBands = [];
+    for (const storey of storeyElementSets(this.getSpatialTree())) {
+      let base = Infinity;
+      for (const id of storey.ids) {
+        const bounds = this.scene.getElementBounds(id);
+        if (bounds && bounds.min.y < base) base = bounds.min.y;
+      }
+      if (Number.isFinite(base)) this.storeyBands.push({ name: storey.name, elevation: base });
+    }
+  }
+
+  /**
+   * The flight HUD: where you are, which way you face, how fast, and the keys
+   * that drive it. It sits beside the plan and only exists while flying.
+   */
+  private syncFlyPanel(): void {
+    const flying = this.controls.isFlying();
+    const rect = this.scene.getPlanRect();
+    if (!flying) {
+      this.flyPanel?.remove();
+      this.flyPanel = null;
+      this.flyReadout = null;
+      return;
+    }
+    if (!this.flyPanel) {
+      const doc = this.container.ownerDocument;
+      this.flyPanel = doc.createElement('div');
+      this.flyPanel.className = 'ifc-fly-panel';
+      const keys = (...items: string[]): string =>
+        items.map((item) => `<kbd>${item}</kbd>`).join('');
+      this.flyPanel.innerHTML =
+        '<div class="ifc-fly-head">Fly</div>' +
+        '<div class="ifc-fly-read"></div>' +
+        '<div class="ifc-fly-keys">' +
+        `<div>${keys('W', 'A', 'S', 'D')}<span>move</span></div>` +
+        `<div>${keys('Q', 'E')}<span>down, up</span></div>` +
+        `<div>${keys('Shift')}<span>faster</span></div>` +
+        `<div>${keys('Wheel')}<span>zoom</span></div>` +
+        `<div>${keys('Esc')}<span>exit</span></div>` +
+        '</div>';
+      this.container.appendChild(this.flyPanel);
+      this.flyReadout = this.flyPanel.querySelector('.ifc-fly-read');
+    }
+    // Beside the plan when it is showing, in its place when it is not.
+    const left = rect ? rect.x + rect.size + 10 : 14;
+    if (this.flyPanel.style.left !== `${left}px`) this.flyPanel.style.left = `${left}px`;
+
+    const origin = this.scene.getModelOrigin();
+    const p = this.scene.getCameraPosition();
+    const facing = heading(this.scene.getViewDirection(), this.scene.getViewUp());
+    const storey = storeyAt(this.storeyBands, p[1]);
+    const speed = this.controls.getFlySpeed() ?? 0;
+    const row = (label: string, value: string): string =>
+      `<div><span>${label}</span><b>${value}</b></div>`;
+    const text =
+      row('At', `${metres(p[0] + origin[0])}, ${metres(p[2] + origin[2])}`) +
+      row('Height', `${metres(p[1] + origin[1])} m`) +
+      (storey ? row('Level', storey) : '') +
+      row('Facing', `${compassPoint(facing)} ${Math.round(facing)}°`) +
+      row('Speed', speedLabel(speed)) +
+      row('Zoom', `${Math.round(this.scene.getFieldOfView())}°`);
+    if (this.flyReadout && this.flyReadout.innerHTML !== text) this.flyReadout.innerHTML = text;
+  }
+
   private syncPlanFrame(): void {
     const rect = this.scene.getPlanRect();
     if (!rect) {
@@ -1917,9 +2910,24 @@ class ViewerImpl implements Viewer {
     if (!this.planFrame) {
       this.planFrame = this.container.ownerDocument.createElement('div');
       this.planFrame.className = 'ifc-plan-frame';
-      this.planFrame.innerHTML = '<span>Plan</span>';
+      this.planFrame.innerHTML =
+        '<span>Plan</span>' +
+        '<button type="button" class="ifc-plan-save" title="Download this plan as a PNG" aria-label="Download this plan as a PNG">' +
+        '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.9" ' +
+        'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<path d="M12 3v12M7.5 10.5 12 15l4.5-4.5M4.5 20h15"/></svg></button>' +
+        '<span class="ifc-plan-north">N</span>';
+      this.planFrame.querySelector('.ifc-plan-save')?.addEventListener('click', (event) => {
+        event.stopPropagation();
+        void this.downloadPlan(this.planName());
+      });
       this.container.appendChild(this.planFrame);
       this.planSize = 0;
+      // North needle: rotated by true north when the anchor model has one.
+      const anchor = this.geoAnchor === null ? null : [...this.models.values()].find((m) => m.index === this.geoAnchor);
+      const north = anchor?.geo.trueNorth?.degreesFromGridNorth ?? 0;
+      const needle = this.planFrame.querySelector<HTMLElement>('.ifc-plan-north');
+      if (needle && north !== 0) needle.style.transform = `rotate(${north}deg)`;
     }
     if (this.planSize === rect.size) return;
     this.planSize = rect.size;
@@ -2100,7 +3108,8 @@ class ViewerImpl implements Viewer {
       : kind === 'path' ? 'Path'
         : kind === 'angle' ? 'Angle'
           : kind === 'area' ? 'Area'
-            : 'Coordinate';
+            : kind === 'count' ? 'Count'
+              : 'Coordinate';
   }
 
   private cleanMeasurementLabel(value: unknown, fallback: string, id: number): string {
@@ -2277,8 +3286,8 @@ class ViewerImpl implements Viewer {
         continue;
       }
       if (!('points' in state) || !Array.isArray(state.points) || !state.points.every(point)) continue;
-      if (!['path', 'angle', 'area', 'coordinate'].includes(state.kind)) continue;
-      const minimum = state.kind === 'coordinate' ? 1 : state.kind === 'path' ? 2 : 3;
+      if (!['path', 'angle', 'area', 'coordinate', 'count'].includes(state.kind)) continue;
+      const minimum = state.kind === 'coordinate' || state.kind === 'count' ? 1 : state.kind === 'path' ? 2 : 3;
       if (state.points.length < minimum) continue;
       const id = claimId(state.id);
       const points = state.points.map((entry) => [...entry] as [number, number, number]);
@@ -2288,7 +3297,7 @@ class ViewerImpl implements Viewer {
         label: this.cleanMeasurementLabel(state.label, this.measurementKindLabel(state.kind), id),
         visible: state.visible !== false,
         points,
-        perimeter: state.kind === 'coordinate' ? 0 : ringPerimeter(points, state.kind === 'area'),
+        perimeter: state.kind === 'coordinate' || state.kind === 'count' ? 0 : ringPerimeter(points, state.kind === 'area'),
         ...(state.kind === 'angle' ? { angle: angleAt(points[0], points[1], points[2]) } : {}),
         ...(state.kind === 'area' ? { area: ringArea(points) } : {}),
       };
@@ -2416,12 +3425,13 @@ class ViewerImpl implements Viewer {
       }
     }
     this.chain.push(point);
-    if (this.measureMode === 'coordinate') {
+    if (this.measureMode === 'coordinate' || this.measureMode === 'count') {
+      const kind = this.measureMode;
       const id = ++this.measurementSeq;
       this.shapes.push({
         id,
-        kind: 'coordinate',
-        label: this.defaultMeasurementLabel('coordinate'),
+        kind,
+        label: this.defaultMeasurementLabel(kind),
         visible: true,
         points: [[...point]],
         perimeter: 0,
@@ -2577,6 +3587,48 @@ class ViewerImpl implements Viewer {
   /** Everything placed: spans plus finished shapes. Drives the filter chip. */
   getMeasureCount(): number {
     return this.spans.filter((span) => span.shape === undefined).length + this.shapes.length;
+  }
+
+  undoLastMeasurement(): boolean {
+    // A chain in progress: take back the last placed point and its leg.
+    if (this.chain.length > 0) {
+      this.chain.pop();
+      for (let i = this.spans.length - 1; i >= 0; i--) {
+        if (this.spans[i].shape === PENDING_SHAPE) {
+          this.spans.splice(i, 1);
+          this.spansChanged();
+          break;
+        }
+      }
+      if (this.chain.length === 0) this.measureNormal = null;
+      this.pushMeasure();
+      return true;
+    }
+    // The first point of a distance span in hand.
+    if (this.measureA) {
+      this.measureA = null;
+      this.measureAKind = null;
+      this.measureNormal = null;
+      this.pushMeasure();
+      return true;
+    }
+    // Nothing pending: drop the newest placed object. Spans and shapes number
+    // themselves separately, so the active tool decides which list is "last".
+    const span = [...this.spans].reverse().find((entry) => entry.shape === undefined);
+    const shape = this.shapes[this.shapes.length - 1];
+    if (this.measureMode === 'distance' && span) {
+      this.removeMeasurement(span.id);
+      return true;
+    }
+    if (shape) {
+      this.removeShapeMeasure(shape.id);
+      return true;
+    }
+    if (span) {
+      this.removeMeasurement(span.id);
+      return true;
+    }
+    return false;
   }
 
   private measureUp(clientX: number, clientY: number, moved: boolean): void {
@@ -2830,6 +3882,25 @@ class ViewerImpl implements Viewer {
     return new Promise((resolve) => source.toBlob((blob) => resolve(blob), type, quality));
   }
 
+  capturePlanImage(size = 1600, type = 'image/png', quality = 0.92): Promise<Blob | null> {
+    const canvas = this.scene.capturePlan(size);
+    if (!canvas) return Promise.resolve(null);
+    return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), type, quality));
+  }
+
+  async downloadPlan(name = 'plan'): Promise<boolean> {
+    const blob = await this.capturePlanImage();
+    if (!blob) return false;
+    const url = URL.createObjectURL(blob);
+    const a = this.container.ownerDocument.createElement('a');
+    a.href = url;
+    a.download = `${name.replace(/\.[^.]+$/, '') || 'plan'}-plan.png`;
+    a.click();
+    // Revoking in the same task cancels the download on some browsers.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return true;
+  }
+
   pickAt(clientX: number, clientY: number): PickResult | null {
     return this.controls.pickAt(clientX, clientY);
   }
@@ -2887,6 +3958,9 @@ class ViewerImpl implements Viewer {
     this.hoverPending = null;
     this.measuring = false;
     for (const node of this.spanLabels) node.remove();
+    for (const node of this.gridLabels) node.remove();
+    for (const node of this.noteLabels) node.remove();
+    this.flyPanel?.remove();
     this.snapTag?.remove();
     this.planFrame?.remove();
     for (const entry of this.models.values()) this.engine?.dispose(entry.modelID);

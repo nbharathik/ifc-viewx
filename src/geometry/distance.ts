@@ -1,6 +1,7 @@
 import type { Viewer } from "../viewer-core/viewer.js";
 import { geometryService } from "./service.js";
 import type { DistanceResult, DistanceSpec } from "./types.js";
+import { packedModelTransforms } from "./modelTransform.js";
 
 export type { DistanceResult } from "./types.js";
 
@@ -36,6 +37,7 @@ export function measureDistance(
     b,
     origin: viewer.getModelOrigin(),
     offsets: modelOffsets(viewer),
+    transforms: packedModelTransforms(viewer.getModels()),
     maxDistance: options.maxDistance,
   };
   return geometryService(viewer).distance(spec, options.signal);

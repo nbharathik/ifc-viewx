@@ -7,11 +7,14 @@ import {
   CancelledError,
   type AsyncIfcEngine,
   type AsyncLoadOptions,
+  type IfcGridInfo,
   type IfcMesh,
+  type IfcTaskGraph,
   type ItemProperties,
   type LazyCategory,
   type LoadSource,
   type LoadedModelMeta,
+  type OrganizeIndex,
 } from './types.js';
 
 export interface WorkerSpawnOptions {
@@ -237,7 +240,10 @@ export class WorkerEngine implements AsyncIfcEngine {
         break;
       }
       case 'properties':
-      case 'counts': {
+      case 'counts':
+      case 'taskGraph':
+      case 'organizeIndex':
+      case 'gridAxes': {
         const p = this.pending.get(msg.id);
         this.pending.delete(msg.id);
         (p?.resolve as ((v: unknown) => void) | undefined)?.(msg.result);
@@ -392,6 +398,33 @@ export class WorkerEngine implements AsyncIfcEngine {
     return new Promise<Record<string, number>>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: never) => void, reject });
       this.send({ type: 'getCounts', id, modelID });
+    });
+  }
+
+  async getTaskGraph(modelID: number): Promise<IfcTaskGraph> {
+    await this.init();
+    const id = this.nextId++;
+    return new Promise<IfcTaskGraph>((resolve, reject) => {
+      this.pending.set(id, { resolve: resolve as (v: never) => void, reject });
+      this.send({ type: 'getTaskGraph', id, modelID });
+    });
+  }
+
+  async getOrganizeIndex(modelID: number): Promise<OrganizeIndex> {
+    await this.init();
+    const id = this.nextId++;
+    return new Promise<OrganizeIndex>((resolve, reject) => {
+      this.pending.set(id, { resolve: resolve as (v: never) => void, reject });
+      this.send({ type: 'getOrganizeIndex', id, modelID });
+    });
+  }
+
+  async getGridAxes(modelID: number): Promise<IfcGridInfo[]> {
+    await this.init();
+    const id = this.nextId++;
+    return new Promise<IfcGridInfo[]>((resolve, reject) => {
+      this.pending.set(id, { resolve: resolve as (v: never) => void, reject });
+      this.send({ type: 'getGridAxes', id, modelID });
     });
   }
 

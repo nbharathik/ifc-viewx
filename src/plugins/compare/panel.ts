@@ -1,5 +1,6 @@
 import {
-  bar, button, compareSnapshots, elementsOf, emptyState, h, hint, note, openSideModel, page, progress, stats, toCsv,
+  bar, button, compareSnapshots, elementsOf, emptyState, h, header, hint, note, openSideModel, page, progress, saveXlsx,
+  stats, toCsv,
 } from "@ifcviewx/sdk";
 import type {
   CompareEntry, CompareKind, CompareResult, CompareSnapshot, ElementRow, ExtensionContext,
@@ -12,6 +13,10 @@ const WINDOW = 12;
 const LIST_LIMIT = 250;
 const RESULT_LIMIT = 10_000;
 const IGNORED = new Set(["GlobalId", "OwnerHistory", "expressID"]);
+const REPORT = [
+  "State", "Categories", "GlobalId", "Class", "Name", "Storey",
+  "Translation mm", "Rotation degrees", "Shape changed", "Property", "Was", "Now",
+];
 const FILTERS: Array<[Filter, string]> = [
   ["changed", "Changed"],
   ["geometry", "Shape"],
@@ -115,6 +120,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   search.addEventListener("input", () => queuePaint());
 
   root.append(
+    header("Model compare", "See what moved, reshaped, changed level or changed data against a baseline IFC.", "MESH"),
     h("div", { class: "cmp-revision-trace" }, [
       beforeLabel,
       h("span", { class: "cmp-trace-line" }, [h("i"), h("b")]),
@@ -127,6 +133,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       button("Clear color", clearColor),
       button("Show all", () => ctx.view.showAll()),
       button("CSV", () => exportCsv()),
+      button("XLSX", () => void exportXlsx()),
     ),
     picker,
     status.root,
@@ -367,10 +374,9 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
     paintFrame = requestAnimationFrame(() => { paintFrame = 0; paint(); });
   };
 
-  const exportCsv = (): void => {
-    if (!result) return void ctx.feedback.toast("Run a comparison first", "error");
+  const reportRows = (): Array<Array<Value>> => {
     const rows: Array<Array<Value>> = [];
-    for (const entry of result.entries.filter((value) => value.kind !== "unchanged")) {
+    for (const entry of result?.entries.filter((value) => value.kind !== "unchanged") ?? []) {
       const base: Value[] = [entry.kind, entry.categories.join("+"), entry.globalId, entry.type, entry.name, entry.storey,
         entry.geometry ? Number((entry.geometry.translationDistance * 1000).toFixed(2)) : null,
         entry.geometry ? Number(entry.geometry.rotationDegrees.toFixed(3)) : null,
@@ -378,8 +384,23 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       if (!entry.changes.length) rows.push([...base, "", "", ""]);
       else for (const change of entry.changes) rows.push([...base, change.key, show(change.from), show(change.to)]);
     }
+    return rows;
+  };
+
+  const exportCsv = (): void => {
+    if (!result) return void ctx.feedback.toast("Run a comparison first", "error");
     const name = `compare-${ctx.session.model().name || "model"}.csv`;
-    ctx.files.export("compare.csv", name, `\uFEFF${toCsv(["State", "Categories", "GlobalId", "Class", "Name", "Storey", "Translation mm", "Rotation degrees", "Shape changed", "Property", "Was", "Now"], rows)}`, "text/csv");
+    ctx.files.export("compare.csv", name, `\uFEFF${toCsv(REPORT, reportRows())}`, "text/csv");
+  };
+
+  const exportXlsx = async (): Promise<void> => {
+    if (!result) return void ctx.feedback.toast("Run a comparison first", "error");
+    const name = `compare-${ctx.session.model().name || "model"}.xlsx`;
+    try {
+      await saveXlsx(name, REPORT, reportRows(), { sheet: "Changes" });
+    } catch {
+      ctx.feedback.toast("The spreadsheet could not be written", "error");
+    }
   };
 
   ctx.events.on("model", () => {

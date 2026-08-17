@@ -1,6 +1,7 @@
 import type { Viewer } from "../viewer-core/viewer.js";
 import { geometryService } from "./service.js";
 import type { SectionAxis, SectionContourResult, SectionContourSpec } from "./types.js";
+import { packedModelTransforms } from "./modelTransform.js";
 
 export type { SectionAxis, SectionContourResult, SectionPolyline } from "./types.js";
 
@@ -41,6 +42,7 @@ export function extractSectionContours(
     ids: new Float64Array(ids),
     modelOrigin: viewer.getModelOrigin(),
     offsets: modelOffsets(viewer),
+    transforms: packedModelTransforms(viewer.getModels()),
     tolerance: options.tolerance,
     maxSegments: options.maxSegments,
   };

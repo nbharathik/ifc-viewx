@@ -297,7 +297,7 @@ def test_an_optional_specification_matching_nothing_is_not_a_pass(sample_ifc, tm
     code = _run(str(sample_ifc), "--quiet", "--ids", str(spec), "--json", str(out))
     result = json.loads(out.read_text(encoding="utf-8"))
     reported = result["ids"]["documents"][0]["specifications"][0]
-    assert reported["status"] == "skipped"
+    assert reported["status"] == "not_run"
     assert reported["applicable"] == 0
     # Reported, but not an error: nothing was checked, so nothing failed.
     assert result["counts"]["info"] >= 1

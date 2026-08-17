@@ -3,6 +3,7 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { IfcAPI } from "web-ifc";
 
+import { readIfcGeoReference } from "../src/ifc/georeferencing.js";
 import { sampleModel, SAMPLE_NAME } from "../src/ui/sample.js";
 
 let api: IfcAPI;
@@ -31,6 +32,14 @@ describe("sample model", () => {
   it("opens in web-ifc without an error", () => {
     expect(modelID).toBeGreaterThanOrEqual(0);
     expect(api.IsModelOpen(modelID)).toBe(true);
+  });
+
+  it("provides a projected CRS and map conversion for Geo Context", () => {
+    const geo = readIfcGeoReference(api, modelID);
+    expect(geo.projectedCrs).toMatchObject({ name: "EPSG:25833", geodeticDatum: "ETRS89", verticalDatum: "DHHN2016" });
+    expect(geo.operation).toMatchObject({ kind: "map-conversion", eastings: 451_000, northings: 5_990_000, orthogonalHeight: 12.5 });
+    expect(geo.trueNorth?.direction).toEqual([0, 1]);
+    expect(geo.warnings).toEqual([]);
   });
 
   it("produces the classes the sample promises", () => {

@@ -5,12 +5,16 @@
 // GPU state and no second draw. Class and storey read the spatial tree and are
 // instant; property rules need the shared property index, which builds once.
 import { elementsOf, type ElementRow, type PropertyIndex } from "../sdk/data.js";
-import type { Viewer } from "../viewer-core/viewer.js";
+import { modelOf } from "../viewer-core/ids.js";
+import type { OrganizeIndex, Viewer } from "../viewer-core/viewer.js";
 
 export type ColorRule =
   | { kind: "none" }
   | { kind: "class" }
   | { kind: "storey" }
+  | { kind: "model" }
+  | { kind: "random" }
+  | { kind: "material" }
   | { kind: "property"; key: string };
 
 export interface ColorGroup {
@@ -25,6 +29,8 @@ export interface ColorResult {
   assignment: Map<number, number>;
   /** Elements the rule said nothing about, left at their own colour. */
   unset: number;
+  /** Explicit palette when it is wider than one colour per group (random). */
+  colors?: Array<[number, number, number]>;
 }
 
 /** Palette entries a rule may use; index 0 in the texture means untouched. */
@@ -78,7 +84,11 @@ function order(entries: Map<string, number[]>): Array<[string, number[]]> {
   });
 }
 
-function build(entries: Map<string, number[]>, hasGeometry: (id: number) => boolean): ColorResult {
+/** Build a result from ready-made label groups; the shared core of every rule. */
+export function computeColorsFromEntries(
+  entries: Map<string, number[]>,
+  hasGeometry: (id: number) => boolean,
+): ColorResult {
   const sorted = order(entries);
   const groups: ColorGroup[] = [];
   const assignment = new Map<number, number>();
@@ -151,21 +161,64 @@ export function computeColors(viewer: Viewer, rule: ColorRule, rows: ElementRow[
     for (const element of elementsOf(viewer.getSpatialTree())) {
       push(entries, element.type.replace(/^Ifc/, ""), element.id);
     }
-    return build(entries, hasGeometry);
+    return computeColorsFromEntries(entries, hasGeometry);
   }
 
   if (rule.kind === "storey") {
     for (const element of elementsOf(viewer.getSpatialTree())) {
       push(entries, element.storey || "(no storey)", element.id);
     }
-    return build(entries, hasGeometry);
+    return computeColorsFromEntries(entries, hasGeometry);
   }
+
+  if (rule.kind === "model") {
+    const names = new Map(viewer.getModels().map((m) => [m.index, m.name || `Model ${m.index + 1}`]));
+    for (const element of elementsOf(viewer.getSpatialTree())) {
+      push(entries, names.get(modelOf(element.id)) ?? "(unknown model)", element.id);
+    }
+    return computeColorsFromEntries(entries, hasGeometry);
+  }
+
+  if (rule.kind === "random") {
+    // Every element gets its own hue; one legend row stands in for them all,
+    // and the palette carries the full spread rather than one colour per group.
+    const assignment = new Map<number, number>();
+    const ids: number[] = [];
+    for (const element of elementsOf(viewer.getSpatialTree())) {
+      if (!hasGeometry(element.id)) continue;
+      // Knuth's multiplicative hash spreads consecutive ids across the palette.
+      assignment.set(element.id, 1 + (((element.id * 2654435761) >>> 0) % MAX_GROUPS));
+      ids.push(element.id);
+    }
+    if (ids.length === 0) return empty;
+    const colors: Array<[number, number, number]> = [];
+    for (let i = 0; i < MAX_GROUPS; i++) colors.push(paletteColor(i));
+    return {
+      groups: [{ label: "Random per element", color: [156, 163, 175], count: ids.length, ids }],
+      assignment,
+      unset: 0,
+      colors,
+    };
+  }
+
+  // Materials live in the async organize index; the dock feeds them through
+  // materialColorEntries and computeColorsFromEntries instead.
+  if (rule.kind === "material") return empty;
 
   if (rows.length === 0) return empty;
   const banded = bandValues(rows, rule.key);
-  if (banded) return build(banded, hasGeometry);
+  if (banded) return computeColorsFromEntries(banded, hasGeometry);
   for (const row of rows) push(entries, labelOf(row.props[rule.key]), row.id);
-  return build(entries, hasGeometry);
+  return computeColorsFromEntries(entries, hasGeometry);
+}
+
+/** Material assignments from the organize index, as entries for the pipeline. */
+export function materialColorEntries(index: OrganizeIndex): Map<string, number[]> {
+  const entries = new Map<string, number[]>();
+  for (const material of index.materials) {
+    for (const id of material.ids) push(entries, material.name || "(unnamed)", id);
+  }
+  return entries;
 }
 
 /** Apply a computed result to the viewer, or clear when it is empty. */
@@ -173,8 +226,58 @@ export function applyColors(viewer: Viewer, result: ColorResult): void {
   if (result.groups.length === 0) return void viewer.clearColorOverride();
   viewer.setColorOverride(
     result.assignment,
-    result.groups.map((group) => group.color),
+    result.colors ?? result.groups.map((group) => group.color),
   );
+}
+
+/**
+ * User-picked colours for explicit selections, layered over whatever rule is
+ * active. Owned by the colour card; survives rule switches until cleared.
+ */
+export class CustomColors {
+  private readonly byColor = new Map<string, { color: [number, number, number]; ids: Set<number> }>();
+
+  set(ids: Iterable<number>, color: [number, number, number]): void {
+    const key = color.join(",");
+    const entry = this.byColor.get(key) ?? { color, ids: new Set<number>() };
+    for (const id of ids) {
+      for (const other of this.byColor.values()) other.ids.delete(id);
+      entry.ids.add(id);
+    }
+    this.byColor.set(key, entry);
+    for (const [key2, other] of this.byColor) {
+      if (other.ids.size === 0) this.byColor.delete(key2);
+    }
+  }
+
+  clear(): void {
+    this.byColor.clear();
+  }
+
+  isEmpty(): boolean {
+    return this.byColor.size === 0;
+  }
+
+  /** The rule's result with the custom groups stacked on top. */
+  overlay(result: ColorResult): ColorResult {
+    if (this.isEmpty()) return result;
+    const colors = [...(result.colors ?? result.groups.map((group) => group.color))];
+    const groups = [...result.groups];
+    const assignment = new Map(result.assignment);
+    let unset = result.unset;
+    for (const { color, ids } of this.byColor.values()) {
+      if (colors.length >= MAX_GROUPS) {
+        unset += ids.size;
+        continue;
+      }
+      colors.push(color);
+      const index = colors.length;
+      const list = [...ids];
+      for (const id of list) assignment.set(id, index);
+      groups.push({ label: "Custom colour", color, count: list.length, ids: list });
+    }
+    return { groups, assignment, unset, colors };
+  }
 }
 
 export const cssColor = (rgb: [number, number, number]): string => `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;

@@ -1,44 +1,35 @@
-// BCF: issues pinned to a viewpoint. Topics live in this browser beside the
-// model they belong to and travel as a .bcfzip (BCF 2.1). Cameras are written
-// in viewer world coordinates: they round trip here exactly, and land close in
-// other tools when the model shares that origin.
-import { confirmAction, h, icon, iconButton, toast } from "./kit.js";
+// BCF: issues pinned to a viewpoint. Topics can stay beside the model in this
+// browser, travel as a .bcfzip (BCF 2.1), or sync with an OpenCDE BCF 3 project.
+// Cameras use viewer world coordinates so they round trip exactly here.
+import { confirmAction, h, icon, iconButton, lightDismiss, toast } from "./kit.js";
 import { emptyState } from "./shell.js";
 import type { ReportIssue } from "./report.js";
-import type { CameraPose, SectionBox, SectionState, Viewer } from "../viewer-core/viewer.js";
-
-interface ViewpointSelection {
-  id: number;
-  guid: string | null;
-}
-
-interface Viewpoint {
-  camera: CameraPose;
-  sections: SectionState[];
-  sectionBox?: SectionBox | null;
-  selections?: ViewpointSelection[];
-  selection?: number | null;
-  selectionGuid?: string | null;
-  hidden: number[];
-}
+import type { CameraPose, Viewer } from "../viewer-core/viewer.js";
+import {
+  OpenCdeClient,
+  OpenCdeEndpointTrustError,
+  type BcfProject,
+  type BcfProjectExtensions,
+  type OpenCdeAuth,
+  type OpenCdeFetch,
+} from "../opencde/client.js";
+import {
+  fromBcfViewpoint,
+  fromBcfTopic,
+  pendingCount,
+  toBcfTopic,
+  toBcfViewpoint,
+  type ReviewComment,
+  type ReviewTopic,
+} from "../opencde/bridge.js";
 
 export interface BcfCaptureOptions {
   elementIds?: number[];
   priority?: string;
+  point?: [number, number, number];
 }
 
-interface Topic {
-  guid: string;
-  title: string;
-  description: string;
-  status: string;
-  priority: string;
-  author: string;
-  date: string;
-  comments: Array<{ guid: string; date: string; author: string; text: string }>;
-  viewpoint: Viewpoint | null;
-  snapshot: string | null;
-}
+type Topic = ReviewTopic;
 
 const STATUS = ["Open", "In Progress", "Resolved", "Closed"];
 const PRIORITY = ["Low", "Normal", "High", "Critical"];
@@ -46,6 +37,8 @@ const PRIORITY = ["Low", "Normal", "High", "Critical"];
 const SNAP_WIDTH = 560;
 /** Above this the hidden set is not stored; restoring then shows everything. */
 const HIDDEN_LIMIT = 2000;
+const LAST_SERVER_KEY = "ifcviewx.opencde.server";
+const LAST_PROJECT_KEY = "ifcviewx.opencde.project";
 
 const uuid = (): string =>
   crypto.randomUUID?.() ??
@@ -185,10 +178,12 @@ function markupXml(topic: Topic): string {
     : "";
   return (
     `<?xml version="1.0" encoding="UTF-8"?>\n<Markup>` +
-    `<Topic Guid="${topic.guid}" TopicType="Issue" TopicStatus="${escape(topic.status)}">` +
+    `<Topic Guid="${topic.guid}" TopicType="${escape(topic.topicType || "Issue")}" TopicStatus="${escape(topic.status)}">` +
     `<Title>${escape(topic.title)}</Title><Priority>${escape(topic.priority)}</Priority>` +
     `<CreationDate>${topic.date}</CreationDate><CreationAuthor>${escape(topic.author)}</CreationAuthor>` +
-    `<Description>${escape(topic.description)}</Description></Topic>` +
+    `<Description>${escape(topic.description)}</Description>` +
+    (topic.assignedTo ? `<AssignedTo>${escape(topic.assignedTo)}</AssignedTo>` : "") +
+    `</Topic>` +
     comments +
     viewpoint +
     `</Markup>`
@@ -216,11 +211,13 @@ function viewpointXml(topic: Topic): string {
       : "";
   const sections = view.sections
     .map((section) => {
-      const index = section.axis === "x" ? 0 : section.axis === "y" ? 1 : 2;
-      const location: [number, number, number] = [0, 0, 0];
-      const normal: [number, number, number] = [0, 0, 0];
-      location[index] = section.offset;
-      normal[index] = section.flip ? 1 : -1;
+      // Direction points into the kept half-space, matching the axis export
+      // convention that predates arbitrary planes.
+      const n: [number, number, number] = section.axis
+        ? [section.axis === "x" ? 1 : 0, section.axis === "y" ? 1 : 0, section.axis === "z" ? 1 : 0]
+        : section.normal;
+      const location: [number, number, number] = [n[0] * section.offset, n[1] * section.offset, n[2] * section.offset];
+      const normal: [number, number, number] = section.flip ? [n[0], n[1], n[2]] : [-n[0], -n[1], -n[2]];
       return `<ClippingPlane>${point("Location", location)}${point("Direction", normal)}</ClippingPlane>`;
     })
     .join("");
@@ -271,6 +268,9 @@ function parseTopic(markup: string, viewpoint: string | null, snapshot: string |
     priority: text(node, "Priority") || "Normal",
     author: text(node, "CreationAuthor") || "unknown",
     date: text(node, "CreationDate") || new Date().toISOString(),
+    modifiedAt: text(node, "ModifiedDate") || undefined,
+    topicType: node.getAttribute("TopicType") || "Issue",
+    assignedTo: text(node, "AssignedTo") || undefined,
     comments: [...doc.getElementsByTagName("Comment")]
       .filter((item) => item.parentElement?.tagName === "Markup")
       .map((item) => ({
@@ -296,8 +296,22 @@ function parseTopic(markup: string, viewpoint: string | null, snapshot: string |
       const axis = normal.map(Math.abs).indexOf(Math.max(...normal.map(Math.abs)));
       return [{ axis, location, normal }];
     });
-    const byAxis = [0, 1, 2].map((axis) => clipping.filter((plane) => plane.axis === axis));
-    const sectionBox = byAxis.every((planes) => planes.length === 2)
+    // The six-plane box heuristic only counts axis-dominant planes; a tilted
+    // plane in the set must never masquerade as a box face.
+    const axisDominant = clipping.filter((plane) => {
+      const len = Math.hypot(...plane.normal) || 1;
+      return Math.abs(plane.normal[plane.axis]) > 0.999 * len;
+    });
+    const byAxis = [0, 1, 2].map((axis) => axisDominant.filter((plane) => plane.axis === axis));
+    // A box keeps its interior: per axis the lower plane's Direction must
+    // point up the axis and the upper one down it, or two same-side planes
+    // would masquerade as a box and invert the cut on import.
+    const boxLike = byAxis.every((planes) => {
+      if (planes.length !== 2) return false;
+      const [a, b] = [...planes].sort((p, q) => p.location[p.axis] - q.location[q.axis]);
+      return a.normal[a.axis] > 0 && b.normal[b.axis] < 0;
+    });
+    const sectionBox = axisDominant.length === clipping.length && boxLike
       ? {
           min: byAxis.map((planes, axis) => Math.min(...planes.map((plane) => plane.location[axis]))) as [number, number, number],
           max: byAxis.map((planes, axis) => Math.max(...planes.map((plane) => plane.location[axis]))) as [number, number, number],
@@ -313,11 +327,26 @@ function parseTopic(markup: string, viewpoint: string | null, snapshot: string |
         position,
         target: [position[0] + heading[0] * span, position[1] + heading[1] * span, position[2] + heading[2] * span],
       },
-      sections: sectionBox ? [] : clipping.map((plane) => ({
-        axis: (["x", "y", "z"] as const)[plane.axis],
-        offset: plane.location[plane.axis],
-        flip: plane.normal[plane.axis] > 0,
-      })),
+      sections: sectionBox ? [] : clipping.map((plane) => {
+        const len = Math.hypot(...plane.normal) || 1;
+        if (Math.abs(plane.normal[plane.axis]) > 0.999 * len) {
+          return {
+            axis: (["x", "y", "z"] as const)[plane.axis],
+            offset: plane.location[plane.axis],
+            flip: plane.normal[plane.axis] > 0,
+          };
+        }
+        // BCF Direction points at the kept side; our normal points at the
+        // discarded one when flip is false.
+        const n = plane.normal.map((v) => -v / len) as [number, number, number];
+        return {
+          id: "",
+          name: "Imported plane",
+          normal: n,
+          offset: n[0] * plane.location[0] + n[1] * plane.location[1] + n[2] * plane.location[2],
+          flip: false,
+        };
+      }),
       sectionBox,
       selections,
       hidden: [],
@@ -331,6 +360,7 @@ export interface BcfActions {
   viewer: Viewer;
   modelName(): string;
   log(message: string, kind?: "info" | "success" | "error"): void;
+  openCdeFetch?: OpenCdeFetch;
 }
 
 async function snapshot(viewer: Viewer): Promise<string | null> {
@@ -355,15 +385,22 @@ async function toPng(dataUrl: string): Promise<Uint8Array> {
 }
 
 export class BcfPanel {
+  private readonly workspace = h("section", { class: "cde-workspace", "aria-label": "Connected project" });
   private readonly list = h("div", { class: "scroll" });
   private readonly empty = emptyState("flag", "No issues yet", "Raise one from the current view; it keeps the camera, the section and the snapshot.");
   private readonly status = h("div", { class: "status-line" });
   private readonly file = h("input", { type: "file", accept: ".bcfzip,.zip", hidden: true });
-  private readonly author = localStorage.getItem("ifcviewx.bcf.author") ?? "me";
+  private readonly client: OpenCdeClient;
+  private author = localStorage.getItem("ifcviewx.bcf.author") ?? "me";
   private topics: Topic[] = [];
   private expanded: string | null = null;
+  private project: BcfProject | null = null;
+  private extensions: BcfProjectExtensions | null = null;
+  private syncing = false;
+  private lastSync: Date | null = null;
 
   constructor(host: HTMLElement, private readonly actions: BcfActions) {
+    this.client = new OpenCdeClient(actions.openCdeFetch);
     const create = h("button", { class: "btn accent", type: "button" }, [icon("plus", 14), h("span", { text: "New issue" })]);
     create.addEventListener("click", () => this.capture("", ""));
     const exportBtn = h("button", { class: "btn", type: "button", title: "Download a .bcfzip" }, [icon("download", 14)]);
@@ -378,6 +415,7 @@ export class BcfPanel {
 
     host.appendChild(
       h("div", { class: "page" }, [
+        this.workspace,
         h("div", { class: "row" }, [create, h("span", { class: "grow" }), importBtn, exportBtn, this.file]),
         this.status,
         this.empty,
@@ -385,7 +423,10 @@ export class BcfPanel {
       ]),
     );
 
-    actions.viewer.onModelLoaded(() => this.refresh());
+    actions.viewer.onModelLoaded(() => {
+      this.refresh();
+      if (this.project) void this.pullRemote();
+    });
     this.refresh();
   }
 
@@ -421,26 +462,47 @@ export class BcfPanel {
         : [];
     const selectedIds = [...new Set(options.elementIds ?? viewer.getSelectedIds())]
       .filter((id) => Number.isFinite(id) && id > 0);
+    const active = this.activeProject();
+    const focusPoint = options.point ?? viewer.getCamera().target;
+    const projected = typeof viewer.sceneToGeoreferenced === "function"
+      ? viewer.sceneToGeoreferenced(focusPoint)
+      : null;
+    const georeference = projected
+      ? `Georeferenced coordinate (${projected.crs}): ${projected.coordinates.map((value) => value.toFixed(3)).join(", ")}`
+      : "";
     const topic: Topic = {
       guid: uuid(),
       title: title || "New issue",
-      description,
+      description: [description, georeference].filter(Boolean).join("\n\n"),
       status: "Open",
       priority: PRIORITY.includes(options.priority ?? "") ? options.priority! : "Normal",
       author: this.author,
       date: new Date().toISOString(),
       comments: [],
+      modifiedAt: new Date().toISOString(),
+      topicType: "Issue",
       viewpoint: {
         camera: viewer.getCamera(),
         sections: viewer.getSections(),
         sectionBox: viewer.getSectionBox(),
         selections: selectedIds.map((id) => ({ id, guid: null })),
         hidden,
+        annotations: viewer.getAnnotationStates(),
       },
       snapshot: null,
+      ...(active ? {
+        remote: {
+          serverUrl: active.serverUrl,
+          projectId: active.projectId,
+          state: "pending-create" as const,
+          viewDirty: true,
+          pendingComments: [],
+        },
+      } : {}),
     };
     void snapshot(viewer).then((shot) => {
       topic.snapshot = shot;
+      if (shot && topic.remote?.state === "synced" && !topic.remote.viewDirty) this.stageEdit(topic, true);
       this.save();
       this.render();
     });
@@ -450,7 +512,11 @@ export class BcfPanel {
         const guid = props?.attributes.find((item) => item.name === "GlobalId")?.value;
         const selection = topic.viewpoint?.selections?.find((item) => item.id === id);
         if (guid && selection) selection.guid = String(guid);
-      })).then(() => this.save());
+      })).then(() => {
+        if (topic.remote?.state === "synced" && !topic.remote.viewDirty) this.stageEdit(topic, true);
+        this.save();
+        this.renderWorkspace();
+      });
     }
     this.topics.unshift(topic);
     this.expanded = topic.guid;
@@ -564,33 +630,481 @@ export class BcfPanel {
     else if (view.sections.length) viewer.setSections(view.sections);
     else viewer.clearSection();
     viewer.setCamera(view.camera);
+    if (view.annotations?.length) viewer.setAnnotationStates(view.annotations);
     const selected = view.selections?.map((item) => item.id) ?? (
       view.selection === null || view.selection === undefined ? [] : [view.selection]
     );
     if (selected.length) viewer.selectMany(selected, "replace");
   }
 
+  // -- connected workspace -------------------------------------------------
+  private activeProject(): { serverUrl: string; projectId: string } | null {
+    const session = this.client.getSession();
+    return session && this.project ? { serverUrl: session.serverUrl, projectId: this.project.project_id } : null;
+  }
+
+  private isActiveRemote(topic: Topic): boolean {
+    const active = this.activeProject();
+    return Boolean(active && topic.remote?.serverUrl === active.serverUrl && topic.remote.projectId === active.projectId);
+  }
+
+  private setStatus(message: string, error = false): void {
+    this.status.textContent = message;
+    this.status.classList.toggle("error", error);
+  }
+
+  private renderWorkspace(): void {
+    const active = this.activeProject();
+    if (!active || !this.project) {
+      const connect = h("button", {
+        class: "btn sm",
+        type: "button",
+        text: "Connect project",
+        "data-action": "open-cde-connect",
+      });
+      connect.addEventListener("click", () => this.openConnectionDialog());
+      this.workspace.dataset.state = "local";
+      this.workspace.replaceChildren(
+        h("span", { class: "cde-signal", "aria-hidden": "true" }),
+        h("div", { class: "cde-identity grow" }, [
+          h("strong", { text: "Local review" }),
+          h("span", { text: "BCF issues stay in this browser" }),
+        ]),
+        connect,
+      );
+      return;
+    }
+
+    const count = pendingCount(this.topics, active.serverUrl, active.projectId);
+    const sync = h("button", {
+      class: "btn sm cde-sync",
+      type: "button",
+      disabled: this.syncing,
+      "data-action": "open-cde-sync",
+      title: count ? `Send ${count} queued change${count === 1 ? "" : "s"} and pull the project` : "Pull the latest project issues",
+    }, [icon("refresh", 13), h("span", { text: this.syncing ? "Syncing" : "Sync" })]);
+    sync.addEventListener("click", () => void this.sync());
+    const disconnect = iconButton("x", "Disconnect project", () => this.disconnect(), "icon-btn sm");
+    const host = new URL(active.serverUrl).host;
+    const detail = count
+      ? `${count} queued · ${host}`
+      : this.lastSync
+        ? `Up to date · ${this.lastSync.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+        : host;
+    this.workspace.dataset.state = count ? "pending" : "connected";
+    this.workspace.replaceChildren(
+      h("span", { class: "cde-signal", "aria-hidden": "true" }),
+      h("div", { class: "cde-identity grow" }, [
+        h("strong", { text: this.project.name }),
+        h("span", { text: detail, title: active.serverUrl }),
+      ]),
+      count ? h("span", { class: "cde-queue", text: String(count), title: "Queued changes" }) : h("span"),
+      sync,
+      disconnect,
+    );
+  }
+
+  private disconnect(): void {
+    this.client.disconnect();
+    this.project = null;
+    this.extensions = null;
+    this.syncing = false;
+    this.lastSync = null;
+    this.setStatus("Disconnected. Cached issues remain available.");
+    this.render();
+  }
+
+  private openConnectionDialog(): void {
+    const dialog = h("dialog", { class: "form-dialog cde-dialog", "aria-label": "Connect an OpenCDE project" });
+    const server = h("input", {
+      type: "url",
+      value: localStorage.getItem(LAST_SERVER_KEY) ?? "",
+      placeholder: "https://cde.example.com",
+      autocomplete: "url",
+      "aria-label": "OpenCDE server URL",
+    });
+    const auth = h("select", { "aria-label": "Authentication method" });
+    auth.append(
+      h("option", { value: "bearer", text: "Bearer token" }),
+      h("option", { value: "basic", text: "Username and password" }),
+      h("option", { value: "none", text: "No credentials" }),
+    );
+    const token = h("input", {
+      type: "password",
+      placeholder: "Paste access token",
+      autocomplete: "off",
+      "aria-label": "Bearer token",
+    });
+    const username = h("input", {
+      type: "text",
+      placeholder: "Username",
+      autocomplete: "username",
+      "aria-label": "Username",
+    });
+    const password = h("input", {
+      type: "password",
+      placeholder: "Password",
+      autocomplete: "current-password",
+      "aria-label": "Password",
+    });
+    const credentials = h("div", { class: "cde-credentials" });
+    const feedback = h("div", { class: "cde-feedback", role: "status" });
+    const body = h("div", { class: "dlg-body cde-connect-body" }, [
+      h("p", { class: "note", text: "Connect to a buildingSMART OpenCDE server and choose a BCF 3.0 project. Credentials are kept in memory for this tab only." }),
+      h("label", { class: "cde-field" }, [h("span", { text: "Server" }), server]),
+      h("label", { class: "cde-field" }, [h("span", { text: "Sign in with" }), auth]),
+      credentials,
+      feedback,
+    ]);
+    const cancel = h("button", { class: "btn", type: "button", text: "Cancel" });
+    const connect = h("button", { class: "btn primary", type: "button", text: "Find projects" });
+    let connectAction: () => void | Promise<void>;
+    const foot = h("div", { class: "dlg-foot" }, [cancel, connect]);
+    dialog.append(h("div", { class: "dlg-head" }, [h("span", { text: "Connect OpenCDE" })]), body, foot);
+
+    const renderCredentials = (): void => {
+      credentials.replaceChildren();
+      if (auth.value === "bearer") credentials.appendChild(h("label", { class: "cde-field" }, [h("span", { text: "Access token" }), token]));
+      if (auth.value === "basic") credentials.append(
+        h("label", { class: "cde-field" }, [h("span", { text: "Username" }), username]),
+        h("label", { class: "cde-field" }, [h("span", { text: "Password" }), password]),
+      );
+    };
+    const readAuth = (): OpenCdeAuth => {
+      if (auth.value === "none") return { kind: "none" };
+      if (auth.value === "basic") return { kind: "basic", username: username.value, password: password.value };
+      return { kind: "bearer", token: token.value };
+    };
+    const showError = (error: unknown): void => {
+      feedback.classList.add("error");
+      feedback.textContent = error instanceof Error ? error.message : String(error);
+    };
+    const chooseProject = (projects: BcfProject[]): void => {
+      const preferred = localStorage.getItem(LAST_PROJECT_KEY);
+      const select = h("select", { "aria-label": "OpenCDE project" });
+      for (const item of projects) select.appendChild(h("option", { value: item.project_id, text: item.name }));
+      if (preferred && projects.some((item) => item.project_id === preferred)) select.value = preferred;
+      body.replaceChildren(
+        h("div", { class: "cde-capability" }, [
+          icon("check-circle", 18),
+          h("div", {}, [h("strong", { text: "BCF 3.0 available" }), h("span", { text: "Choose the project to cache in this review board." })]),
+        ]),
+        h("label", { class: "cde-field" }, [h("span", { text: "Project" }), select]),
+        feedback,
+      );
+      connect.textContent = "Open project";
+      connect.disabled = false;
+      connectAction = async (): Promise<void> => {
+        const selected = projects.find((item) => item.project_id === select.value);
+        if (!selected) return;
+        connect.disabled = true;
+        cancel.disabled = true;
+        feedback.classList.remove("error");
+        feedback.textContent = "Loading project issues…";
+        try {
+          this.project = selected;
+          this.extensions = await this.client.projectExtensions(selected.project_id);
+          const current = await this.client.currentUser().catch(() => null);
+          if (current) this.author = current.name || current.id;
+          await this.pullRemote();
+          const session = this.client.getSession();
+          if (session) localStorage.setItem(LAST_SERVER_KEY, session.serverUrl);
+          localStorage.setItem(LAST_PROJECT_KEY, selected.project_id);
+          dialog.close();
+          toast(`Connected to ${selected.name}`, "success");
+        } catch (error) {
+          this.project = null;
+          this.extensions = null;
+          showError(error);
+          connect.disabled = false;
+          cancel.disabled = false;
+        }
+      };
+    };
+    const discover = async (trustAdvertisedOrigins = false): Promise<void> => {
+      feedback.classList.remove("error");
+      feedback.textContent = "Checking OpenCDE capabilities…";
+      connect.disabled = true;
+      try {
+        await this.client.connect(server.value, readAuth(), { trustAdvertisedOrigins });
+        const projects = await this.client.projects();
+        if (!projects.length) throw new Error("This account has no BCF projects available.");
+        chooseProject(projects);
+      } catch (error) {
+        showError(error);
+        connect.disabled = false;
+        if (error instanceof OpenCdeEndpointTrustError) {
+          connect.textContent = "Trust endpoints and continue";
+          connectAction = () => discover(true);
+        }
+      }
+    };
+    auth.addEventListener("change", renderCredentials);
+    server.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") void discover();
+    });
+    connectAction = () => discover();
+    connect.addEventListener("click", () => void connectAction());
+    cancel.addEventListener("click", () => dialog.close());
+    dialog.addEventListener("close", () => {
+      if (!this.project) this.client.disconnect();
+      dialog.remove();
+    });
+    renderCredentials();
+    lightDismiss(dialog);
+    document.body.appendChild(dialog);
+    dialog.showModal();
+    server.focus();
+  }
+
+  private async pullRemote(): Promise<void> {
+    const active = this.activeProject();
+    if (!active || !this.project) return;
+    this.setStatus(`Pulling issues from ${this.project.name}…`);
+    const remoteTopics = await this.client.topics(active.projectId);
+    const activeTopics = this.topics.filter((topic) => this.isActiveRemote(topic));
+    const cached = new Map(activeTopics.map((topic) => [topic.guid, topic]));
+    const retained = activeTopics.filter((topic) => (
+      topic.remote?.state !== "synced" || Boolean(topic.remote.pendingComments?.length)
+    ));
+    const retainedGuids = new Set(retained.map((topic) => topic.guid));
+    const incoming = remoteTopics.flatMap((remote) => {
+      if (retainedGuids.has(remote.guid)) return [];
+      const previous = cached.get(remote.guid);
+      const topic = fromBcfTopic({
+        topic: remote,
+        comments: previous?.comments ?? [],
+        serverUrl: active.serverUrl,
+        projectId: active.projectId,
+        cached: previous,
+      });
+      if (topic.remote) topic.remote.hydrated = false;
+      return [topic];
+    });
+    const other = this.topics.filter((topic) => !this.isActiveRemote(topic));
+    this.topics = [...retained, ...incoming, ...other];
+    this.lastSync = new Date();
+    this.save();
+    this.setStatus(`Loaded ${remoteTopics.length} project issue${remoteTopics.length === 1 ? "" : "s"}. Open one to load its comments and viewpoint.`);
+    this.render();
+  }
+
+  private async hydrate(topic: Topic): Promise<void> {
+    const active = this.activeProject();
+    if (!active || !topic.remote || !this.isActiveRemote(topic) || topic.remote.hydrated) return;
+    const remoteLink = topic.remote;
+    this.setStatus(`Loading “${topic.title}”…`);
+    try {
+      const [comments, viewpoints] = await Promise.all([
+        this.client.comments(active.projectId, topic.guid),
+        this.client.viewpoints(active.projectId, topic.guid),
+      ]);
+      const pending = new Set(remoteLink.pendingComments ?? []);
+      const queued = topic.comments.filter((comment) => pending.has(comment.guid));
+      topic.comments = [
+        ...comments.map((comment) => ({
+          guid: comment.guid,
+          date: comment.date || new Date().toISOString(),
+          author: comment.author || "unknown",
+          text: comment.comment ?? "",
+        })),
+        ...queued.filter((comment) => !comments.some((remote) => remote.guid === comment.guid)),
+      ];
+      const viewpoint = viewpoints[0];
+      if (viewpoint) {
+        topic.viewpoint = fromBcfViewpoint(viewpoint) ?? topic.viewpoint;
+        const inline = viewpoint.snapshot?.snapshot_data;
+        if (inline) {
+          const mime = viewpoint.snapshot?.snapshot_type === "png" ? "image/png" : "image/jpeg";
+          topic.snapshot = `data:${mime};base64,${inline}`;
+        } else {
+          const blob = await this.client.viewpointSnapshot(active.projectId, topic.guid, viewpoint.guid).catch(() => null);
+          if (blob) topic.snapshot = await dataUrl(new Uint8Array(await blob.arrayBuffer()), blob.type || "image/png");
+        }
+      }
+      remoteLink.hydrated = true;
+      this.save();
+      this.setStatus(`Loaded comments and viewpoint for “${topic.title}”.`);
+      this.render();
+      if (this.expanded === topic.guid) this.restore(topic);
+    } catch (error) {
+      this.setStatus(error instanceof Error ? error.message : String(error), true);
+      this.renderWorkspace();
+    }
+  }
+
+  private stageEdit(topic: Topic, viewDirty = false): void {
+    topic.modifiedAt = new Date().toISOString();
+    if (!topic.remote) return;
+    if (topic.remote.state !== "pending-create") topic.remote.state = "pending-update";
+    if (viewDirty) topic.remote.viewDirty = true;
+    topic.remote.retryState = undefined;
+    topic.remote.error = undefined;
+  }
+
+  private queueComment(topic: Topic, comment: ReviewComment): void {
+    if (!topic.remote) return;
+    topic.remote.pendingComments = [...new Set([...(topic.remote.pendingComments ?? []), comment.guid])];
+    comment.pending = true;
+    topic.remote.error = undefined;
+  }
+
+  private publish(topic: Topic): void {
+    const active = this.activeProject();
+    if (!active || topic.remote) return;
+    topic.remote = {
+      serverUrl: active.serverUrl,
+      projectId: active.projectId,
+      state: "pending-create",
+      pendingComments: topic.comments.map((comment) => comment.guid),
+      viewDirty: true,
+    };
+    for (const comment of topic.comments) comment.pending = true;
+    this.save();
+    this.setStatus(`“${topic.title}” is queued. Press Sync to publish it.`);
+    this.render();
+  }
+
+  private async pushTopic(topic: Topic): Promise<void> {
+    const active = this.activeProject();
+    const remote = topic.remote;
+    if (!active || !remote || !this.isActiveRemote(topic)) return;
+    const creating = remote.state === "pending-create" || remote.retryState === "pending-create";
+    const updating = remote.state === "pending-update" || remote.retryState === "pending-update";
+    if (creating) {
+      const created = await this.client.createTopic(active.projectId, toBcfTopic(topic, this.extensions ?? undefined));
+      remote.serverAssignedId = created.server_assigned_id;
+      remote.modifiedAt = created.modified_date;
+      remote.state = "synced";
+      remote.retryState = undefined;
+      remote.pendingComments = [...new Set(topic.comments.map((comment) => comment.guid))];
+      for (const comment of topic.comments) comment.pending = true;
+    } else if (updating) {
+      const updated = await this.client.updateTopic(active.projectId, topic.guid, toBcfTopic(topic, this.extensions ?? undefined));
+      remote.serverAssignedId = updated.server_assigned_id ?? remote.serverAssignedId;
+      remote.modifiedAt = updated.modified_date;
+      remote.state = "synced";
+      remote.retryState = undefined;
+    }
+
+    if ((creating || remote.viewDirty) && topic.viewpoint) {
+      const viewpoint = toBcfViewpoint(topic);
+      if (viewpoint) await this.client.createViewpoint(active.projectId, topic.guid, viewpoint);
+      remote.viewDirty = false;
+    }
+
+    for (const guid of [...(remote.pendingComments ?? [])]) {
+      const comment = topic.comments.find((item) => item.guid === guid);
+      if (!comment) continue;
+      await this.client.createComment(active.projectId, topic.guid, { guid: comment.guid, comment: comment.text });
+      comment.pending = false;
+      remote.pendingComments = remote.pendingComments?.filter((item) => item !== guid);
+    }
+    remote.state = "synced";
+    remote.error = undefined;
+    remote.retryState = undefined;
+  }
+
+  /**
+   * One topic at a time, for the row that failed. Sync retries the whole
+   * queue, which is the wrong size of action when a single title was rejected.
+   */
+  private async retryTopic(topic: Topic): Promise<void> {
+    if (this.syncing || !this.activeProject()) return;
+    this.syncing = true;
+    this.renderWorkspace();
+    this.setStatus(`Sending “${topic.title}”…`);
+    try {
+      await this.pushTopic(topic);
+      this.setStatus(`Sent “${topic.title}”.`);
+    } catch (error) {
+      const remote = topic.remote;
+      if (remote) {
+        if (remote.state === "pending-create" || remote.state === "pending-update") remote.retryState = remote.state;
+        remote.state = "error";
+        remote.error = error instanceof Error ? error.message : String(error);
+      }
+      this.setStatus(error instanceof Error ? error.message : String(error), true);
+    } finally {
+      this.syncing = false;
+      this.save();
+      this.render();
+    }
+  }
+
+  private async sync(): Promise<void> {
+    const active = this.activeProject();
+    if (!active || this.syncing) return;
+    this.syncing = true;
+    this.renderWorkspace();
+    this.setStatus("Sending queued changes…");
+    let failures = 0;
+    const queued = this.topics.filter((topic) => this.isActiveRemote(topic) && (
+      topic.remote?.state !== "synced" || Boolean(topic.remote.pendingComments?.length) || topic.remote.viewDirty
+    ));
+    for (const topic of queued) {
+      try {
+        await this.pushTopic(topic);
+      } catch (error) {
+        failures++;
+        const remote = topic.remote!;
+        remote.retryState = remote.state === "pending-create" || remote.state === "pending-update" ? remote.state : undefined;
+        remote.state = "error";
+        remote.error = error instanceof Error ? error.message : String(error);
+      }
+      this.save();
+      this.renderWorkspace();
+    }
+    try {
+      await this.pullRemote();
+    } catch (error) {
+      failures++;
+      this.setStatus(error instanceof Error ? error.message : String(error), true);
+    } finally {
+      this.syncing = false;
+      this.render();
+    }
+    if (failures) {
+      this.setStatus(`${failures} sync operation${failures === 1 ? "" : "s"} failed. Queued changes are kept for retry.`, true);
+      toast("Some OpenCDE changes could not be synced", "error");
+    } else {
+      this.actions.log(`Synced ${this.project?.name ?? "OpenCDE project"}`, "success");
+    }
+  }
+
   private render(): void {
+    this.renderWorkspace();
     this.empty.classList.toggle("hidden", this.topics.length > 0);
     this.list.replaceChildren(...this.topics.map((topic) => this.card(topic)));
   }
 
-  private comment(entry: { author: string; date: string; text: string }): HTMLElement {
+  private comment(entry: ReviewComment): HTMLElement {
     return h("div", { class: "topic-comment" }, [
-      h("span", { class: "who", text: `${entry.author} · ${entry.date.slice(0, 10)}` }),
+      h("span", { class: "who", text: `${entry.author} | ${entry.date.slice(0, 10)}${entry.pending ? " | queued" : ""}` }),
       h("span", { text: entry.text }),
     ]);
   }
 
   private card(topic: Topic): HTMLElement {
     const open = this.expanded === topic.guid;
+    const remoteState = topic.remote?.state;
+    const remoteLabel = remoteState === "pending-create"
+      ? "Publish queued"
+      : remoteState === "pending-update"
+        ? "Update queued"
+        : remoteState === "error"
+          ? "Sync failed"
+          : topic.remote
+            ? topic.remote.serverAssignedId || "OpenCDE"
+            : "Local";
     const head = h("button", {
       class: "topic-head",
       type: "button",
       "aria-expanded": String(open),
     }, [
-      h("span", { class: `dot ${topic.status === "Closed" || topic.status === "Resolved" ? "ok" : "err"}` }),
+      h("span", { class: `dot ${remoteState === "error" ? "err" : topic.status === "Closed" || topic.status === "Resolved" ? "ok" : ""}` }),
       h("span", { class: "grow", text: topic.title, title: topic.title }),
+      h("span", { class: `topic-origin${topic.remote ? " remote" : ""}`, text: remoteLabel }),
       h("span", { class: "n", text: topic.status }),
       icon("chevron", 12),
     ]);
@@ -598,7 +1112,10 @@ export class BcfPanel {
       this.expanded = open ? null : topic.guid;
       // Only opening a topic restores its view. Closing one used to replay the
       // viewpoint as well, throwing away the camera the user had just set.
-      if (!open) this.restore(topic);
+      if (!open) {
+        this.restore(topic);
+        void this.hydrate(topic);
+      }
       this.render();
     });
 
@@ -614,6 +1131,7 @@ export class BcfPanel {
     const title = h("input", { type: "text", value: topic.title, placeholder: "Title" });
     title.addEventListener("change", () => {
       topic.title = title.value.trim() || "Untitled";
+      this.stageEdit(topic);
       this.save();
       this.render();
     });
@@ -621,23 +1139,32 @@ export class BcfPanel {
     description.value = topic.description;
     description.addEventListener("change", () => {
       topic.description = description.value;
+      this.stageEdit(topic);
       this.save();
+      this.renderWorkspace();
     });
 
+    const choices = (defaults: string[], server: string[] | undefined, current: string): string[] =>
+      [...new Set([...(server?.length ? server : defaults), current].filter(Boolean))];
     const status = h("select");
-    status.append(...STATUS.map((name) => h("option", { value: name, text: name })));
+    status.append(...choices(STATUS, this.isActiveRemote(topic) ? this.extensions?.topic_status : undefined, topic.status)
+      .map((name) => h("option", { value: name, text: name })));
     status.value = topic.status;
     status.addEventListener("change", () => {
       topic.status = status.value;
+      this.stageEdit(topic);
       this.save();
       this.render();
     });
     const priority = h("select");
-    priority.append(...PRIORITY.map((name) => h("option", { value: name, text: name })));
+    priority.append(...choices(PRIORITY, this.isActiveRemote(topic) ? this.extensions?.priority : undefined, topic.priority)
+      .map((name) => h("option", { value: name, text: name })));
     priority.value = topic.priority;
     priority.addEventListener("change", () => {
       topic.priority = priority.value;
+      this.stageEdit(topic);
       this.save();
+      this.renderWorkspace();
     });
 
     const recapture = h("button", { class: "btn sm", type: "button", text: "Update view" });
@@ -650,17 +1177,22 @@ export class BcfPanel {
         selections: viewer.getSelectedIds().map((id) => ({ id, guid: null })),
         hidden: [],
       };
+      this.stageEdit(topic, true);
       void snapshot(viewer).then((shot) => {
         topic.snapshot = shot;
         this.save();
         this.render();
       });
+      this.save();
+      this.renderWorkspace();
     });
-    const remove = iconButton("trash", "Delete issue", () => {
+    const remove = iconButton("trash", topic.remote ? "Remove cached issue" : "Delete issue", () => {
       confirmAction(
-        "Delete this issue?",
-        `"${topic.title}" and its comments are removed from this browser. There is no undo.`,
-        "Delete",
+        topic.remote ? "Remove this cached issue?" : "Delete this issue?",
+        topic.remote
+          ? `"${topic.title}" is removed from this browser. The server issue is not deleted.`
+          : `"${topic.title}" and its comments are removed from this browser. There is no undo.`,
+        topic.remote ? "Remove cache" : "Delete",
         () => {
           this.topics = this.topics.filter((item) => item.guid !== topic.guid);
           this.save();
@@ -669,24 +1201,63 @@ export class BcfPanel {
       );
     }, "icon-btn sm");
 
+    const publish = !topic.remote && this.activeProject()
+      ? h("button", { class: "btn sm", type: "button", text: "Publish" })
+      : null;
+    publish?.addEventListener("click", () => this.publish(topic));
+
+    const retry = h("button", { class: "btn sm", type: "button", text: "Retry", disabled: this.syncing });
+    retry.addEventListener("click", () => void this.retryTopic(topic));
+
+    let assignee: HTMLSelectElement | null = null;
+    const users = this.isActiveRemote(topic)
+      ? this.extensions?.user_id_type ?? this.extensions?.users ?? []
+      : [];
+    if (users.length) {
+      assignee = h("select", { "aria-label": "Assignee", title: "Assignee" });
+      assignee.appendChild(h("option", { value: "", text: "Unassigned" }));
+      for (const user of choices([], users, topic.assignedTo ?? "")) {
+        assignee.appendChild(h("option", { value: user, text: user }));
+      }
+      assignee.value = topic.assignedTo ?? "";
+      assignee.addEventListener("change", () => {
+        topic.assignedTo = assignee?.value || undefined;
+        this.stageEdit(topic);
+        this.save();
+        this.renderWorkspace();
+      });
+    }
+
     const comments = h("div", { class: "topic-comments" });
     for (const comment of topic.comments) comments.appendChild(this.comment(comment));
     const draft = h("input", { type: "text", placeholder: "Add a comment", "aria-label": "Add a comment" });
     draft.addEventListener("keydown", (e) => {
       if (e.key !== "Enter" || !draft.value.trim()) return;
-      topic.comments.push({ guid: uuid(), date: new Date().toISOString(), author: this.author, text: draft.value.trim() });
+      const comment: ReviewComment = { guid: uuid(), date: new Date().toISOString(), author: this.author, text: draft.value.trim() };
+      topic.comments.push(comment);
+      this.queueComment(topic, comment);
       this.save();
+      this.renderWorkspace();
       // Append in place and keep the caret here: a full re-render would drop
       // the field the user is typing in, so a second comment needs a new click.
       comments.appendChild(this.comment(topic.comments[topic.comments.length - 1]));
       draft.value = "";
     });
 
+    const controls: Node[] = [status, priority];
+    if (assignee) controls.push(assignee);
+    controls.push(h("span", { class: "grow" }));
+    if (publish) controls.push(publish);
+    controls.push(recapture, remove);
     body.append(
       title,
       description,
-      h("div", { class: "row" }, [status, priority, h("span", { class: "grow" }), recapture, remove]),
-      h("div", { class: "note", text: `${topic.author} · ${topic.date.slice(0, 16).replace("T", " ")}` }),
+      h("div", { class: "row topic-controls" }, controls),
+      h("div", { class: "note", text: `${topic.author} | ${topic.date.slice(0, 16).replace("T", " ")}${topic.assignedTo ? ` | assigned to ${topic.assignedTo}` : ""}` }),
+      ...(topic.remote?.error ? [h("div", { class: "topic-sync-error" }, [
+        h("span", { class: "grow", text: topic.remote.error }),
+        retry,
+      ])] : []),
       comments,
       draft,
     );

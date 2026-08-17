@@ -4,6 +4,8 @@ import type { GeometryIndex } from "./geometryIndex.js";
 import type {
   SectionAxis, SectionContourResult, SectionContourSpec, SectionPolyline,
 } from "./types.js";
+import { scenePlacementMatrix, unpackModelTransforms } from "./modelTransform.js";
+import type { ModelTransform } from "../viewer-core/engine/types.js";
 
 export interface SectionRunOptions {
   cancelled?: () => boolean;
@@ -15,23 +17,6 @@ type Point3 = [number, number, number];
 type Segment = [Point2, Point2];
 
 const axisIndex = (axis: SectionAxis): number => axis === "x" ? 0 : axis === "y" ? 1 : 2;
-
-function offsetsOf(values: Float64Array): Map<number, Point3> {
-  const offsets = new Map<number, Point3>();
-  for (let index = 0; index + 3 < values.length; index += 4) {
-    offsets.set(values[index], [values[index + 1], values[index + 2], values[index + 3]]);
-  }
-  return offsets;
-}
-
-function sceneMatrix(matrix: Float64Array, modelOrigin: Point3, offset: Point3, target: Matrix4): Matrix4 {
-  target.fromArray(matrix);
-  const values = target.elements;
-  values[12] = matrix[12] - modelOrigin[0] + offset[0];
-  values[13] = matrix[13] - modelOrigin[1] + offset[1];
-  values[14] = matrix[14] - modelOrigin[2] + offset[2];
-  return target;
-}
 
 function project(point: Point3, axis: SectionAxis): Point2 {
   if (axis === "x") return [point[2], point[1]];
@@ -211,7 +196,7 @@ export async function runSectionContours(
   const started = Date.now();
   const tolerance = Math.max(1e-7, spec.tolerance ?? 1e-5);
   const maxSegments = Math.max(1, Math.floor(spec.maxSegments ?? 100_000));
-  const offsets = offsetsOf(spec.offsets);
+  const transforms = unpackModelTransforms(spec.transforms, spec.offsets);
   const axis = axisIndex(spec.axis);
   const polylines: SectionPolyline[] = [];
   let segmentCount = 0;
@@ -227,8 +212,10 @@ export async function runSectionContours(
     if (options.cancelled?.()) throw new DOMException("Geometry query cancelled", "AbortError");
     if (elementIndex > 0 && elementIndex % 64 === 0) await options.yieldTurn?.();
     const id = spec.ids[elementIndex];
-    const modelOffset = offsets.get(modelOf(id)) ?? [0, 0, 0];
-    const bounds = index.worldBounds(id, spec.modelOrigin, modelOffset);
+    const modelTransform: ModelTransform = transforms.get(modelOf(id)) ?? {
+      translation: [0, 0, 0], rotationZ: 0, scale: 1, source: "none",
+    };
+    const bounds = index.worldBounds(id, spec.modelOrigin, modelTransform);
     if (!bounds) {
       missing += 1;
       continue;
@@ -240,7 +227,7 @@ export async function runSectionContours(
       if (options.cancelled?.()) throw new DOMException("Geometry query cancelled", "AbortError");
     }
     for (const placement of index.bvhPlacements(id)) {
-      const matrix = sceneMatrix(placement.matrix, spec.modelOrigin, modelOffset, worldMatrix);
+      const matrix = scenePlacementMatrix(placement.matrix, spec.modelOrigin, modelTransform, worldMatrix);
       inverseMatrix.copy(matrix).invert();
       localPlane.copy(worldPlane).applyMatrix4(inverseMatrix);
       const normal = localPlane.normal;

@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
-import type { SceneController, CameraPose, SnapKind } from './scene.js';
+import type { SceneController, CameraPose, SnapKind, ProjectionMode } from './scene.js';
 
 export interface PickResult {
   expressID: number;
@@ -47,12 +47,15 @@ export interface ControlHandlers {
   onCameraChange?: () => void;
 }
 
-export type ViewPreset = 'top' | 'front' | 'right' | 'iso';
+export type ViewPreset = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso';
 
 const VIEW_DIRECTIONS: Record<ViewPreset, [number, number, number]> = {
   top: [0.001, 1, 0.001],
+  bottom: [0.001, -1, 0.001],
   front: [0, 0.001, 1],
+  back: [0, 0.001, -1],
   right: [1, 0.001, 0],
+  left: [-1, 0.001, 0],
   iso: [1, 0.8, 1],
 };
 
@@ -79,6 +82,13 @@ function framePose(
 
 /** Clicks that travelled further than this since pointerdown are drags. */
 const CLICK_MOVE_TOLERANCE_PX = 5;
+/** Wheel zoom limits while flying: telephoto to a wide first-person view. */
+const FLY_FOV_MIN = 20;
+const FLY_FOV_MAX = 90;
+
+const _worldUp = new THREE.Vector3(0, 1, 0);
+const _flyForward = new THREE.Vector3();
+const _flyRight = new THREE.Vector3();
 
 export class ViewerControls {
   private readonly orbit: OrbitControls;
@@ -146,6 +156,7 @@ export class ViewerControls {
     this.grabHandler = (e) => {
       // Widgets floating over the canvas (dock, gizmo) own their own clicks.
       this.toolClaimed = false;
+      if (this.fly) return;
       if (e.button !== 0 || e.target !== dom) return;
       // Layout may have moved since the last hover; a gesture starts fresh.
       this.invalidateRect();
@@ -179,6 +190,7 @@ export class ViewerControls {
     container.addEventListener('pointerdown', this.grabHandler, true);
 
     this.hoverHandler = (e) => {
+      if (this.fly) return;
       if (!this.handlers.onHover || e.buttons !== 0) return;
       const [x, y] = this.toNdc(e.clientX, e.clientY);
       this.handlers.onHover(x, y, e.clientX, e.clientY);
@@ -199,6 +211,204 @@ export class ViewerControls {
       this.resizeObserver = new ResizeObserver(() => this.onResize());
       this.resizeObserver.observe(container);
     }
+  }
+
+  // -- fly mode ---------------------------------------------------------------
+  /** Live state while first-person flight is on; null otherwise. */
+  private fly: {
+    keys: Set<string>;
+    speed: number;
+    last: number;
+    raf: number;
+    dirty: boolean;
+    targetDistance: number;
+    euler: THREE.Euler;
+    /** Field of view on entry, so leaving flight restores the framing. */
+    fov: number;
+    /** Whether the plan inset was already showing before flight opened it. */
+    plan: boolean;
+    onKeyDown: (e: KeyboardEvent) => void;
+    onKeyUp: (e: KeyboardEvent) => void;
+    onMouse: (e: MouseEvent) => void;
+    onWheel: (e: WheelEvent) => void;
+    onLockChange: () => void;
+  } | null = null;
+  private flyListeners = new Set<(on: boolean) => void>();
+
+  /** Metres per second the flight is moving at, or null when not flying. */
+  getFlySpeed(): number | null {
+    return this.fly ? this.fly.speed * (this.fly.keys.has('shift') ? 4 : 1) : null;
+  }
+
+  onFlyChange(listener: (on: boolean) => void): () => void {
+    this.flyListeners.add(listener);
+    return () => this.flyListeners.delete(listener);
+  }
+
+  isFlying(): boolean {
+    return this.fly !== null;
+  }
+
+  /** Keys the flight loop owns while it is on. */
+  private static readonly FLY_KEYS = new Set([
+    'w', 'a', 's', 'd', 'q', 'e', ' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright',
+  ]);
+
+  startFly(): void {
+    if (this.fly) return;
+    // Flight is a perspective experience; parallel projection cannot dolly.
+    if (this.getProjection() === 'orthographic') this.setProjection('perspective');
+    const cam = this.scene.camera;
+    const dom = this.scene.renderer.domElement;
+    const bounds = this.scene.getBounds();
+    const span = Number.isFinite(bounds.min.x)
+      ? Math.hypot(bounds.max.x - bounds.min.x, bounds.max.y - bounds.min.y, bounds.max.z - bounds.min.z)
+      : 40;
+    const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+    euler.setFromQuaternion(cam.quaternion);
+    euler.z = 0;
+
+    const fly: NonNullable<ViewerControls['fly']> = {
+      keys: new Set<string>(),
+      speed: Math.min(60, Math.max(1, span / 8)),
+      last: performance.now(),
+      raf: 0,
+      dirty: false,
+      targetDistance: Math.max(cam.position.distanceTo(this.orbit.target), 1),
+      euler,
+      fov: this.scene.getFieldOfView(),
+      plan: this.scene.isPlanView(),
+      onKeyDown: (e) => {
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        // Typing in a field (palette, note dialog) must never steer the
+        // flight or lose its keystrokes to preventDefault.
+        const target = e.target as HTMLElement | null;
+        if (
+          target &&
+          (target instanceof HTMLInputElement ||
+            target instanceof HTMLTextAreaElement ||
+            target.isContentEditable)
+        ) {
+          return;
+        }
+        const key = e.key.toLowerCase();
+        if (key === 'shift') fly.keys.add('shift');
+        if (!ViewerControls.FLY_KEYS.has(key)) return;
+        fly.keys.add(key);
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      },
+      onKeyUp: (e) => {
+        const key = e.key.toLowerCase();
+        fly.keys.delete(key === 'shift' ? 'shift' : key);
+      },
+      onMouse: (e) => {
+        if (this.doc.pointerLockElement !== dom) return;
+        fly.euler.y -= e.movementX * 0.0024;
+        fly.euler.x -= e.movementY * 0.0024;
+        const limit = Math.PI / 2 - 0.02;
+        fly.euler.x = Math.min(limit, Math.max(-limit, fly.euler.x));
+        this.scene.camera.quaternion.setFromEuler(fly.euler);
+        fly.dirty = true;
+      },
+      onWheel: (e) => {
+        e.preventDefault();
+        // The wheel zooms the view, which is what a wheel does everywhere
+        // else in the app; Shift keeps the flight-speed control it replaced.
+        if (e.shiftKey) {
+          fly.speed = Math.min(500, Math.max(0.2, fly.speed * Math.pow(1.15, -e.deltaY / 100)));
+          return;
+        }
+        const zoom = this.scene.getFieldOfView() * Math.pow(1.1, e.deltaY / 100);
+        this.scene.setFieldOfView(Math.min(FLY_FOV_MAX, Math.max(FLY_FOV_MIN, zoom)));
+        fly.dirty = true;
+      },
+      onLockChange: () => {
+        if (this.doc.pointerLockElement !== dom) this.stopFly();
+      },
+    };
+    this.fly = fly;
+    this.orbit.enabled = false;
+    this.interacting = true;
+    // The plan doubles as the locator while flying, so it comes up with the
+    // flight and goes away again unless it was already open. Rendering is on
+    // change, so the inset needs a frame asked for or it waits for the first
+    // keypress to appear.
+    if (!fly.plan) {
+      this.scene.setPlanView(true);
+      this.requestRender();
+    }
+    this.doc.addEventListener('keydown', fly.onKeyDown, true);
+    this.doc.addEventListener('keyup', fly.onKeyUp, true);
+    this.doc.addEventListener('mousemove', fly.onMouse);
+    dom.addEventListener('wheel', fly.onWheel, { passive: false });
+    this.doc.addEventListener('pointerlockchange', fly.onLockChange);
+    // Without lock the keys still fly; only mouse look needs the capture.
+    // The request can reject (hidden documents, iframes without permission);
+    // flight carries on without mouse look, so the rejection is not an error.
+    try {
+      void (dom.requestPointerLock?.() as unknown as Promise<void> | undefined)?.catch?.(() => undefined);
+    } catch {
+      // Older engines throw synchronously instead of rejecting.
+    }
+
+    const step = (now: number): void => {
+      const f = this.fly;
+      if (!f) return;
+      const dt = Math.min((now - f.last) / 1000, 0.1);
+      f.last = now;
+      const cam2 = this.scene.camera;
+      const boost = f.keys.has('shift') ? 4 : 1;
+      const move = f.speed * boost * dt;
+      let changed = f.dirty;
+      f.dirty = false;
+      if (move > 0 && f.keys.size > 0) {
+        const forward = cam2.getWorldDirection(_flyForward);
+        const right = _flyRight.crossVectors(forward, _worldUp).normalize();
+        const has = (k: string, alias: string): boolean => f.keys.has(k) || f.keys.has(alias);
+        if (has('w', 'arrowup')) { cam2.position.addScaledVector(forward, move); changed = true; }
+        if (has('s', 'arrowdown')) { cam2.position.addScaledVector(forward, -move); changed = true; }
+        if (has('d', 'arrowright')) { cam2.position.addScaledVector(right, move); changed = true; }
+        if (has('a', 'arrowleft')) { cam2.position.addScaledVector(right, -move); changed = true; }
+        if (f.keys.has('e') || f.keys.has(' ')) { cam2.position.y += move; changed = true; }
+        if (f.keys.has('q')) { cam2.position.y -= move; changed = true; }
+      }
+      if (changed) {
+        this.handlers.onCameraChange?.();
+        this.requestRender();
+        this.adaptResolution();
+      }
+      f.raf = requestAnimationFrame(step);
+    };
+    fly.raf = requestAnimationFrame(step);
+    for (const listener of this.flyListeners) listener(true);
+  }
+
+  stopFly(): void {
+    const fly = this.fly;
+    if (!fly) return;
+    this.fly = null;
+    cancelAnimationFrame(fly.raf);
+    const dom = this.scene.renderer.domElement;
+    this.doc.removeEventListener('keydown', fly.onKeyDown, true);
+    this.doc.removeEventListener('keyup', fly.onKeyUp, true);
+    this.doc.removeEventListener('mousemove', fly.onMouse);
+    dom.removeEventListener('wheel', fly.onWheel);
+    this.doc.removeEventListener('pointerlockchange', fly.onLockChange);
+    if (this.doc.pointerLockElement === dom) this.doc.exitPointerLock?.();
+    // Orbit resumes around a target ahead of where the flight ended, at the
+    // framing it had before, and without the locator if flight opened it.
+    const cam = this.scene.camera;
+    this.scene.setFieldOfView(fly.fov);
+    if (!fly.plan) this.scene.setPlanView(false);
+    const forward = cam.getWorldDirection(_flyForward);
+    this.orbit.target.copy(cam.position).addScaledVector(forward, fly.targetDistance);
+    this.orbit.enabled = true;
+    this.interacting = false;
+    if (this.scene.getResolutionScale() !== 1) this.scene.setResolutionScale(1);
+    this.orbit.update();
+    this.requestRender();
+    for (const listener of this.flyListeners) listener(false);
   }
 
   /** Take a press away from OrbitControls and follow it to its release. */
@@ -248,7 +458,56 @@ export class ViewerControls {
   setPose(pose: CameraPose): void {
     this.scene.camera.position.set(...pose.position);
     this.orbit.target.set(...pose.target);
+    // Poses are computed with perspective framing math; in ortho the frustum
+    // height stands in for the dolly distance, so it follows the same pose.
+    this.scene.matchOrthoToDistance(
+      Math.hypot(
+        pose.position[0] - pose.target[0],
+        pose.position[1] - pose.target[1],
+        pose.position[2] - pose.target[2],
+      ),
+    );
     this.scene.camera.updateProjectionMatrix();
+    this.orbit.update();
+    this.requestRender();
+  }
+
+  /** Switch between perspective and orthographic without a visual jump. */
+  setProjection(mode: ProjectionMode): void {
+    const t = this.orbit.target;
+    this.scene.setProjectionMode(mode, [t.x, t.y, t.z]);
+    this.orbit.object = this.scene.camera;
+    this.orbit.update();
+    this.requestRender();
+  }
+
+  getProjection(): ProjectionMode {
+    return this.scene.getProjectionMode();
+  }
+
+  /** Orbit the camera about the world up axis by the given angle. */
+  rotateView(degrees: number): void {
+    const target = this.orbit.target;
+    const offset = this.scene.camera.position.clone().sub(target);
+    offset.applyAxisAngle(_worldUp, (degrees * Math.PI) / 180);
+    this.scene.camera.position.copy(target).add(offset);
+    this.orbit.update();
+    this.requestRender();
+  }
+
+  /**
+   * Look at the current target from along `direction`, keeping the distance.
+   * The perpendicular-view command feeds a picked face normal through here.
+   */
+  lookAlong(direction: [number, number, number]): void {
+    const dir = new THREE.Vector3(...direction);
+    if (dir.lengthSq() < 1e-12) return;
+    dir.normalize();
+    // Straight up or down sits on the orbit pole; nudge off it.
+    if (Math.abs(dir.x) < 1e-4 && Math.abs(dir.z) < 1e-4) dir.x = 1e-3;
+    const target = this.orbit.target;
+    const distance = Math.max(this.scene.camera.position.distanceTo(target), 0.5);
+    this.scene.camera.position.copy(target).addScaledVector(dir.normalize(), distance);
     this.orbit.update();
     this.requestRender();
   }
@@ -274,7 +533,8 @@ export class ViewerControls {
     const radius =
       new THREE.Vector3(b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z).length() * 0.5;
     const dir = new THREE.Vector3(...VIEW_DIRECTIONS[view]);
-    const pose = framePose(center, radius, dir, this.scene.camera.fov, 1.15, this.scene.camera.aspect);
+    const frame = this.scene.getFrameParams();
+    const pose = framePose(center, radius, dir, frame.fov, 1.15, frame.aspect);
     this.applyNearFar(radius);
     this.setPose(pose);
     return pose;
@@ -296,7 +556,8 @@ export class ViewerControls {
       scene.max.z - scene.min.z,
     ).length();
     const safe = Math.max(radius, 0.25);
-    const pose = framePose(centre, safe, dir, this.scene.camera.fov, 1.6, this.scene.camera.aspect);
+    const frame = this.scene.getFrameParams();
+    const pose = framePose(centre, safe, dir, frame.fov, 1.6, frame.aspect);
     this.applyNearFar(safe, Number.isFinite(span) && span > 0 ? span : safe);
     this.setPose(pose);
     return pose;
@@ -315,7 +576,8 @@ export class ViewerControls {
     const radius = box.getSize(new THREE.Vector3()).length() * 0.5;
     const current = this.scene.camera.position.clone().sub(this.orbit.target);
     const dir = current.lengthSq() > 1e-6 ? current : new THREE.Vector3(1, 0.8, 1);
-    const pose = framePose(center, radius, dir, this.scene.camera.fov, 1.3, this.scene.camera.aspect);
+    const frame = this.scene.getFrameParams();
+    const pose = framePose(center, radius, dir, frame.fov, 1.3, frame.aspect);
     // Sized from the model, not from the element: a far plane set by a door
     // radius clips the building the door is standing in.
     const scene = this.scene.getBounds();
@@ -428,6 +690,7 @@ export class ViewerControls {
   }
 
   private onClick(e: MouseEvent): void {
+    if (this.fly) return;
     // A press a tool took also owns the click its release produces.
     if (this.toolClaimed) {
       this.toolClaimed = false;
@@ -436,6 +699,31 @@ export class ViewerControls {
     // Releasing an orbit/pan drag fires a click on the same element; only a
     // stationary click is a selection.
     if (this.wasDrag(e)) return;
+    // Alt-click in the plan inset teleports: slide the camera horizontally so
+    // the clicked ground point becomes the orbit target, keeping height and
+    // heading. Alt is free; the other modifiers mean additive selection.
+    if (e.altKey) {
+      const rect = this.canvasRect();
+      const inset = this.scene.getPlanRect();
+      if (inset) {
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const top = rect.height - inset.y - inset.size;
+        if (x >= inset.x && x <= inset.x + inset.size && y >= top && y <= top + inset.size) {
+          const ground = this.scene.planPointAt(x - inset.x, y - top);
+          if (ground) {
+            const pose = this.getPose();
+            const dx = ground[0] - pose.target[0];
+            const dz = ground[1] - pose.target[2];
+            this.setPose({
+              position: [pose.position[0] + dx, pose.position[1], pose.position[2] + dz],
+              target: [ground[0], pose.target[1], ground[1]],
+            });
+            return;
+          }
+        }
+      }
+    }
     this.handlers.onPick?.(
       this.pickAt(e.clientX, e.clientY),
       e.ctrlKey || e.metaKey || e.shiftKey,
@@ -446,7 +734,7 @@ export class ViewerControls {
 
   private onDoubleClick(e: MouseEvent): void {
     // A second point placed on the same spot is not a request to zoom to it.
-    if (this.toolActive || this.wasDrag(e)) return;
+    if (this.fly || this.toolActive || this.wasDrag(e)) return;
     const pick = this.pickAt(e.clientX, e.clientY);
     if (pick) this.fitToElement(pick.expressID);
   }
@@ -462,6 +750,12 @@ export class ViewerControls {
       return;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (this.fly) {
+      // Movement keys are consumed by the flight's own capture listener; the
+      // only chrome that stays live in flight is the way out.
+      if (e.key === 'Escape') this.stopFly();
+      return;
+    }
     if (this.toolActive && this.handlers.onToolKey?.(e.key.toLowerCase())) {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -499,6 +793,7 @@ export class ViewerControls {
   }
 
   dispose(): void {
+    this.stopFly();
     // A drag in flight holds document-level listeners that would outlive this.
     this.claimed?.();
     this.orbit.dispose();

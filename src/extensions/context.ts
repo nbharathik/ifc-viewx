@@ -171,6 +171,10 @@ export function createExtensionContext(
         requirePermission("model.structure.read");
         return host.expressOf(id);
       },
+      scheduleGraph: () => {
+        requirePermission("model.structure.read");
+        return host.taskGraph();
+      },
     },
     geometry: {
       clash: async (a, b, options = {}) => {
@@ -247,6 +251,18 @@ export function createExtensionContext(
       isVisible: (id) => {
         requirePermission("view.read");
         return host.isVisible(id);
+      },
+      rules: () => {
+        requirePermission("view.read");
+        return host.rules();
+      },
+      models: () => {
+        requirePermission("view.read");
+        return host.models();
+      },
+      setModelVisible: (index, visible) => {
+        requirePermission("view.control");
+        host.setModelVisible(index, visible);
       },
       categoryVisible: (category) => {
         requirePermission("view.read");

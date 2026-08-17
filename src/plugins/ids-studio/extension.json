@@ -1,0 +1,56 @@
+{
+  "manifestVersion": 2,
+  "id": "ids-studio",
+  "name": "IDS Requirements Studio",
+  "version": "1.0.0",
+  "sdk": ">=2.0.0 <3",
+  "description": "Author IDS 1.0 requirements, use bSDD concepts and compare model compliance.",
+  "runtime": {
+    "kind": "bundled",
+    "entry": "panel.ts"
+  },
+  "activationEvents": ["onPanel:ids-studio"],
+  "permissions": [
+    "model.summary.read",
+    "model.structure.read",
+    "model.properties.read",
+    "view.control",
+    "review.issue.create",
+    "viewport.capture",
+    "storage.extension",
+    "file.open",
+    "file.export"
+  ],
+  "contributes": {
+    "panels": [
+      { "id": "ids-studio", "title": "IDS Requirements Studio", "icon": "clipboard" }
+    ],
+    "resultViews": [
+      { "id": "ids-studio.results", "title": "IDS compliance results" }
+    ],
+    "importers": [
+      { "id": "ids-studio.open", "title": "IDS 1.0 document", "accepts": [".ids", ".xml", "application/xml", "text/xml"] }
+    ],
+    "exporters": [
+      { "id": "ids-studio.ids", "title": "IDS 1.0 document", "mimeTypes": ["application/xml"] },
+      { "id": "ids-studio.results", "title": "IDS compliance results", "mimeTypes": ["application/json"] },
+      { "id": "ids-studio.corrections", "title": "Staged IDS corrections", "mimeTypes": ["application/json"] }
+    ]
+  },
+  "catalog": {
+    "name": "IDS Authoring",
+    "tagline": "Write and standardize information requirements",
+    "about": "The authoring half of IDS, for requirement writers and BIM coordinators. Checking a model against an existing .ids file needs none of this: that lives in the IDS panel on the inspector rail. Open this when you are building the specifications themselves: facets visually, bound to versioned bSDD concepts, with staged corrections and compliance compared against a saved revision baseline.",
+    "icon": "clipboard",
+    "category": "Quality",
+    "keywords": "ids information delivery specification bsdd classification material requirements validation compliance bcf revision",
+    "does": [
+      "Visual IDS 1.0 authoring for all six facet kinds",
+      "Reusable built-in and project requirement templates",
+      "bSDD class, material and property search with stable URIs",
+      "Shared viewer validation with staged correction suggestions",
+      "IDS, JSON and BCF handoff workflows",
+      "Compliance comparison against a saved model revision"
+    ]
+  }
+}

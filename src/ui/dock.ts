@@ -4,12 +4,16 @@
 // It reads and writes the viewer directly, so no tool state is mirrored
 // anywhere else.
 import { attachPopover, busyRow, h, icon, iconButton, toast } from "./kit.js";
-import { applyColors, colorableKeys, computeColors, cssColor, type ColorResult, type ColorRule } from "./colorBy.js";
-import { formatLength } from "../viewer-core/viewer.js";
+import { applyColors, colorableKeys, computeColors, computeColorsFromEntries, cssColor, CustomColors, materialColorEntries, type ColorResult, type ColorRule } from "./colorBy.js";
+import { formatArea, formatLength, formatVolume, formatWeight } from "../viewer-core/viewer.js";
 import type { PropertyIndex } from "../sdk/data.js";
+import { isAxisSection } from "../viewer-core/viewer.js";
+import { classifyByPlanes } from "../geometry/plane.js";
+import { measureVolumes } from "../geometry/volumes.js";
 import type {
-  CameraPose, LazyCategory, MeasureConstraint, MeasurementFormat, MeasurementObject, MeasurementState,
-  MeasureMode, SectionBox, SectionState, ShapeMeasure, SnapMode, Viewer, ViewPreset,
+  AnnotationState, AxisSectionState, CameraPose, ItemProperties, LazyCategory, MeasureConstraint, MeasurementFormat,
+  MeasurementObject, MeasurementState, MeasureMode, PlaneSectionState, SectionBox, SectionState, ShapeMeasure, SnapMode,
+  Viewer, ViewPreset,
 } from "../viewer-core/viewer.js";
 import {
   measurementTypeLabel,
@@ -27,19 +31,57 @@ interface Viewpoint {
   /** Absent on viewpoints saved before the box existed, which is not a box. */
   box?: SectionBox | null;
   measurements?: MeasurementState[];
+  /** Display offsets (storey slide, explode, moved elements) at capture. */
+  offsets?: Array<[number, [number, number, number]]>;
+  annotations?: AnnotationState[];
 }
 
-const AXES: Array<SectionState["axis"]> = ["x", "y", "z"];
+const AXES: Array<AxisSectionState["axis"]> = ["x", "y", "z"];
 const VIEWS: Array<[string, ViewPreset]> = [
   ["Front", "front"],
+  ["Back", "back"],
   ["Right", "right"],
+  ["Left", "left"],
   ["Top", "top"],
+  ["Bottom", "bottom"],
   ["Iso", "iso"],
 ];
 const CATEGORIES: Array<[LazyCategory, string]> = [
   ["IfcSpace", "Spaces"],
   ["IfcOpeningElement", "Openings"],
 ];
+const DENSITIES: Array<[string, number]> = [
+  ["Concrete", 2400],
+  ["Steel", 7850],
+  ["Aluminium", 2700],
+  ["Timber", 500],
+  ["Masonry", 1800],
+];
+const SURVEY_DENSITY_KEY = "ifcviewx.survey.density";
+/** Elements read per survey run; selections beyond it are counted, not read. */
+const SURVEY_CAP = 500;
+/** Rail width plus the gutter the measure card starts after, in CSS px. */
+const CARD_GUTTER = 42;
+/** The section panel is the widest rail popover. */
+const WIDEST_POP = 262;
+
+/** First authored quantity under any of these names, quantity sets only. */
+function readQuantity(props: ItemProperties | null, names: string[]): number | null {
+  if (!props) return null;
+  for (const name of names) {
+    for (const pset of props.psets) {
+      if (pset.kind !== "qto") continue;
+      for (const prop of pset.properties) {
+        if (prop.name !== name) continue;
+        // Number(null) is 0; an unfilled quantity must not read as authored.
+        if (prop.value === null || prop.value === undefined || prop.value === "") continue;
+        const value = typeof prop.value === "number" ? prop.value : Number(prop.value);
+        if (Number.isFinite(value) && value >= 0) return value;
+      }
+    }
+  }
+  return null;
+}
 /** Three is the whole choice: smart, corners only, or nothing. */
 const SNAPS: Array<[SnapMode, string, string]> = [
   ["auto", "Auto", "Corners, midpoints and edges"],
@@ -51,6 +93,7 @@ const MODES: Array<[MeasureMode, string, string]> = [
   ["path", "Path", "Chained segments with a running total"],
   ["angle", "Angle", "Three points: arm, corner, arm"],
   ["area", "Area", "Click a ring of points, then close it"],
+  ["count", "Count", "Click to place numbered tally markers"],
   ["coordinate", "Point", "Place a persistent XYZ coordinate"],
 ];
 const CONSTRAINTS: Array<[MeasureConstraint, string, string]> = [
@@ -88,6 +131,20 @@ export function readMeasurements(key: string): MeasurementState[] {
   try {
     const parsed = JSON.parse(localStorage.getItem(key) ?? "[]") as unknown;
     return Array.isArray(parsed) ? parsed as MeasurementState[] : [];
+  } catch {
+    return [];
+  }
+}
+
+export function annotationKey(viewer: Viewer): string | null {
+  const stats = viewer.getStats();
+  return stats ? `ifcviewx.notes.${stats.totalEntities}-${stats.triangleCount}` : null;
+}
+
+export function readAnnotations(key: string): AnnotationState[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) ?? "[]") as unknown;
+    return Array.isArray(parsed) ? parsed as AnnotationState[] : [];
   } catch {
     return [];
   }
@@ -146,6 +203,8 @@ export function saveViewpoint(viewer: Viewer, name?: string): string | null {
     sections: viewer.getSections(),
     box: viewer.getSectionBox(),
     measurements: viewer.getMeasurementStates(),
+    offsets: viewer.getElementOffsets(),
+    annotations: viewer.getAnnotationStates(),
   });
   localStorage.setItem(key, JSON.stringify(views));
   return label;
@@ -179,8 +238,16 @@ export class Dock {
   private measureVisibility!: HTMLButtonElement;
   private persistedMeasureRevision = -1;
   private restoringMeasurements = false;
+  private persistedAnnotationRevision = -1;
+  private restoringAnnotations = false;
   private readonly colorBtn: HTMLButtonElement;
+  private readonly arrangeBtn: HTMLButtonElement;
+  /** Sticky arrange state so the popover reopens where the user left it. */
+  private slideAxis: "x" | "y" | "z" = "y";
+  private slideSpacing = 0;
+  private explodeFactor = 0;
   private colorRule: ColorRule = { kind: "none" };
+  private readonly customColors = new CustomColors();
   private colorResult: ColorResult | null = null;
   /** Set once the plugin host exists; property rules read its shared index. */
   private indexProvider: (() => PropertyIndex) | null = null;
@@ -205,6 +272,7 @@ export class Dock {
     this.sectionBtn = this.popTool("section", "Section planes  X", (pop) => this.buildSection(pop));
     this.popTool("eye", "Visibility", (pop, close) => this.buildVisibility(pop, close));
     this.colorBtn = this.popTool("palette", "Colour by", (pop) => this.buildColors(pop));
+    this.arrangeBtn = this.popTool("move", "Arrange: storey slide, explode, offsets", (pop) => this.buildArrange(pop));
 
     this.sep();
     this.popTool("layers", "Models", (pop, close) => this.buildModels(pop, close));
@@ -221,7 +289,15 @@ export class Dock {
       this.persistMeasurements();
       this.syncMeasure();
     });
-    viewer.onModelLoaded(() => this.restoreMeasurements());
+    viewer.onAnnotationChange(() => this.persistAnnotations());
+    viewer.onModelLoaded(() => {
+      this.restoreMeasurements();
+      this.restoreAnnotations();
+      // Offsets do not survive a model swap; neither should the sliders.
+      this.slideSpacing = 0;
+      this.explodeFactor = 0;
+      this.syncArrange();
+    });
     this.sync();
   }
 
@@ -229,8 +305,13 @@ export class Dock {
     const open = this.root.querySelector(".pop");
     if (!open) return;
     for (const section of this.viewer.getSections()) {
-      const slider = open.querySelector<HTMLInputElement>(`input[data-axis="${section.axis}"]`);
-      if (slider) slider.value = String(section.offset);
+      if (isAxisSection(section)) {
+        const slider = open.querySelector<HTMLInputElement>(`input[data-axis="${section.axis}"]`);
+        if (slider) slider.value = String(section.offset);
+        continue;
+      }
+      const input = open.querySelector<HTMLInputElement>(`input[data-plane="${section.id}"]`);
+      if (input && document.activeElement !== input) input.value = section.offset.toFixed(2);
     }
     // The plan follows the section, so an axis toggle can flip it from afar.
     open
@@ -241,7 +322,8 @@ export class Dock {
   /** Reflect tool state that other entry points (keys, palette) can change. */
   sync(): void {
     this.measureBtn.setAttribute("aria-pressed", String(this.viewer.isMeasuring()));
-    this.sectionBtn.setAttribute("aria-pressed", String(this.viewer.getSection() !== null));
+    // Optional call: partial viewers in tests predate the sections refactor.
+    this.sectionBtn.setAttribute("aria-pressed", String((this.viewer.getSections?.() ?? []).length > 0));
     this.syncMeasure();
   }
 
@@ -263,8 +345,30 @@ export class Dock {
     const button = iconButton(name, title, () => undefined);
     button.setAttribute("aria-expanded", "false");
     this.root.appendChild(h("span", { class: "dock-item" }, [button]));
-    attachPopover(button, build, "right");
+    // Pinned: these drive the model, so clicking into the viewport to pick a
+    // face or drag a handle must not take the panel away.
+    attachPopover(button, build, "right", { onToggle: (open) => this.yieldMeasureCard(open), pinned: true });
     return button;
+  }
+
+  /**
+   * The measure card and a rail panel share the strip beside the rail. Wide
+   * enough and they sit side by side; narrower, the card steps aside for as
+   * long as the panel is open rather than the two overlapping.
+   */
+  private yieldMeasureCard(open: boolean): void {
+    if (!open || !this.viewer.isMeasuring()) {
+      this.measureCard.classList.remove("yield");
+      this.root.classList.toggle("card-open", this.viewer.isMeasuring());
+      return;
+    }
+    const host = this.root.parentElement;
+    const width = this.measureCard.offsetWidth;
+    const tight = (host?.clientWidth ?? 0) - CARD_GUTTER - width - 9 < WIDEST_POP;
+    this.measureCard.classList.toggle("yield", tight);
+    this.root.classList.toggle("card-open", !tight);
+    // Measured now rather than at card open: the card is width-responsive.
+    if (!tight) this.root.style.setProperty("--mc-w", `${Math.round(width)}px`);
   }
 
   // -- measure ---------------------------------------------------------------
@@ -293,6 +397,30 @@ export class Dock {
     } catch {
       // A storage quota should never interrupt measuring; CSV remains available.
     }
+  }
+
+  private persistAnnotations(): void {
+    if (this.restoringAnnotations) return;
+    const key = annotationKey(this.viewer);
+    if (!key) return;
+    const revision = this.viewer.getAnnotationRevision();
+    if (revision === this.persistedAnnotationRevision) return;
+    try {
+      localStorage.setItem(key, JSON.stringify(this.viewer.getAnnotationStates()));
+      this.persistedAnnotationRevision = revision;
+    } catch {
+      // Quota again: notes stay in the session even when they cannot persist.
+    }
+  }
+
+  private restoreAnnotations(): void {
+    const key = annotationKey(this.viewer);
+    if (!key) return;
+    const states = readAnnotations(key);
+    this.restoringAnnotations = true;
+    if (states.length) this.viewer.setAnnotationStates(states);
+    this.restoringAnnotations = false;
+    this.persistedAnnotationRevision = this.viewer.getAnnotationRevision();
   }
 
   private restoreMeasurements(): void {
@@ -457,6 +585,27 @@ export class Dock {
         h("div", { class: "mc-row mc-ledger-actions" }, [reset]),
       ]),
     ]);
+    // Quantity survey: authored quantity sums over the current selection.
+    const surveyOut = h("div", { class: "mc-survey-out" });
+    const densitySelect = h("select", { class: "pop-select" }) as HTMLSelectElement;
+    for (const [label, value] of DENSITIES) {
+      densitySelect.appendChild(h("option", { value: String(value), text: `${label} ${value} kg/m3` }));
+    }
+    const savedDensity = localStorage.getItem(SURVEY_DENSITY_KEY);
+    if (savedDensity && DENSITIES.some(([, value]) => String(value) === savedDensity)) {
+      densitySelect.value = savedDensity;
+    }
+    densitySelect.addEventListener("change", () => localStorage.setItem(SURVEY_DENSITY_KEY, densitySelect.value));
+    const surveyRun = h("button", { class: "btn sm grow", type: "button", text: "Survey selection" });
+    surveyRun.addEventListener("click", () => void this.runSurvey(surveyOut, Number(densitySelect.value) || 2400));
+    const survey = h("details", { class: "mc-disclosure" }, [
+      h("summary", {}, [h("span", { text: "Quantity survey" })]),
+      h("div", { class: "mc-disclosure-body" }, [
+        h("div", { class: "mc-row" }, [densitySelect, surveyRun]),
+        surveyOut,
+      ]),
+    ]);
+
     const smart = h("button", {
       class: "mc-smart",
       type: "button",
@@ -482,13 +631,103 @@ export class Dock {
       h("div", { class: "mc-row mc-finish" }, [this.closeRing, this.finishPath]),
       accuracy,
       ledger,
+      survey,
       this.measureImport,
     ]);
+  }
+
+  /** Sequence token so a stale survey run never paints over a fresh one. */
+  private surveyToken = 0;
+
+  private async runSurvey(out: HTMLElement, density: number): Promise<void> {
+    const token = ++this.surveyToken;
+    const ids = this.viewer.getSelectedIds();
+    if (ids.length === 0) {
+      out.replaceChildren(h("div", { class: "empty", text: "Select elements first." }));
+      return;
+    }
+    const scan = ids.slice(0, SURVEY_CAP);
+    out.replaceChildren(busyRow(`Reading ${scan.length} element(s)`));
+    const sums = { length: 0, area: 0, volume: 0 };
+    const covered = { length: 0, area: 0, volume: 0 };
+    const unquantified: number[] = [];
+    for (const id of scan) {
+      if (token !== this.surveyToken) return;
+      const props = await this.viewer.getProperties(id).catch(() => null);
+      const volume = readQuantity(props, ["NetVolume", "GrossVolume"]);
+      const area = readQuantity(props, ["NetArea", "GrossArea", "NetSideArea", "GrossSideArea", "NetFloorArea"]);
+      const length = readQuantity(props, ["Length", "Height", "Depth"]);
+      if (volume !== null) {
+        sums.volume += volume;
+        covered.volume++;
+      } else {
+        unquantified.push(id);
+      }
+      if (area !== null) {
+        sums.area += area;
+        covered.area++;
+      }
+      if (length !== null) {
+        sums.length += length;
+        covered.length++;
+      }
+    }
+    if (token !== this.surveyToken) return;
+    // Elements without authored quantities get true mesh volumes from the
+    // geometry worker; the bounding box only stands in when that fails.
+    let meshVolume = 0;
+    let meshCount = 0;
+    let boxVolume = 0;
+    let boxCount = 0;
+    if (unquantified.length > 0) {
+      try {
+        const measured = await measureVolumes(this.viewer, unquantified);
+        if (token !== this.surveyToken) return;
+        for (const entry of measured.volumes) {
+          meshVolume += entry.volume;
+          meshCount++;
+        }
+      } catch {
+        for (const id of unquantified) {
+          const b = this.viewer.getElementBounds(id);
+          if (!b) continue;
+          boxVolume +=
+            Math.max(0, b.max.x - b.min.x) * Math.max(0, b.max.y - b.min.y) * Math.max(0, b.max.z - b.min.z);
+          boxCount++;
+        }
+      }
+    }
+    if (token !== this.surveyToken) return;
+    const format = this.viewer.getMeasurementFormat();
+    const row = (key: string, value: string, note: string): HTMLElement =>
+      h("div", { class: "mc-survey-row" }, [
+        h("span", { class: "mc-key", text: key }),
+        h("span", { class: "mc-survey-value", text: value }),
+        h("span", { class: "mc-survey-note", text: note }),
+      ]);
+    const total = sums.volume + meshVolume + boxVolume;
+    const volumeNote =
+      meshCount > 0
+        ? `${covered.volume} authored, ${meshCount} from mesh`
+        : boxCount > 0
+          ? `${covered.volume} authored, ${boxCount} box estimate`
+          : `${covered.volume}/${scan.length} authored`;
+    out.replaceChildren(
+      row("Count", String(ids.length), ids.length > SURVEY_CAP ? `first ${SURVEY_CAP} read` : ""),
+      row("Length", formatLength(sums.length, format), `${covered.length}/${scan.length} authored`),
+      row("Area", formatArea(sums.area, format), `${covered.area}/${scan.length} authored`),
+      row("Volume", formatVolume(total, format), volumeNote),
+      row("Weight", formatWeight(total * density, format), `at ${density} kg/m3`),
+    );
   }
 
   private syncMeasure(): void {
     const on = this.viewer.isMeasuring();
     this.measureCard.classList.toggle("hidden", !on);
+    // Rail popovers open past the card instead of stacking on top of it.
+    this.root.classList.toggle("card-open", on);
+    if (on) this.root.style.setProperty("--mc-w", `${Math.round(this.measureCard.offsetWidth)}px`);
+    else this.root.style.removeProperty("--mc-w");
     if (!on) return;
     const snap = this.viewer.getSnapMode();
     const buttons = this.measureCard.querySelectorAll<HTMLButtonElement>(".mc-snap button");
@@ -738,12 +977,17 @@ export class Dock {
    */
   private buildSection(pop: HTMLElement): void {
     const bounds = this.viewer.getSceneInfo().bounds;
-    const state = new Map<SectionState["axis"], SectionState>(
-      this.viewer.getSections().map((section) => [section.axis, section]),
+    const state = new Map<AxisSectionState["axis"], AxisSectionState>(
+      this.viewer.getSections().filter(isAxisSection).map((section) => [section.axis, section]),
     );
 
+    // Arbitrary planes live beside the axis sliders; the sliders must never
+    // rebuild the list without them.
     const apply = (): void => {
-      this.viewer.setSections([...state.values()]);
+      this.viewer.setSections([
+        ...this.viewer.getSections().filter((section) => !isAxisSection(section)),
+        ...state.values(),
+      ]);
       this.sync();
     };
 
@@ -792,7 +1036,7 @@ export class Dock {
         "aria-pressed": String(current?.flip ?? false),
       }, [icon("section", 13)]);
 
-      const read = (): SectionState => ({
+      const read = (): AxisSectionState => ({
         axis,
         offset: Number(slider.value),
         flip: flip.getAttribute("aria-pressed") === "true",
@@ -821,6 +1065,73 @@ export class Dock {
       planePanel.appendChild(h("div", { class: "pop-row section-plane-row" }, [toggle, slider, flip]));
     }
 
+    // Arbitrary planes: cut on any picked face, managed as a named list.
+    const planeList = h("div", { class: "section-plane-list" });
+    const renderPlanes = (): void => {
+      const planes = this.viewer.getSections().filter((s): s is PlaneSectionState => !isAxisSection(s));
+      planeList.replaceChildren(
+        ...planes.map((planeState) => {
+          const nameInput = h("input", {
+            class: "section-plane-name", type: "text", value: planeState.name, "aria-label": "Plane name",
+          }) as HTMLInputElement;
+          nameInput.addEventListener("change", () => this.viewer.renameSection(planeState.id, nameInput.value));
+          const offsetInput = h("input", {
+            type: "number", step: "0.01", value: planeState.offset.toFixed(2),
+            "data-plane": planeState.id, "aria-label": `${planeState.name} offset in metres`,
+          }) as HTMLInputElement;
+          offsetInput.addEventListener("change", () => {
+            const value = Number(offsetInput.value);
+            if (!Number.isFinite(value)) return;
+            this.viewer.setSections(this.viewer.getSections().map((s) =>
+              !isAxisSection(s) && s.id === planeState.id ? { ...s, offset: value } : s));
+          });
+          const flipPlane = h("button", {
+            class: "icon-btn sm", type: "button", title: "Flip side",
+            "aria-pressed": String(planeState.flip),
+          }, [icon("section", 13)]);
+          flipPlane.addEventListener("click", () => {
+            this.viewer.setSections(this.viewer.getSections().map((s) =>
+              !isAxisSection(s) && s.id === planeState.id ? { ...s, flip: !s.flip } : s));
+            renderPlanes();
+          });
+          const look = iconButton("frame", "Look at this plane", () => this.viewer.viewAlongSection(planeState.id), "icon-btn sm");
+          const del = iconButton("x", "Delete plane", () => {
+            this.viewer.removeSection(planeState.id);
+            renderPlanes();
+            this.sync();
+          }, "icon-btn sm");
+          return h("div", { class: "pop-row section-plane-row arbitrary" }, [nameInput, offsetInput, flipPlane, look, del]);
+        }),
+      );
+    };
+    const fromFace = h("button", {
+      class: "btn grow", type: "button", text: "Plane from picked face",
+      title: "Click a face in the model first, then cut on it",
+    });
+    fromFace.addEventListener("click", () => {
+      if (this.viewer.getSections().length >= 8) return void toast("Plane limit reached (8)", "info");
+      const added = this.viewer.addSectionFromPick();
+      if (!added) return void toast("Click a surface in the model first", "info");
+      renderPlanes();
+      this.sync();
+    });
+    renderPlanes();
+    const selectVisible = h("button", {
+      class: "btn grow", type: "button", text: "Select visible",
+      title: "Select every element the cut leaves at least partly visible",
+    });
+    selectVisible.addEventListener("click", () => void this.classifyAgainstCut(false));
+    const hideClipped = h("button", {
+      class: "btn grow", type: "button", text: "Hide clipped",
+      title: "Hide elements the cut removes entirely",
+    });
+    hideClipped.addEventListener("click", () => void this.classifyAgainstCut(true));
+    planePanel.append(
+      planeList,
+      h("div", { class: "pop-row" }, [fromFace]),
+      h("div", { class: "pop-row" }, [selectVisible, hideClipped]),
+    );
+
     const plan = h("button", {
       class: "btn grow",
       type: "button",
@@ -835,7 +1146,10 @@ export class Dock {
       if (on && !state.has("y")) {
         const mid = (bounds.min[1] + bounds.max[1]) / 2;
         state.set("y", { axis: "y", offset: mid, flip: false });
-        this.viewer.setSections([...state.values()]);
+        this.viewer.setSections([
+          ...this.viewer.getSections().filter((section) => !isAxisSection(section)),
+          ...state.values(),
+        ]);
       }
       this.viewer.setPlanView(on);
       plan.setAttribute("aria-pressed", String(on));
@@ -851,6 +1165,7 @@ export class Dock {
       for (const node of pop.querySelectorAll("input[type=range]")) {
         (node as HTMLInputElement).disabled = true;
       }
+      renderPlanes();
       this.sync();
     });
     planePanel.appendChild(h("div", { class: "pop-row section-actions" }, [plan, off]));
@@ -1092,7 +1407,17 @@ export class Dock {
   resetColors(): void {
     this.colorRule = { kind: "none" };
     this.colorResult = null;
+    this.customColors.clear();
     this.syncColorButton();
+  }
+
+  /** Apply the active rule with the user's custom colours stacked on top. */
+  private applyMergedColors(): ColorResult {
+    const base = this.colorResult ?? { groups: [], assignment: new Map<number, number>(), unset: 0 };
+    const merged = this.customColors.overlay(base);
+    if (merged.groups.length === 0) this.viewer.clearColorOverride();
+    else applyColors(this.viewer, merged);
+    return merged;
   }
 
   private syncColorButton(): void {
@@ -1104,10 +1429,12 @@ export class Dock {
     const legend = h("div", { class: "pop-list legend" });
     const status = h("div", {});
 
-    const paint = (): void => {
+    const paint = (merged?: ColorResult): void => {
       legend.replaceChildren();
-      const result = this.colorResult;
-      if (!result || result.groups.length === 0) {
+      const result = merged ?? this.customColors.overlay(
+        this.colorResult ?? { groups: [], assignment: new Map<number, number>(), unset: 0 },
+      );
+      if (result.groups.length === 0) {
         legend.appendChild(h("div", { class: "empty", text: "Pick a rule to colour the model." }));
         return;
       }
@@ -1130,16 +1457,31 @@ export class Dock {
       this.syncColorButton();
       if (rule.kind === "none") {
         this.colorResult = null;
-        this.viewer.clearColorOverride();
         status.replaceChildren();
-        paint();
+        paint(this.applyMergedColors());
+        return;
+      }
+      if (rule.kind === "material") {
+        status.replaceChildren(busyRow("Reading materials"));
+        void this.viewer
+          .getOrganizeIndex()
+          .then((index) => {
+            // The popover may have moved on to another rule while this ran.
+            if (this.colorRule.kind !== "material") return;
+            this.colorResult = computeColorsFromEntries(materialColorEntries(index), (id) => this.viewer.hasGeometry(id));
+            status.replaceChildren();
+            paint(this.applyMergedColors());
+          })
+          .catch((err: Error) => {
+            status.replaceChildren();
+            toast(err.message, "error");
+          });
         return;
       }
       if (rule.kind !== "property") {
         this.colorResult = computeColors(this.viewer, rule, []);
-        applyColors(this.viewer, this.colorResult);
         status.replaceChildren();
-        paint();
+        paint(this.applyMergedColors());
         return;
       }
       const index = this.indexProvider?.();
@@ -1151,9 +1493,8 @@ export class Dock {
           // The popover may have moved on to another rule while this ran.
           if (this.colorRule.kind !== "property" || this.colorRule.key !== rule.key) return;
           this.colorResult = computeColors(this.viewer, rule, rows);
-          applyColors(this.viewer, this.colorResult);
           status.replaceChildren();
-          paint();
+          paint(this.applyMergedColors());
         })
         .catch((err: Error) => {
           status.replaceChildren();
@@ -1165,6 +1506,9 @@ export class Dock {
       ["None", { kind: "none" }],
       ["IFC class", { kind: "class" }],
       ["Storey", { kind: "storey" }],
+      ["Model", { kind: "model" }],
+      ["Random", { kind: "random" }],
+      ["Material", { kind: "material" }],
     ];
     const seg = h("div", { class: "seg" });
     for (const [label, rule] of modes) {
@@ -1193,8 +1537,160 @@ export class Dock {
       for (const other of seg.children) other.setAttribute("aria-pressed", "false");
       run({ kind: "property", key: keys.value });
     });
-    pop.append(keys, status, legend);
+
+    // Custom colour for the current selection, layered over the active rule.
+    const swatch = h("input", { type: "color", value: "#ff8c1a", title: "Custom colour" }) as HTMLInputElement;
+    swatch.className = "pop-swatch";
+    const applySwatch = h("button", { class: "btn", type: "button", text: "Colour selection" });
+    applySwatch.addEventListener("click", () => {
+      const ids = this.viewer.getSelectedIds();
+      if (ids.length === 0) return void toast("Select elements first", "error");
+      const hex = swatch.value;
+      this.customColors.set(ids, [
+        parseInt(hex.slice(1, 3), 16),
+        parseInt(hex.slice(3, 5), 16),
+        parseInt(hex.slice(5, 7), 16),
+      ]);
+      paint(this.applyMergedColors());
+    });
+    const clearSwatch = h("button", { class: "btn", type: "button", text: "Clear custom" });
+    clearSwatch.addEventListener("click", () => {
+      this.customColors.clear();
+      paint(this.applyMergedColors());
+    });
+    const customRow = h("div", { class: "pop-row" }, [swatch, applySwatch, clearSwatch]);
+
+    pop.append(keys, customRow, status, legend);
     paint();
+  }
+
+  /**
+   * Classify every visible element against the active planes in the geometry
+   * worker. One conjunctive query: an element survives only when some part of
+   * it lies inside every kept half-space, matching how the clip planes render.
+   */
+  private async classifyAgainstCut(hideClipped: boolean): Promise<void> {
+    const sections = this.viewer.getSections();
+    if (sections.length === 0) return void toast("No section planes active", "info");
+    try {
+      const planes = sections.map((section) => {
+        const n = isAxisSection(section)
+          ? ([section.axis === "x" ? 1 : 0, section.axis === "y" ? 1 : 0, section.axis === "z" ? 1 : 0] as [number, number, number])
+          : section.normal;
+        // three convention: kept side is n . p + constant > 0.
+        const normal: [number, number, number] = section.flip ? [n[0], n[1], n[2]] : [-n[0], -n[1], -n[2]];
+        const constant = section.flip ? -section.offset : section.offset;
+        return { normal, constant };
+      });
+      const result = await classifyByPlanes(this.viewer, planes, {});
+      if (hideClipped) {
+        if (result.dropped.length === 0) return void toast("Nothing is fully clipped", "info");
+        this.viewer.setHidden(result.dropped, true);
+        toast(`${result.dropped.length} clipped element(s) hidden`, "success");
+        return;
+      }
+      const visible = [...result.kept, ...result.cut];
+      if (visible.length === 0) return void toast("Nothing is visible after the cut", "info");
+      this.viewer.selectMany(visible);
+      toast(`${visible.length} element(s) selected`, "success");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "Classification failed", "error");
+    }
+  }
+
+  /** Storey slide, explode and per-selection offsets: BIMVision's VIEW group. */
+  private buildArrange(pop: HTMLElement): void {
+    pop.append(h("div", { class: "pop-title", text: "Storey slide" }));
+    const slide = h("input", {
+      type: "range", min: "0", max: "30", step: "0.5", value: String(this.slideSpacing),
+      "aria-label": "Storey slide spacing",
+    }) as HTMLInputElement;
+    const axisSeg = h("div", { class: "seg" });
+    for (const axis of AXES) {
+      const button = h("button", { type: "button", text: axis.toUpperCase() });
+      button.setAttribute("aria-pressed", String(axis === this.slideAxis));
+      button.addEventListener("click", () => {
+        this.slideAxis = axis;
+        for (const other of axisSeg.children) other.setAttribute("aria-pressed", "false");
+        button.setAttribute("aria-pressed", "true");
+        this.viewer.setStoreySlide(this.slideAxis, this.slideSpacing);
+        this.syncArrange();
+      });
+      axisSeg.appendChild(button);
+    }
+    slide.addEventListener("input", () => {
+      this.slideSpacing = Number(slide.value);
+      this.viewer.setStoreySlide(this.slideAxis, this.slideSpacing);
+      this.syncArrange();
+    });
+    pop.append(axisSeg, h("div", { class: "pop-row" }, [slide]));
+
+    pop.append(h("div", { class: "pop-title", text: "Explode" }));
+    const explode = h("input", {
+      type: "range", min: "0", max: "1.5", step: "0.03", value: String(this.explodeFactor),
+      "aria-label": "Explode factor",
+    }) as HTMLInputElement;
+    explode.addEventListener("input", () => {
+      this.explodeFactor = Number(explode.value);
+      this.viewer.setExplode(this.explodeFactor);
+      this.syncArrange();
+    });
+    pop.append(h("div", { class: "pop-row" }, [explode]));
+
+    pop.append(h("div", { class: "pop-title", text: "Move selection" }));
+    const step = h("select", { class: "pop-select", "aria-label": "Offset step" }) as HTMLSelectElement;
+    for (const value of [0.1, 0.5, 1, 5]) {
+      step.appendChild(h("option", { value: String(value), text: `${value} m` }));
+    }
+    step.value = "0.5";
+    pop.append(h("div", { class: "pop-row" }, [step]));
+    for (const axis of AXES) {
+      const dim = axis === "x" ? 0 : axis === "y" ? 1 : 2;
+      const nudge = (sign: number): void => {
+        const ids = this.viewer.getSelectedIds();
+        if (ids.length === 0) return void toast("Select elements first", "error");
+        const delta: [number, number, number] = [0, 0, 0];
+        delta[dim] = sign * Number(step.value);
+        this.viewer.offsetElements(ids, delta);
+        this.syncArrange();
+      };
+      const minus = h("button", { class: "btn axis", type: "button", text: "-" });
+      minus.addEventListener("click", () => nudge(-1));
+      const plus = h("button", { class: "btn axis", type: "button", text: "+" });
+      plus.addEventListener("click", () => nudge(1));
+      pop.append(h("div", { class: "pop-row" }, [
+        h("span", { class: "axis-tag", text: axis.toUpperCase() }),
+        minus,
+        plus,
+      ]));
+    }
+
+    const clearSelected = h("button", { class: "btn grow", type: "button", text: "Clear selected" });
+    clearSelected.addEventListener("click", () => {
+      const ids = this.viewer.getSelectedIds();
+      if (ids.length === 0) return void toast("Select elements first", "error");
+      this.viewer.clearElementOffsets(ids);
+      this.syncArrange();
+    });
+    const clearAll = h("button", { class: "btn grow", type: "button", text: "Clear all" });
+    clearAll.addEventListener("click", () => {
+      this.slideSpacing = 0;
+      this.explodeFactor = 0;
+      slide.value = "0";
+      explode.value = "0";
+      this.viewer.clearElementOffsets();
+      this.syncArrange();
+    });
+    pop.append(h("div", { class: "pop-row" }, [clearSelected, clearAll]));
+    pop.append(h("div", {
+      class: "hint-line",
+      text: "Offsets are display only: measurements and analyses keep resting positions.",
+    }));
+    this.syncArrange();
+  }
+
+  private syncArrange(): void {
+    this.arrangeBtn.setAttribute("aria-pressed", String(this.viewer.hasElementOffsets()));
   }
 
   private buildSelectionSets(pop: HTMLElement): void {
@@ -1300,6 +1796,10 @@ export class Dock {
           else if (planes.length) this.viewer.setSections(planes);
           else this.viewer.clearSection();
           if (view.measurements) this.viewer.setMeasurementStates(view.measurements);
+          if (view.annotations) this.viewer.setAnnotationStates(view.annotations);
+          // Older viewpoints have no offsets field; treat that as none.
+          this.viewer.clearElementOffsets();
+          if (view.offsets?.length) this.viewer.setElementOffsetEntries(view.offsets);
           this.sync();
         });
         const remove = iconButton("x", "Delete", () => {

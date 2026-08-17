@@ -4,7 +4,7 @@
 // coverage column says how much of a row is real so nobody quotes an estimate
 // by accident.
 import {
-  bar, button, copyTable, emptyState, grid, h, hint, note, page, progress, select, stats, toCsv,
+  bar, button, copyTable, emptyState, grid, h, header, hint, note, page, progress, saveXlsx, select, stats, toCsv,
   type ElementRow, type ExtensionContext, type GridRow,
 } from "@ifcviewx/sdk";
 
@@ -37,6 +37,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): void {
   const summary = h("div", {});
   const table = h("div", { class: "plug-results" });
   const root = page(
+    header("Quantity takeoff", "Volumes, areas and counts rolled up by class and storey."),
     bar(
       select([["type", "By class"], ["storey", "By storey"], ["both", "Class and storey"]], groupBy, (value) => {
         groupBy = value as GroupBy;
@@ -46,6 +47,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): void {
       button("Rebuild", () => void load(true)),
       button("Show all", () => ctx.view.showAll()),
       button("CSV", () => exportCsv()),
+      button("XLSX", () => void exportXlsx()),
       button("Copy", () => (rows.length ? copyTable(REPORT, reportRows()) : ctx.feedback.log("Nothing to copy yet", "error"))),
     ),
     hint("info", "Volume, area and length are the file's own authored quantities, in the file's own units. Box m³ is measured from the geometry instead, and Coverage says how much of the row is authored."),
@@ -160,6 +162,16 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): void {
     if (rows.length === 0) return void ctx.feedback.log("Nothing to export yet", "error");
     const csv = toCsv(REPORT, reportRows());
     ctx.files.export("takeoff.csv", `takeoff-${ctx.session.model().name || "model"}.csv`, `\uFEFF${csv}`, "text/csv");
+  };
+
+  const exportXlsx = async (): Promise<void> => {
+    if (rows.length === 0) return void ctx.feedback.log("Nothing to export yet", "error");
+    const name = `takeoff-${ctx.session.model().name || "model"}.xlsx`;
+    try {
+      await saveXlsx(name, REPORT, reportRows(), { sheet: "Takeoff" });
+    } catch {
+      ctx.feedback.log("The spreadsheet could not be written", "error");
+    }
   };
 
   ctx.events.on("model", () => {

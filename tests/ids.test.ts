@@ -20,7 +20,7 @@ const entity = (name: string): string =>
 
 const spec = (applicability: string, requirements: string, name = "Spec"): string =>
   `<specification name="${name}">
-     <applicability>${applicability}</applicability>
+     <applicability minOccurs="1" maxOccurs="unbounded">${applicability}</applicability>
      <requirements>${requirements}</requirements>
    </specification>`;
 
@@ -29,6 +29,7 @@ const props = (
   type: string,
   attrs: Record<string, string | number> = {},
   psets: Record<string, Record<string, string | number>> = {},
+  related: Partial<ItemProperties> = {},
 ): ItemProperties =>
   ({
     expressID,
@@ -39,6 +40,10 @@ const props = (
       kind: "pset",
       properties: Object.entries(values).map(([n, v]) => ({ name: n, value: v })),
     })),
+    classifications: [],
+    materials: [],
+    partOf: [],
+    ...related,
   }) as unknown as ItemProperties;
 
 const TREE: SpatialNode = {
@@ -60,9 +65,21 @@ const TREE: SpatialNode = {
 } as SpatialNode;
 
 const ELEMENTS: ItemProperties[] = [
-  props(10, "IfcWall", { Name: "Wall in storey" }, { Pset_WallCommon: { IsExternal: "true", FireRating: "60" } }),
-  props(11, "IfcWall", { Name: "Orphan wall" }, { Pset_WallCommon: { IsExternal: "true" } }),
-  props(20, "IfcDoor", { Name: "Door" }, {}),
+  props(10, "IfcWall", { Name: "Wall in storey" }, { Pset_WallCommon: { IsExternal: "true", FireRating: "60" } }, {
+    classifications: [{ system: "Uniclass", value: "EF_25", name: "Walls", uri: "https://identifier.buildingsmart.org/uri/test/uniclass/1.0/class/EF_25" }],
+    materials: [{ name: "Concrete", category: "structural", code: "concrete", uri: "https://identifier.buildingsmart.org/uri/test/materials/1.0/class/concrete" }],
+    partOf: [{ relation: "IFCRELCONTAINEDINSPATIALSTRUCTURE", expressID: 2, type: "IfcBuildingStorey", name: "Level 1" }],
+  }),
+  props(11, "IfcWall", { Name: "Orphan wall" }, { Pset_WallCommon: { IsExternal: "true" } }, {
+    classifications: [{ system: "Uniclass", value: "EF_25", name: "Walls", uri: null }],
+    materials: [{ name: "Steel", category: "structural", code: null, uri: null }],
+  }),
+  props(20, "IfcDoor", { Name: "Door" }, {}, {
+    partOf: [
+      { relation: "IFCRELFILLSELEMENT", expressID: 21, type: "IfcOpeningElement", name: "Door opening" },
+      { relation: "IFCRELVOIDSELEMENT", expressID: 10, type: "IfcWall", name: "Wall in storey" },
+    ],
+  }),
 ];
 
 function viewer(): Viewer {
@@ -134,39 +151,35 @@ describe("partOf", () => {
     expect(specs[0].passed).toBe(1);
   });
 
-  it("reports a relation it cannot evaluate instead of guessing", async () => {
+  it("evaluates the combined void and fill relationship path", async () => {
     const { specs, notRun } = await run(ids(spec(
-      `<partOf relation="IFCRELVOIDSELEMENT">${entity("IfcOpeningElement")}</partOf>`,
-      `<attribute><name><simpleValue>Name</simpleValue></name></attribute>`,
+      entity("IfcDoor"),
+      `<partOf relation="IFCRELVOIDSELEMENT IFCRELFILLSELEMENT">${entity("IfcWall")}</partOf>`,
     )));
-    expect(specs[0].status).toBe("not_run");
-    expect(notRun).toBe(1);
+    expect(specs[0]).toMatchObject({ status: "pass", applicable: 1, passed: 1 });
+    expect(notRun).toBe(0);
   });
 });
 
-describe("facets this validator cannot evaluate", () => {
+describe("classification and material", () => {
   const CLASSIFICATION = `<classification><system><simpleValue>Uniclass</simpleValue></system></classification>`;
   const MATERIAL = `<material><value><simpleValue>Concrete</simpleValue></value></material>`;
 
-  it("does NOT apply an unevaluable applicability to the whole model", async () => {
-    // The regression this file exists for. Before the fix an unsupported
-    // facet answered true, so every element matched and the spec reported a
-    // clean pass over elements it was never about.
+  it("scopes material applicability to the associated material", async () => {
     const { specs, notRun } = await run(ids(spec(MATERIAL, `<attribute><name><simpleValue>Name</simpleValue></name></attribute>`)));
-    expect(specs[0].status).toBe("not_run");
-    expect(specs[0].applicable).toBe(0);
-    expect(specs[0].passed).toBe(0);
-    expect(notRun).toBe(1);
+    expect(specs[0]).toMatchObject({ status: "pass", applicable: 1, passed: 1 });
+    expect(notRun).toBe(0);
   });
 
-  it("names what blocked it", async () => {
+  it("matches a classification system", async () => {
     const { specs } = await run(ids(spec(CLASSIFICATION, `<attribute><name><simpleValue>Name</simpleValue></name></attribute>`)));
-    expect(specs[0].blockedBy).toEqual(["classification"]);
+    expect(specs[0]).toMatchObject({ status: "pass", applicable: 2, passed: 2, blockedBy: [] });
   });
 
-  it("never reports a blocked specification as a pass", async () => {
-    const { specs } = await run(ids(spec(CLASSIFICATION, `<attribute><name><simpleValue>Name</simpleValue></name></attribute>`)));
-    expect(specs[0].status).not.toBe("pass");
+  it("matches a classification value as well as its system", async () => {
+    const value = `<classification><value><simpleValue>EF_25</simpleValue></value><system><simpleValue>Uniclass</simpleValue></system></classification>`;
+    const { specs } = await run(ids(spec(value, `<attribute><name><simpleValue>Name</simpleValue></name></attribute>`)));
+    expect(specs[0].applicable).toBe(2);
   });
 
   it("still runs a spec whose applicability is fine but a requirement is not", async () => {
@@ -177,11 +190,12 @@ describe("facets this validator cannot evaluate", () => {
     expect(specs[0].blockedBy).toEqual([]);
   });
 
-  it("lists the unchecked requirement rather than passing it", async () => {
+  it("checks material requirements and suggests a correction", async () => {
     loadIds(ids(spec(entity("IfcWall"), MATERIAL)), "test.ids");
     const report = await idsReport(viewer());
-    const first = (report.specifications as Array<{ notChecked: string[] }>)[0];
-    expect(first.notChecked).toContain("material");
+    const first = report.specifications[0];
+    expect(first).toMatchObject({ status: "fail", failed: 1, notChecked: [] });
+    expect(first.failures[0].suggestion).toMatch(/Assign material/);
   });
 });
 
@@ -238,6 +252,21 @@ describe("cardinality", () => {
     )));
     // Both walls have IsExternal, and it is prohibited, so both fail.
     expect(specs[0].failed).toBe(2);
+  });
+});
+
+describe("applicability occurrences", () => {
+  it("fails when fewer elements are applicable than required", async () => {
+    const xml = ids(`<specification name="Doors"><applicability minOccurs="2" maxOccurs="unbounded">${entity("IfcDoor")}</applicability></specification>`);
+    const { specs } = await run(xml);
+    expect(specs[0]).toMatchObject({ status: "fail", applicable: 1, failed: 1 });
+  });
+
+  it("passes an optional specification with no applicable elements", async () => {
+    const xml = ids(`<specification name="Windows"><applicability minOccurs="0" maxOccurs="unbounded">${entity("IfcWindow")}</applicability></specification>`);
+    const { specs, notRun } = await run(xml);
+    expect(specs[0]).toMatchObject({ status: "pass", applicable: 0, failed: 0 });
+    expect(notRun).toBe(0);
   });
 });
 

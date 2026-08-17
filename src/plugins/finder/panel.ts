@@ -5,7 +5,7 @@
 // are free; property values cost a full property read, so they are opt in and
 // the panel says which of the two it is searching.
 import {
-  bar, buildIndex, button, emptyState, grid, h, hint, note, page, progress, search, toCsv,
+  bar, buildIndex, button, emptyState, grid, h, header, hint, note, page, progress, search, toCsv,
   type Bm25Index, type ElementRow, type ExtensionContext, type GridRow, type ModelElement, type SearchHit,
 } from "@ifcviewx/sdk";
 
@@ -128,6 +128,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): void {
   });
 
   root.append(
+    header("Model finder", "Search the whole model in plain words, then act on what comes back."),
     bar(
       search("Search class, name, storey or property", (value) => {
         query = value;

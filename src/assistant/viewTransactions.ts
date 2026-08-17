@@ -45,7 +45,10 @@ function restore(viewer: Viewer, state: ViewSnapshot): void {
   void viewer.setCategoryVisible("IfcSpace", state.categories.spaces);
   void viewer.setCategoryVisible("IfcOpeningElement", state.categories.openings);
   if (state.sectionBox) viewer.setSectionBox(state.sectionBox);
-  else viewer.setSections(state.sections);
+  else if (state.sections.length) viewer.setSections(state.sections);
+  // setSections([]) leaves an active box alone, so an empty snapshot must
+  // clear explicitly, as the dock and BCF restore paths do.
+  else viewer.clearSection();
   viewer.setPlanView(state.plan);
   viewer.selectMany(state.selection, "replace");
   const keep = new Set(state.measurements);

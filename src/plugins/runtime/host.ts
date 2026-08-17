@@ -105,9 +105,15 @@ interface Running {
 const OPEN_KEY = "ifcviewx.plugins.open";
 
 export class PluginHost {
+  private readonly container: HTMLElement;
+  private readonly workspace: HTMLElement;
   private readonly strip: HTMLElement;
   private readonly body: HTMLElement;
   private readonly blank: HTMLElement;
+  private readonly expanded: HTMLElement;
+  private readonly expandedBody: HTMLElement;
+  private readonly expandedTitle: HTMLElement;
+  private expandButton: HTMLButtonElement | null = null;
   private readonly running = new Map<string, Running>();
   private readonly propertyIndex: PropertyIndex;
   private readonly contributions = new ExtensionContributionRegistry();
@@ -135,12 +141,42 @@ export class PluginHost {
     private readonly browse: (id?: string) => void,
     sharedResults?: ResultStore,
   ) {
+    this.container = container;
     this.results = new ExtensionResultStore(sharedResults);
     this.propertyIndex = new PropertyIndex(viewer, () => actions.modelKey());
     this.strip = h("div", { class: "plug-strip" });
     this.body = h("div", { class: "plug-body" });
     this.blank = h("div", { class: "page plug-page scroll" });
-    container.append(this.strip, this.body, this.blank);
+    this.workspace = h("div", { class: "plug-workspace" }, [this.strip, this.body, this.blank]);
+    this.expandedBody = h("div", { class: "plug-expanded-body" });
+    this.expandedTitle = h("div", { class: "plug-expanded-title" });
+    this.expanded = h("div", {
+      class: "plug-expanded hidden",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-label": "Expanded plugin workspace",
+    }, [
+      h("div", { class: "plug-expanded-card" }, [
+        h("div", { class: "plug-expanded-head" }, [
+          this.expandedTitle,
+          h("span", { class: "grow" }),
+          h("kbd", { class: "plug-expanded-key", text: "Esc" }),
+          iconButton("minimize", "Return plugin to the inspector  Esc", () => this.setExpanded(false), "icon-btn"),
+        ]),
+        this.expandedBody,
+      ]),
+    ]);
+    this.expanded.addEventListener("click", (event) => {
+      if (event.target === this.expanded) this.setExpanded(false);
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || this.expanded.classList.contains("hidden")) return;
+      // A plugin can open its own modal on top; that dialog owns Escape first.
+      if (this.expanded.querySelector("dialog[open]") ?? document.querySelector("dialog[open]")) return;
+      this.setExpanded(false);
+    });
+    container.appendChild(this.workspace);
+    document.body.appendChild(this.expanded);
     this.buildCatalog();
     this.paint();
   }
@@ -319,6 +355,7 @@ export class PluginHost {
     if (this.active === id) this.active = [...this.running.keys()][0] ?? "";
     this.select(this.active);
     this.persist();
+    if (this.running.size === 0) this.setExpanded(false);
   }
 
   contributionCount(owner?: string): number {
@@ -408,11 +445,47 @@ export class PluginHost {
       const shut = iconButton("x", `Close ${entry.manifest.name}`, () => this.close(id), "icon-btn sm");
       this.strip.appendChild(h("span", { class: "plug-tab-wrap" }, [tab, shut]));
     }
+    const wide = !this.expanded.classList.contains("hidden");
     if (this.running.size > 0) {
+      this.expandButton = iconButton(
+        wide ? "minimize" : "maximize",
+        wide ? "Return plugins to the inspector" : "Expand plugins to a wide workspace",
+        () => this.setExpanded(!wide),
+        "icon-btn sm",
+      );
+      this.expandButton.setAttribute("aria-pressed", String(wide));
       this.strip.append(
         h("span", { class: "grow" }),
+        this.expandButton,
         iconButton("blocks", "Browse plugins", () => this.browse(), "icon-btn sm"),
       );
-    }
+    } else this.expandButton = null;
+    this.paintExpandedTitle();
+  }
+
+  /** The wide workspace names the plugin it is showing, not itself. */
+  private paintExpandedTitle(): void {
+    const manifest = this.running.get(this.active)?.manifest;
+    this.expandedTitle.replaceChildren(
+      h("span", { class: `plug-icon sm ${manifest?.tier ?? "web"}` }, [icon(manifest?.icon ?? "blocks", 14)]),
+      h("span", { class: "grow" }, [
+        h("b", { text: manifest?.name ?? "Plugin workspace" }),
+        h("small", { text: manifest?.tagline ?? "" }),
+      ]),
+    );
+    this.expanded.setAttribute("aria-label", manifest ? `${manifest.name} workspace` : "Expanded plugin workspace");
+  }
+
+  private setExpanded(open: boolean): void {
+    if (open && this.running.size === 0) return;
+    if (open === !this.expanded.classList.contains("hidden")) return;
+    this.expanded.classList.toggle("hidden", !open);
+    document.body.classList.toggle("plugin-expanded-open", open);
+    if (open) this.expandedBody.appendChild(this.workspace);
+    else this.container.appendChild(this.workspace);
+    this.paint();
+    // Focus follows the workspace, so closing never drops the caret on <body>.
+    if (open) this.expanded.querySelector<HTMLButtonElement>(".plug-expanded-head .icon-btn")?.focus();
+    else this.expandButton?.focus();
   }
 }

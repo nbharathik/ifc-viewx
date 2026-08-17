@@ -3,6 +3,9 @@ import { runDistance } from "./distanceQuery.js";
 import { runLaser } from "./laserQuery.js";
 import { runSectionContours } from "./sectionQuery.js";
 import { runGeometrySignatures } from "./signatureQuery.js";
+import { runVolumes } from "./volumeQuery.js";
+import { runClassifyPlane } from "./planeQuery.js";
+import { meshTransfers, runMeshes } from "./meshQuery.js";
 import { GeometryIndex } from "./geometryIndex.js";
 import { GeometryScheduler } from "./scheduler.js";
 import type { GeometryRequest, GeometryResponse } from "./types.js";
@@ -10,10 +13,11 @@ import type { GeometryRequest, GeometryResponse } from "./types.js";
 const index = new GeometryIndex();
 const cancelled = new Set<number>();
 const active = new Set<number>();
+const known = new Set<number>();
 const scheduler = new GeometryScheduler();
 
-const post = (message: GeometryResponse): void => {
-  (self as unknown as Worker).postMessage(message);
+const post = (message: GeometryResponse, transfer: Transferable[] = []): void => {
+  (self as unknown as Worker).postMessage(message, transfer);
 };
 
 const turn = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
@@ -33,10 +37,11 @@ self.onmessage = (event: MessageEvent<GeometryRequest>): void => {
       index.clear();
       return;
     case "cancel":
-      cancelled.add(message.id);
+      if (known.has(message.id)) cancelled.add(message.id);
       return;
     case "clash": {
       const { id, spec } = message;
+      known.add(id);
       scheduler.schedule(message.priority, async () => {
         active.add(id);
         if (cancelled.has(id)) return;
@@ -52,6 +57,7 @@ self.onmessage = (event: MessageEvent<GeometryRequest>): void => {
           message: error instanceof Error ? error.message : String(error),
         }))
         .finally(() => {
+          known.delete(id);
           active.delete(id);
           cancelled.delete(id);
         });
@@ -59,6 +65,7 @@ self.onmessage = (event: MessageEvent<GeometryRequest>): void => {
     }
     case "distance": {
       const { id, spec } = message;
+      known.add(id);
       scheduler.schedule(message.priority, async () => {
         active.add(id);
         if (cancelled.has(id)) return;
@@ -72,6 +79,7 @@ self.onmessage = (event: MessageEvent<GeometryRequest>): void => {
           message: error instanceof Error ? error.message : String(error),
         }))
         .finally(() => {
+          known.delete(id);
           active.delete(id);
           cancelled.delete(id);
         });
@@ -79,6 +87,7 @@ self.onmessage = (event: MessageEvent<GeometryRequest>): void => {
     }
     case "laser": {
       const { id, spec } = message;
+      known.add(id);
       scheduler.schedule(message.priority, async () => {
         active.add(id);
         if (cancelled.has(id)) return;
@@ -95,6 +104,7 @@ self.onmessage = (event: MessageEvent<GeometryRequest>): void => {
           message: error instanceof Error ? error.message : String(error),
         }))
         .finally(() => {
+          known.delete(id);
           active.delete(id);
           cancelled.delete(id);
         });
@@ -102,6 +112,7 @@ self.onmessage = (event: MessageEvent<GeometryRequest>): void => {
     }
     case "sectionContours": {
       const { id, spec } = message;
+      known.add(id);
       scheduler.schedule(message.priority, async () => {
         active.add(id);
         if (cancelled.has(id)) return;
@@ -118,6 +129,7 @@ self.onmessage = (event: MessageEvent<GeometryRequest>): void => {
           message: error instanceof Error ? error.message : String(error),
         }))
         .finally(() => {
+          known.delete(id);
           active.delete(id);
           cancelled.delete(id);
         });
@@ -125,6 +137,7 @@ self.onmessage = (event: MessageEvent<GeometryRequest>): void => {
     }
     case "signatures": {
       const { id, spec } = message;
+      known.add(id);
       scheduler.schedule(message.priority, async () => {
         active.add(id);
         if (cancelled.has(id)) return;
@@ -141,6 +154,82 @@ self.onmessage = (event: MessageEvent<GeometryRequest>): void => {
           message: error instanceof Error ? error.message : String(error),
         }))
         .finally(() => {
+          known.delete(id);
+          active.delete(id);
+          cancelled.delete(id);
+        });
+      return;
+    }
+    case "volumes": {
+      const { id, spec } = message;
+      known.add(id);
+      scheduler.schedule(message.priority, async () => {
+        active.add(id);
+        if (cancelled.has(id)) return;
+        await runVolumes(index, spec, {
+          cancelled: () => cancelled.has(id),
+          yieldTurn: turn,
+        }).then((result) => {
+          if (!cancelled.has(id)) post({ type: "volumesResult", id, result });
+        });
+      })
+        .catch((error: unknown) => post({
+          type: "fail",
+          id,
+          message: error instanceof Error ? error.message : String(error),
+        }))
+        .finally(() => {
+          known.delete(id);
+          active.delete(id);
+          cancelled.delete(id);
+        });
+      return;
+    }
+    case "meshes": {
+      const { id, spec } = message;
+      known.add(id);
+      scheduler.schedule(message.priority, async () => {
+        active.add(id);
+        if (cancelled.has(id)) return;
+        await runMeshes(index, spec, {
+          cancelled: () => cancelled.has(id),
+          yieldTurn: turn,
+        }).then((result) => {
+          if (!cancelled.has(id)) post({ type: "meshesResult", id, result }, meshTransfers(result));
+        });
+      })
+        .catch((error: unknown) => post({
+          type: "fail",
+          id,
+          message: error instanceof Error ? error.message : String(error),
+        }))
+        .finally(() => {
+          known.delete(id);
+          active.delete(id);
+          cancelled.delete(id);
+        });
+      return;
+    }
+    case "classifyPlane": {
+      const { id, spec } = message;
+      known.add(id);
+      scheduler.schedule(message.priority, async () => {
+        active.add(id);
+        if (cancelled.has(id)) return;
+        await runClassifyPlane(index, spec, {
+          cancelled: () => cancelled.has(id),
+          yieldTurn: turn,
+        }).then((result) => {
+          if (!cancelled.has(id)) post({ type: "classifyPlaneResult", id, result });
+        });
+      })
+        .catch((error: unknown) => post({
+          type: "fail",
+          id,
+          message: error instanceof Error ? error.message : String(error),
+        }))
+        .finally(() => {
+          known.delete(id);
           active.delete(id);
           cancelled.delete(id);
         });

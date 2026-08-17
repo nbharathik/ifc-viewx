@@ -18,6 +18,8 @@ describe("saved viewpoints", () => {
       getSections: () => [{ axis: "y", offset: 2, flip: false }],
       getSectionBox: () => null,
       getMeasurementStates: () => measurements,
+      getElementOffsets: () => [[42, [0, 3, 0]]],
+      getAnnotationStates: () => [],
     } as unknown as Viewer;
 
     expect(saveViewpoint(viewer, "Laser check")).toBe("Laser check");

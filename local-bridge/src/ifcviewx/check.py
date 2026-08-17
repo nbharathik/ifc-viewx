@@ -4,9 +4,9 @@
 
 No browser and no network. Structural checks are the same pass the viewer runs
 (`jobs.validate`), so a green terminal and a green panel mean the same thing.
-IDS goes through ifctester, the buildingSMART reference implementation, which
-covers every facet including the classification and material ones the browser
-validator reports as unsupported.
+IDS goes through ifctester, the buildingSMART reference implementation. The
+browser uses the same IDS 1.0 facet coverage and the same pass, fail and not-run
+result contract.
 
 The exit code is the contract:
 
@@ -95,7 +95,7 @@ def _specification(spec: dict) -> dict[str, Any]:
         "name": spec.get("name") or "",
         # A skipped specification matched no element, so it neither passed nor
         # failed and must not be counted as either.
-        "status": "skipped" if spec.get("is_skipped") else "pass" if spec.get("status") else "fail",
+        "status": "not_run" if spec.get("is_skipped") else "pass" if spec.get("status") else "fail",
         "applicable": spec.get("total_applicable", 0),
         "passed": spec.get("total_applicable_pass", 0),
         "failed": spec.get("total_applicable_fail", 0),
@@ -145,7 +145,7 @@ def _totals(structural: dict, ids: dict | None) -> dict[str, int]:
         for spec in document["specifications"]:
             if spec["status"] == "fail":
                 counts["error"] += 1
-            elif spec["status"] == "skipped":
+            elif spec["status"] == "not_run":
                 # Not a pass. It matched nothing, and a specification that
                 # covers no element is usually a specification aimed at the
                 # wrong class.
@@ -215,7 +215,7 @@ def _print(result: dict[str, Any], failed: bool, fail_on: str) -> None:
     for document in result["ids"].get("documents", []):
         print(f"  ids       {document['file']}")
         for spec in document["specifications"]:
-            mark = {"pass": "pass", "fail": "FAIL", "skipped": "skip"}[spec["status"]]
+            mark = {"pass": "pass", "fail": "FAIL", "not_run": "skip"}[spec["status"]]
             print(f"    {mark:<6}{spec['passed']:>6}/{spec['applicable']:<6}  {spec['name']}")
     counts = result["counts"]
     line = ", ".join(f"{counts[name]} {name}" for name in SEVERITIES)
