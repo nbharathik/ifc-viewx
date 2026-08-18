@@ -85,6 +85,20 @@ const CLICK_MOVE_TOLERANCE_PX = 5;
 /** Wheel zoom limits while flying: telephoto to a wide first-person view. */
 const FLY_FOV_MIN = 20;
 const FLY_FOV_MAX = 90;
+const UI_KEYBOARD_TARGET = [
+  'input',
+  'textarea',
+  'select',
+  'button',
+  'a[href]',
+  'summary',
+  '[contenteditable]:not([contenteditable="false"])',
+  '[role="dialog"]',
+  '[role="menu"]',
+  '[role="listbox"]',
+  '[role="tree"]',
+  '[tabindex]:not([tabindex="-1"]):not(canvas)',
+].join(',');
 
 const _worldUp = new THREE.Vector3(0, 1, 0);
 const _flyForward = new THREE.Vector3();
@@ -280,17 +294,8 @@ export class ViewerControls {
       plan: this.scene.isPlanView(),
       onKeyDown: (e) => {
         if (e.ctrlKey || e.metaKey || e.altKey) return;
-        // Typing in a field (palette, note dialog) must never steer the
-        // flight or lose its keystrokes to preventDefault.
-        const target = e.target as HTMLElement | null;
-        if (
-          target &&
-          (target instanceof HTMLInputElement ||
-            target instanceof HTMLTextAreaElement ||
-            target.isContentEditable)
-        ) {
-          return;
-        }
+        // UI controls and modal surfaces own their keys even during flight.
+        if (this.uiOwnsKeyboard(e)) return;
         const key = e.key.toLowerCase();
         if (key === 'shift') fly.keys.add('shift');
         if (!ViewerControls.FLY_KEYS.has(key)) return;
@@ -740,15 +745,7 @@ export class ViewerControls {
   }
 
   private onKey(e: KeyboardEvent): void {
-    const target = e.target as HTMLElement | null;
-    if (
-      target &&
-      (target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        target.isContentEditable)
-    ) {
-      return;
-    }
+    if (this.uiOwnsKeyboard(e)) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (this.fly) {
       // Movement keys are consumed by the flight's own capture listener; the
@@ -783,6 +780,17 @@ export class ViewerControls {
         this.handlers.onEscape?.();
         break;
     }
+  }
+
+  /** App controls and top-layer dialogs take precedence over viewport keys. */
+  private uiOwnsKeyboard(e: KeyboardEvent): boolean {
+    if (this.doc.querySelector('dialog[open]')) return true;
+    const customModal = [...this.doc.querySelectorAll('[aria-modal="true"]')].some(
+      (modal) => !modal.closest('.hidden, [hidden], [aria-hidden="true"]'),
+    );
+    if (customModal) return true;
+    const target = e.target as Element | null;
+    return Boolean(target?.closest?.(UI_KEYBOARD_TARGET));
   }
 
   private onResize(): void {

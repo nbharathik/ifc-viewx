@@ -19,16 +19,74 @@ import json
 import struct
 import sys
 import time
+import uuid
 from array import array
 from pathlib import Path
 
 MAGIC = 0x58434649
 MAGIC_END = 0x444E4558
 FORMAT_VERSION = 1
+CACHE_REVISION = 1
 CHUNK_PLACEMENTS = 2048
 CHUNK_BYTES = 24 * 1024 * 1024
 DEFAULT_COLOR = (0.75, 0.75, 0.75, 1.0)
 SPATIAL_SKIP = {"IfcSpace", "IfcOpeningElement"}
+
+
+def cache_marker_path(target: Path) -> Path:
+    return target.with_name(f"{target.name}.meta")
+
+
+def is_valid_ifcx_bytes(data: bytes) -> bool:
+    try:
+        if len(data) < 16 or struct.unpack_from("<2I", data) != (MAGIC, FORMAT_VERSION):
+            return False
+        manifest_size, end_magic = struct.unpack_from("<2I", data, len(data) - 8)
+        if end_magic != MAGIC_END or manifest_size > len(data) - 16:
+            return False
+        start = len(data) - 8 - manifest_size
+        manifest = json.loads(data[start : start + manifest_size])
+        return isinstance(manifest, dict) and all(
+            key in manifest for key in ("stats", "bounds", "tree")
+        )
+    except (ValueError, struct.error, UnicodeDecodeError):
+        return False
+
+
+def is_valid_ifcx(target: Path) -> bool:
+    """Cheap structural check for an existing IFCX container."""
+    try:
+        size = target.stat().st_size
+        if size < 16:
+            return False
+        with target.open("rb") as handle:
+            if struct.unpack("<2I", handle.read(8)) != (MAGIC, FORMAT_VERSION):
+                return False
+            handle.seek(-8, 2)
+            manifest_size, end_magic = struct.unpack("<2I", handle.read(8))
+            if end_magic != MAGIC_END or manifest_size > size - 16:
+                return False
+            handle.seek(-(manifest_size + 8), 2)
+            manifest = json.loads(handle.read(manifest_size))
+        return isinstance(manifest, dict) and all(
+            key in manifest for key in ("stats", "bounds", "tree")
+        )
+    except (OSError, ValueError, struct.error, UnicodeDecodeError):
+        return False
+
+
+def cache_valid(target: Path) -> bool:
+    try:
+        marker = cache_marker_path(target).read_text(encoding="ascii").strip()
+    except OSError:
+        return False
+    return marker == f"{FORMAT_VERSION}:{CACHE_REVISION}" and is_valid_ifcx(target)
+
+
+def mark_cache(target: Path) -> None:
+    cache_marker_path(target).write_text(
+        f"{FORMAT_VERSION}:{CACHE_REVISION}\n", encoding="ascii"
+    )
 
 
 def models_dir() -> Path:
@@ -246,9 +304,8 @@ def convert(source: Path, target: Path, progress=None) -> dict:
         out.write(struct.pack("<2I", MAGIC, FORMAT_VERSION))
         chunk = _ChunkWriter(out)
 
-        iterator = ifcopenshell.geom.iterator(
-            settings, model, multiprocessing.cpu_count()
-        )
+        workers = max(1, min(8, multiprocessing.cpu_count() - 1))
+        iterator = ifcopenshell.geom.iterator(settings, model, workers)
         if iterator.initialize():
             while True:
                 shape = iterator.get()
@@ -348,7 +405,10 @@ def main() -> None:
     if args.serve:
         sha = hashlib.sha256(args.source.read_bytes()).hexdigest()
         target = models_dir() / f"{sha}.ifcx"
-        staging = target.with_suffix(".ifcx.part")
+        if cache_valid(target):
+            print(target, file=sys.stderr)
+            return
+        staging = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
     else:
         target = args.out or args.source.with_suffix(".ifcx")
         staging = target
@@ -356,9 +416,16 @@ def main() -> None:
     def report(percent: int, meshes: int) -> None:
         print(json.dumps({"percent": percent, "meshes": meshes}), flush=True)
 
-    stats = convert(args.source, staging, report if args.progress else None)
-    if args.serve:
-        staging.replace(target)
+    try:
+        stats = convert(args.source, staging, report if args.progress else None)
+        if args.serve:
+            from . import store
+
+            store.commit_staging(staging, target, keep={sha})
+            mark_cache(target)
+    finally:
+        if args.serve:
+            staging.unlink(missing_ok=True)
     print(
         f"{target}\n"
         f"entities {stats['totalEntities']}  meshes {stats['meshCount']}  "

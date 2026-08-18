@@ -20,6 +20,8 @@ import os
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -27,23 +29,14 @@ from typing import Any
 #: variable set by the caller cannot steer the interpreter.
 ENV_KEEP = (
     "PATH",
-    "PYTHONPATH",
     "SYSTEMROOT",
     "WINDIR",
     "COMSPEC",
     "TEMP",
     "TMP",
     "TMPDIR",
-    "HOME",
-    "USERPROFILE",
-    "HOMEDRIVE",
-    "HOMEPATH",
     "LANG",
     "LC_ALL",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "PROGRAMDATA",
-    "PROGRAMFILES",
     "NUMBER_OF_PROCESSORS",
 )
 
@@ -56,13 +49,53 @@ ENV_KEEP = (
 #: closed, nothing read this way can leave the machine.
 _BLOCKED_AUDIT_EXACT = frozenset(
     {
-        "os.system", "os.fork", "os.forkpty", "os.startfile",
-        "os.remove", "os.rename", "os.replace", "os.unlink", "os.rmdir",
-        "os.link", "os.symlink", "os.truncate",
-        "ctypes.dlopen", "ctypes.LoadLibrary", "ctypes.dlsym",
+        "ctypes.LoadLibrary",
+        "ctypes.dlopen",
+        "ctypes.dlsym",
+        "os.chmod",
+        "os.chown",
+        "os.fork",
+        "os.forkpty",
+        "os.kill",
+        "os.killpg",
+        "os.link",
+        "os.mkdir",
+        "os.remove",
+        "os.rename",
+        "os.replace",
+        "os.rmdir",
+        "os.startfile",
+        "os.symlink",
+        "os.system",
+        "os.truncate",
+        "os.unlink",
+        "os.utime",
     }
 )
-_BLOCKED_AUDIT_PREFIX = ("subprocess.", "os.exec", "os.spawn", "socket.", "winreg.", "webbrowser.")
+_BLOCKED_AUDIT_PREFIX = (
+    "_posixsubprocess.",
+    "os.exec",
+    "os.posix_spawn",
+    "os.spawn",
+    "pty.spawn",
+    "socket.",
+    "subprocess.",
+    "webbrowser.",
+    "winreg.",
+)
+
+_audit_active: ContextVar[bool] = ContextVar("ifcviewx_audit_active", default=False)
+_audit_armed = False
+
+
+@contextmanager
+def guard_untrusted_effects():
+    """Enable effect blocking only while generated code is executing."""
+    token = _audit_active.set(True)
+    try:
+        yield
+    finally:
+        _audit_active.reset(token)
 
 
 def _arm_sandbox() -> None:
@@ -71,16 +104,31 @@ def _arm_sandbox() -> None:
     The hook cannot be removed once installed, and it fires at the C level, so
     it holds regardless of how the code reaches the operation.
     """
+    global _audit_armed
+    if _audit_armed:
+        return
     try:
         import ifcopenshell  # noqa: F401
         import ifcopenshell.util.element  # noqa: F401
     except Exception:  # noqa: BLE001 - absent library just means nothing to warm
         pass
 
-    write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
+    blocked_exact = frozenset(_BLOCKED_AUDIT_EXACT)
+    blocked_prefix = tuple(_BLOCKED_AUDIT_PREFIX)
+    write_flags = int(os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC)
+    is_active = _audit_active.get
 
-    def _hook(event: str, args: tuple) -> None:
-        if event in _BLOCKED_AUDIT_EXACT or event.startswith(_BLOCKED_AUDIT_PREFIX):
+    def _hook(
+        event: str,
+        args: tuple,
+        exact: frozenset[str] = blocked_exact,
+        prefixes: tuple[str, ...] = blocked_prefix,
+        denied_flags: int = write_flags,
+        active=is_active,
+    ) -> None:
+        if not active():
+            return
+        if event in exact or event.startswith(prefixes):
             raise RuntimeError(f"blocked by sandbox: {event}")
         # IfcOpenShell reads and writes models through C++, so no legitimate job
         # opens a file for writing from Python; deny that, keep reads for imports.
@@ -88,19 +136,17 @@ def _arm_sandbox() -> None:
             mode = args[1] if len(args) > 1 else None
             flags = args[2] if len(args) > 2 else None
             if (isinstance(mode, str) and any(c in mode for c in "wax+")) or (
-                mode is None and isinstance(flags, int) and flags & write_flags
+                mode is None and isinstance(flags, int) and flags & denied_flags
             ):
                 raise RuntimeError("blocked by sandbox: file write")
 
     sys.addaudithook(_hook)
+    _audit_armed = True
 
 
 def child_env() -> dict[str, str]:
-    """Minimal environment; the package stays importable from a checkout."""
+    """Minimal environment for the isolated child interpreter."""
     env = {k: v for k in ENV_KEEP if (v := os.environ.get(k)) is not None}
-    parent = str(Path(__file__).resolve().parents[1])
-    existing = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = os.pathsep.join(p for p in (parent, existing) if p)
     env["PYTHONNOUSERSITE"] = "1"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONUNBUFFERED"] = "1"
@@ -112,10 +158,16 @@ def run(kind: str, payload: dict[str, Any], timeout: float, memory_bytes: int) -
     job = json.dumps(
         {"kind": kind, "timeout": timeout, "memoryBytes": memory_bytes, **payload}
     )
+    package_root = str(Path(__file__).resolve().parents[1])
+    bootstrap = (
+        "import sys;"
+        f"sys.path.insert(0,{package_root!r});"
+        "from ifcviewx.sandbox import _main;_main()"
+    )
     with tempfile.TemporaryDirectory(prefix="ifc-job-") as workdir:
         try:
             completed = subprocess.run(
-                [sys.executable, "-B", "-m", "ifcviewx.sandbox"],
+                [sys.executable, "-I", "-B", "-c", bootstrap],
                 input=job,
                 capture_output=True,
                 text=True,
@@ -215,12 +267,14 @@ def _apply_windows_limits(memory_bytes: int) -> None:
         if not job:
             return
         info = _Extended()
-        # JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        info.BasicLimitInformation.LimitFlags = 0x00000100 | 0x00002000
+        # PROCESS_MEMORY | JOB_MEMORY | KILL_ON_JOB_CLOSE
+        info.BasicLimitInformation.LimitFlags = 0x00000100 | 0x00000200 | 0x00002000
         info.ProcessMemoryLimit = memory_bytes
+        info.JobMemoryLimit = memory_bytes
         # 9 = JobObjectExtendedLimitInformation
-        if k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
-            k32.AssignProcessToJobObject(job, k32.GetCurrentProcess())
+        configured = k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info))
+        assigned = configured and k32.AssignProcessToJobObject(job, k32.GetCurrentProcess())
+        if assigned:
             _job_handle = job
     except Exception:  # noqa: BLE001 - a missing cap must never fail the job
         return
@@ -237,7 +291,6 @@ def _apply_limits(memory_bytes: int, timeout: float) -> None:
         return
     caps = [
         (resource.RLIMIT_AS, memory_bytes),
-        (resource.RLIMIT_CPU, int(timeout) + 5),
         (resource.RLIMIT_CORE, 0),
         (resource.RLIMIT_NOFILE, 256),
     ]

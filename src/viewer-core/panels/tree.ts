@@ -62,6 +62,8 @@ export class TreePanel {
   private nodes: SpatialNode[] = [];
   private depth = new Int32Array(0);
   private parent = new Int32Array(0);
+  private posInSet = new Int32Array(0);
+  private setSize = new Int32Array(0);
   private indexById = new Map<number, number>();
   private indexed: SpatialNode | null = null;
   private hay: string[] | null = null;
@@ -82,6 +84,9 @@ export class TreePanel {
   private selected = new Set<number>();
   /** Where a Shift-click range starts, in flat-index space. */
   private anchor = -1;
+  /** One tabbable treeitem at a time, retained across virtualized repaints. */
+  private focusRow = 0;
+  private focusedId: number | null = null;
   private resize: ResizeObserver | null = null;
 
   constructor(
@@ -102,11 +107,13 @@ export class TreePanel {
     this.search.type = 'text';
     this.search.placeholder = 'Search name, type or #id';
     this.search.spellcheck = false;
+    this.search.setAttribute('aria-label', 'Search spatial structure');
     this.search.setAttribute('data-testid', 'tree-search');
     this.search.addEventListener('input', () => this.queueFilter());
     this.search.addEventListener('keydown', (e) => this.onSearchKey(e));
     this.count = this.doc.createElement('span');
     this.count.className = 'ifc-search__count';
+    this.count.setAttribute('aria-live', 'polite');
     this.clearBtn = this.iconBtn(CLEAR_ICON, 'Clear  Esc', () => this.setQuery(''));
     this.isolateBtn = this.iconBtn(ISOLATE_ICON, '', () => this.toggleIsolate());
     this.isolateBtn.setAttribute('data-testid', 'tree-isolate');
@@ -142,8 +149,17 @@ export class TreePanel {
     this.body.appendChild(this.spacer);
     this.body.addEventListener('scroll', () => this.schedulePaint(), { passive: true });
     this.window.addEventListener('click', (e) => this.onClick(e));
+    this.window.addEventListener('keydown', (e) => this.onTreeKey(e));
+    this.window.addEventListener('focusin', (e) => this.rememberFocus(e));
     this.window.setAttribute('role', 'tree');
     this.window.setAttribute('aria-label', 'Spatial structure');
+    this.window.setAttribute(
+      'aria-description',
+      this.source.toggleSubtreeVisible
+        ? 'Use arrow keys to navigate and expand, Enter to select, and V to change visibility.'
+        : 'Use arrow keys to navigate and expand, and Enter to select.',
+    );
+    if (this.source.selectMany) this.window.setAttribute('aria-multiselectable', 'true');
     this.root.appendChild(this.body);
     container.appendChild(this.root);
     // A taller panel exposes rows the virtualizer never painted, and only a
@@ -165,6 +181,8 @@ export class TreePanel {
         this.isolated = false;
         // A flat index from the previous model is not a range start in this one.
         this.anchor = -1;
+        this.focusRow = 0;
+        this.focusedId = null;
         this.selected.clear();
         this.body.scrollTop = 0;
         this.render();
@@ -189,6 +207,7 @@ export class TreePanel {
     button.className = 'ifc-search__btn';
     button.type = 'button';
     button.title = title;
+    if (title) button.setAttribute('aria-label', title);
     button.innerHTML = glyph;
     button.addEventListener('click', onClick);
     return button;
@@ -219,18 +238,24 @@ export class TreePanel {
     const nodes: SpatialNode[] = [];
     const depth: number[] = [];
     const parent: number[] = [];
-    const walk = (node: SpatialNode, level: number, from: number): void => {
+    const posInSet: number[] = [];
+    const setSize: number[] = [];
+    const walk = (node: SpatialNode, level: number, from: number, position: number, siblings: number): void => {
       const at = nodes.length;
       nodes.push(node);
       depth.push(level);
       parent.push(from);
+      posInSet.push(position);
+      setSize.push(siblings);
       this.indexById.set(node.expressID, at);
-      for (const child of node.children) walk(child, level + 1, at);
+      node.children.forEach((child, index) => walk(child, level + 1, at, index + 1, node.children.length));
     };
-    if (tree) walk(tree, 0, -1);
+    if (tree) walk(tree, 0, -1, 1, 1);
     this.nodes = nodes;
     this.depth = Int32Array.from(depth);
     this.parent = Int32Array.from(parent);
+    this.posInSet = Int32Array.from(posInSet);
+    this.setSize = Int32Array.from(setSize);
     this.shown = new Uint8Array(nodes.length);
     this.matched = new Uint8Array(nodes.length);
   }
@@ -319,7 +344,11 @@ export class TreePanel {
   }
 
   private showEmpty(title: string, sub: string, testid?: string): void {
+    if (this.window.contains(this.doc.activeElement)) this.search.focus();
     this.rows = [];
+    this.focusRow = 0;
+    this.focusedId = null;
+    this.window.replaceChildren();
     this.spacer.classList.add('ifc-hidden');
     const box = this.empty(title, sub);
     if (testid) box.setAttribute('data-testid', testid);
@@ -342,6 +371,11 @@ export class TreePanel {
       if (!this.expanded.has(this.nodes[i].expressID)) cut = level;
     }
     this.rows = rows;
+    const retained = this.focusedId === null
+      ? -1
+      : rows.findIndex((index) => this.nodes[index].expressID === this.focusedId);
+    this.focusRow = retained >= 0 ? retained : Math.min(this.focusRow, Math.max(0, rows.length - 1));
+    this.focusedId = rows.length ? this.nodes[rows[this.focusRow]].expressID : null;
     this.spacer.style.height = `${rows.length * ROW_H}px`;
   }
 
@@ -435,6 +469,7 @@ export class TreePanel {
     this.isolateBtn.title = this.isolated
       ? 'Show everything again'
       : `Isolate ${this.hits || ''} match${this.hits === 1 ? '' : 'es'}  Enter`;
+    this.isolateBtn.setAttribute('aria-label', this.isolateBtn.title);
   }
 
   // -- painting --------------------------------------------------------------
@@ -458,8 +493,19 @@ export class TreePanel {
     if (first === this.painted[0] && last === this.painted[1]) return;
     this.painted = [first, last];
 
+    // A wheel scroll can virtualize the roving tab stop out of the DOM. Move
+    // it to the nearest painted row so Tab can always enter the tree again.
+    if (last > first && (this.focusRow < first || this.focusRow >= last)) {
+      const activeRow = (this.doc.activeElement as HTMLElement | null)?.closest<HTMLElement>('.ifc-tree-row');
+      const activePosition = Number(activeRow?.dataset.row);
+      if (!Number.isInteger(activePosition) || activePosition < first || activePosition >= last) {
+        this.focusRow = Math.min(last - 1, Math.max(first, this.focusRow));
+        this.focusedId = this.nodes[this.rows[this.focusRow]].expressID;
+      }
+    }
+
     const frag = this.doc.createDocumentFragment();
-    for (let i = first; i < last; i++) frag.appendChild(this.buildRow(this.rows[i]));
+    for (let i = first; i < last; i++) frag.appendChild(this.buildRow(this.rows[i], i));
     this.window.style.transform = `translateY(${first * ROW_H}px)`;
     this.window.replaceChildren(frag);
   }
@@ -496,7 +542,7 @@ export class TreePanel {
     return frag;
   }
 
-  private buildRow(index: number): HTMLElement {
+  private buildRow(index: number, rowPosition: number): HTMLElement {
     const node = this.nodes[index];
     const el = this.doc.createElement('div');
     const visible = this.source.isSubtreeVisible ? this.eyeState(node.expressID) : true;
@@ -506,15 +552,22 @@ export class TreePanel {
     }`;
     el.style.paddingLeft = `${4 + this.depth[index] * 11}px`;
     el.dataset.id = String(node.expressID);
+    el.dataset.row = String(rowPosition);
     el.title = `${node.name ?? '(unnamed)'} · ${node.type}`;
+    el.tabIndex = rowPosition === this.focusRow ? 0 : -1;
     if (selected) el.setAttribute('data-selected', 'true');
     // The rows are the tree, so they say so: a virtualized list still has to
     // report its real depth and its position within the whole model.
     el.setAttribute('role', 'treeitem');
     el.setAttribute('aria-level', String(this.depth[index] + 1));
     el.setAttribute('aria-selected', String(selected));
-    el.setAttribute('aria-posinset', String(index + 1));
-    el.setAttribute('aria-setsize', String(this.rows.length));
+    el.setAttribute('aria-posinset', String(this.posInSet[index]));
+    el.setAttribute('aria-setsize', String(this.setSize[index]));
+    el.setAttribute('aria-label', `${node.name ?? '(unnamed)'}, ${node.type}${visible ? '' : ', hidden'}`);
+    el.setAttribute(
+      'aria-keyshortcuts',
+      this.source.toggleSubtreeVisible ? 'Enter Space ArrowLeft ArrowRight V' : 'Enter Space ArrowLeft ArrowRight',
+    );
 
     const toggle = this.doc.createElement('span');
     const open = this.expanded.has(node.expressID);
@@ -522,10 +575,9 @@ export class TreePanel {
       open ? ' ifc-tree-toggle--open' : ''
     }`;
     toggle.dataset.act = 'toggle';
+    toggle.setAttribute('aria-hidden', 'true');
     if (node.children.length) {
       toggle.innerHTML = CHEVRON;
-      toggle.setAttribute('role', 'button');
-      toggle.setAttribute('aria-label', open ? 'Collapse' : 'Expand');
       el.setAttribute('aria-expanded', String(open));
     }
     el.appendChild(toggle);
@@ -552,8 +604,7 @@ export class TreePanel {
       eye.className = 'ifc-tree-eye';
       eye.dataset.act = 'eye';
       eye.setAttribute('data-testid', `tree-eye-${node.expressID}`);
-      eye.setAttribute('role', 'button');
-      eye.setAttribute('aria-label', `${visible ? 'Hide' : 'Show'} ${node.name ?? node.type}`);
+      eye.setAttribute('aria-hidden', 'true');
       eye.innerHTML = visible ? EYE : EYE_OFF;
       eye.title = visible ? 'Hide' : 'Show';
       el.appendChild(eye);
@@ -567,17 +618,110 @@ export class TreePanel {
     const row = target?.closest<HTMLElement>('.ifc-tree-row');
     if (!row) return;
     const id = Number(row.dataset.id);
+    const position = Number(row.dataset.row);
     const act = target?.closest<HTMLElement>('[data-act]')?.dataset.act;
     if (act === 'toggle') {
       this.toggle(id);
     } else if (act === 'eye') {
-      this.source.toggleSubtreeVisible?.(id);
-      if (!this.source.onVisibilityChange) {
-        this.eyeCache.clear();
-        this.repaint();
-      }
+      this.toggleVisibility(id);
     } else {
       this.pick(id, e);
+    }
+    this.focusAt(position);
+  }
+
+  /** Keyboard interaction follows the WAI tree pattern over the visible rows. */
+  private onTreeKey(e: KeyboardEvent): void {
+    const target = e.target as HTMLElement | null;
+    const row = target?.closest<HTMLElement>('.ifc-tree-row');
+    if (!row) return;
+    const position = Number(row.dataset.row);
+    const index = this.rows[position];
+    if (!Number.isInteger(position) || index === undefined) return;
+    const node = this.nodes[index];
+    let next = position;
+
+    if (e.key === 'ArrowDown') {
+      next = Math.min(this.rows.length - 1, position + 1);
+    } else if (e.key === 'ArrowUp') {
+      next = Math.max(0, position - 1);
+    } else if (e.key === 'Home') {
+      next = 0;
+    } else if (e.key === 'End') {
+      next = this.rows.length - 1;
+    } else if (e.key === 'ArrowRight') {
+      if (node.children.length && !this.expanded.has(node.expressID)) this.expand(node.expressID);
+      else if (
+        node.children.length
+        && this.rows[position + 1] !== undefined
+        && this.depth[this.rows[position + 1]] === this.depth[index] + 1
+      ) next = position + 1;
+    } else if (e.key === 'ArrowLeft') {
+      if (node.children.length && this.expanded.has(node.expressID)) this.collapse(node.expressID);
+      else {
+        const parent = this.parent[index];
+        if (parent >= 0) next = Math.max(0, this.rows.indexOf(parent));
+      }
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      this.pick(node.expressID, e);
+    } else if (e.key.toLowerCase() === 'v' && this.source.toggleSubtreeVisible) {
+      this.toggleVisibility(node.expressID);
+    } else {
+      return;
+    }
+
+    e.preventDefault();
+    e.stopPropagation();
+    this.focusAt(next);
+  }
+
+  private rememberFocus(e: FocusEvent): void {
+    const row = (e.target as HTMLElement | null)?.closest<HTMLElement>('.ifc-tree-row');
+    if (!row) return;
+    const position = Number(row.dataset.row);
+    if (!Number.isInteger(position) || this.rows[position] === undefined) return;
+    this.focusRow = position;
+    this.focusedId = this.nodes[this.rows[position]].expressID;
+    this.syncTabStops();
+  }
+
+  private syncTabStops(): void {
+    for (const row of this.window.querySelectorAll<HTMLElement>('.ifc-tree-row')) {
+      row.tabIndex = Number(row.dataset.row) === this.focusRow ? 0 : -1;
+    }
+  }
+
+  private focusAt(position: number): void {
+    if (this.rows.length === 0) return;
+    this.focusRow = Math.min(this.rows.length - 1, Math.max(0, position));
+    this.focusedId = this.nodes[this.rows[this.focusRow]].expressID;
+    const top = this.focusRow * ROW_H;
+    const view = this.body.scrollTop;
+    const height = this.body.clientHeight || 400;
+    let scrolled = false;
+    if (top < view) {
+      this.body.scrollTop = top;
+      scrolled = true;
+    } else if (top + ROW_H > view + height) {
+      this.body.scrollTop = top + ROW_H - height;
+      scrolled = true;
+    }
+
+    if (scrolled) this.repaint();
+    let row = this.window.querySelector<HTMLElement>(`[data-row="${this.focusRow}"]`);
+    if (!row) {
+      this.repaint();
+      row = this.window.querySelector<HTMLElement>(`[data-row="${this.focusRow}"]`);
+    }
+    this.syncTabStops();
+    row?.focus();
+  }
+
+  private toggleVisibility(expressID: number): void {
+    this.source.toggleSubtreeVisible?.(expressID);
+    if (!this.source.onVisibilityChange) {
+      this.eyeCache.clear();
+      this.repaint();
     }
   }
 
@@ -586,7 +730,10 @@ export class TreePanel {
    * between the anchor and here. Ranges run over the rows on screen, so what
    * you get is what you can see.
    */
-  private pick(expressID: number, e: MouseEvent): void {
+  private pick(
+    expressID: number,
+    e: Pick<MouseEvent | KeyboardEvent, 'shiftKey' | 'ctrlKey' | 'metaKey'>,
+  ): void {
     const index = this.indexById.get(expressID) ?? -1;
     const many = this.source.selectMany;
     if (!many) {
@@ -655,6 +802,8 @@ export class TreePanel {
 
     const row = this.rows.indexOf(index);
     if (row >= 0) {
+      this.focusRow = row;
+      this.focusedId = expressID;
       const top = row * ROW_H;
       const view = this.body.scrollTop;
       const height = this.body.clientHeight;

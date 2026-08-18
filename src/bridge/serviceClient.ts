@@ -169,6 +169,9 @@ export type ServiceMode = "web" | "local";
 const injected = (window as { __IFC_SERVICE__?: { token?: string; served?: boolean } })
   .__IFC_SERVICE__;
 
+const isEventRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
 export class ServiceClient {
   /** Local Studio serves this page, so the service is always same-origin. */
   readonly served = Boolean(injected?.served && injected.token);
@@ -314,8 +317,8 @@ export class ServiceClient {
     return data as T;
   }
 
-  private async get<T>(path: string): Promise<T> {
-    const res = await fetch(`${this.origin}${path}`, { headers: this.headers() });
+  private async get<T>(path: string, signal?: AbortSignal): Promise<T> {
+    const res = await fetch(`${this.origin}${path}`, { headers: this.headers(), signal });
     let data: unknown;
     try {
       data = await res.json();
@@ -335,6 +338,7 @@ export class ServiceClient {
     providerVersion: string,
     capabilityId: string,
     input: Record<string, unknown> = {},
+    signal?: AbortSignal,
   ): Promise<LocalJob> {
     if (this.mode() !== "local") throw new Error("Local Studio is not available.");
     return this.post<LocalJob>("/api/v1/jobs", {
@@ -343,20 +347,21 @@ export class ServiceClient {
       capabilityId,
       input,
       ...(this.sha ? { modelSha: this.sha } : {}),
-    });
+    }, signal);
   }
 
-  async getLocalJob(jobId: string): Promise<LocalJob> {
-    return this.get<LocalJob>(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
+  async getLocalJob(jobId: string, signal?: AbortSignal): Promise<LocalJob> {
+    return this.get<LocalJob>(`/api/v1/jobs/${encodeURIComponent(jobId)}`, signal);
   }
 
-  async cancelLocalJob(jobId: string): Promise<LocalJob> {
-    return this.post<LocalJob>(`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`, {});
+  async cancelLocalJob(jobId: string, signal?: AbortSignal): Promise<LocalJob> {
+    return this.post<LocalJob>(`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`, {}, signal);
   }
 
-  async getLocalJobResult<T>(jobId: string): Promise<T> {
+  async getLocalJobResult<T>(jobId: string, signal?: AbortSignal): Promise<T> {
     const result = await this.get<{ schemaVersion: 1; value: T }>(
       `/api/v1/jobs/${encodeURIComponent(jobId)}/result`,
+      signal,
     );
     return result.value;
   }
@@ -376,30 +381,50 @@ export class ServiceClient {
       }
       throw new Error(match.status === "missing" ? `Local provider ${providerId} is not installed.` : "Local Studio is not available.");
     }
-    let job = await this.startLocalJob(providerId, providerVersion, capabilityId, input);
-    const abort = async (): Promise<never> => {
-      await this.cancelLocalJob(job.id).catch(() => undefined);
-      throw new DOMException("Local provider job cancelled", "AbortError");
+    const capability = match.provider.capabilities.find((item) => item.id === capabilityId);
+    const timeoutSeconds = capability?.timeoutSeconds ?? match.provider.limits?.timeoutSeconds ?? 900;
+    const deadline = new AbortController();
+    const timeout = window.setTimeout(
+      () => deadline.abort(new DOMException("Local provider deadline reached", "TimeoutError")),
+      (Math.max(1, timeoutSeconds) + 30) * 1000,
+    );
+    const callerAborted = (): void => deadline.abort(signal?.reason);
+    if (signal?.aborted) callerAborted();
+    else signal?.addEventListener("abort", callerAborted, { once: true });
+    let job: LocalJob | null = null;
+    const cancelAndThrow = async (): Promise<never> => {
+      if (job) await this.cancelLocalJob(job.id, AbortSignal.timeout(5000)).catch(() => undefined);
+      if (signal?.aborted) throw new DOMException("Local provider job cancelled", "AbortError");
+      throw new Error(`Local provider job exceeded its ${timeoutSeconds}-second deadline.`);
     };
-    for (;;) {
-      if (signal?.aborted) return abort();
-      onProgress?.(job.progress);
-      if (job.status === "succeeded") return this.getLocalJobResult<T>(job.id);
-      if (job.status === "failed") throw new Error(job.error?.message ?? "Local provider job failed.");
-      if (job.status === "cancelled") throw new DOMException("Local provider job cancelled", "AbortError");
-      await new Promise<void>((resolve) => {
-        const aborted = (): void => {
-          window.clearTimeout(timer);
-          resolve();
-        };
-        const timer = window.setTimeout(() => {
-          signal?.removeEventListener("abort", aborted);
-          resolve();
-        }, 350);
-        signal?.addEventListener("abort", aborted, { once: true });
-      });
-      if (signal?.aborted) return abort();
-      job = await this.getLocalJob(job.id);
+    try {
+      job = await this.startLocalJob(providerId, providerVersion, capabilityId, input, deadline.signal);
+      for (;;) {
+        if (deadline.signal.aborted) return cancelAndThrow();
+        onProgress?.(job.progress);
+        if (job.status === "succeeded") return this.getLocalJobResult<T>(job.id, deadline.signal);
+        if (job.status === "failed") throw new Error(job.error?.message ?? "Local provider job failed.");
+        if (job.status === "cancelled") throw new DOMException("Local provider job cancelled", "AbortError");
+        await new Promise<void>((resolve) => {
+          const aborted = (): void => {
+            window.clearTimeout(wait);
+            resolve();
+          };
+          const wait = window.setTimeout(() => {
+            deadline.signal.removeEventListener("abort", aborted);
+            resolve();
+          }, 350);
+          deadline.signal.addEventListener("abort", aborted, { once: true });
+        });
+        if (deadline.signal.aborted) return cancelAndThrow();
+        job = await this.getLocalJob(job.id, deadline.signal);
+      }
+    } catch (error) {
+      if (deadline.signal.aborted) return cancelAndThrow();
+      throw error;
+    } finally {
+      window.clearTimeout(timeout);
+      signal?.removeEventListener("abort", callerAborted);
     }
   }
 
@@ -425,19 +450,30 @@ export class ServiceClient {
    */
   async convert(onProgress?: (text: string, percent: number) => void): Promise<Uint8Array> {
     if (!this.sha) throw new Error("Upload a model first.");
+    const capability = this.providers
+      .find((provider) => provider.id === "org.ifcviewx.core")
+      ?.capabilities.find((item) => item.id === "ifc.convert");
+    const deadline = Date.now() + ((capability?.timeoutSeconds ?? 900) + 30) * 1000;
     const started = await this.post<{ jobId?: string; status: string; url?: string }>("/convert", {
       sha: this.sha,
-    });
+    }, AbortSignal.timeout(30_000));
     let url = started.url;
     if (started.jobId) {
       // One dropped poll during a multi-minute conversion is not a failure;
       // the job keeps running, so the client keeps asking for a while.
       let misses = 0;
       for (;;) {
+        if (Date.now() >= deadline) {
+          await this.post(`/jobs/${started.jobId}/cancel`, {}, AbortSignal.timeout(5000)).catch(() => undefined);
+          throw new Error("Conversion exceeded its Local Studio deadline.");
+        }
         await new Promise((r) => setTimeout(r, 700));
         let res: Response;
         try {
-          res = await fetch(`${this.origin}/jobs/${started.jobId}`, { headers: this.headers() });
+          res = await fetch(`${this.origin}/jobs/${started.jobId}`, {
+            headers: this.headers(),
+            signal: AbortSignal.timeout(15_000),
+          });
         } catch {
           if (++misses > 8) throw new Error("Lost contact with the local service during conversion.");
           continue;
@@ -471,7 +507,7 @@ export class ServiceClient {
       }
     }
     if (!url) throw new Error("Conversion produced no output.");
-    const res = await fetch(`${this.origin}${url}`);
+    const res = await fetch(`${this.origin}${url}`, { signal: AbortSignal.timeout(300_000) });
     if (!res.ok) throw new Error(`Could not download the converted model (HTTP ${res.status}).`);
     return new Uint8Array(await res.arrayBuffer());
   }
@@ -513,13 +549,24 @@ export class ServiceClient {
     }
     if (!response.body) throw new Error("Local Studio sent no assistant stream");
     const reader = response.body.getReader();
-    const decoder = new TextDecoder();
+    const decoder = new TextDecoder("utf-8", { fatal: true });
     let buffer = "";
     let text = "";
     let calls: TurnResult["calls"] = [];
     let toolsUsed = tools.length === 0;
+    let completed = false;
     const consume = (payload: string): void => {
-      let event: {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(payload) as unknown;
+      } catch {
+        throw new Error("Local Studio sent a malformed assistant stream event");
+      }
+      if (!isEventRecord(parsed) || typeof parsed.type !== "string") {
+        throw new Error("Local Studio sent a malformed assistant stream event");
+      }
+      if (completed) throw new Error("Local Studio sent data after the final assistant event");
+      const event = parsed as {
         type?: string;
         delta?: string;
         call?: TurnResult["calls"][number];
@@ -529,11 +576,6 @@ export class ServiceClient {
         toolsUsed?: boolean;
         message?: string;
       };
-      try {
-        event = JSON.parse(payload) as typeof event;
-      } catch {
-        return;
-      }
       if (event.type === "text_delta" && event.delta) {
         text += event.delta;
         options.onDelta?.(event.delta);
@@ -544,23 +586,39 @@ export class ServiceClient {
         if (!text && event.text) text = event.text;
         if (calls.length === 0 && event.calls) calls = event.calls;
         if (typeof event.toolsUsed === "boolean") toolsUsed = event.toolsUsed;
+        completed = true;
       } else if (event.type === "error") throw new Error(event.message ?? "The local assistant stream failed");
+    };
+    const drain = (): void => {
+      let split = /\r?\n\r?\n/.exec(buffer);
+      while (split) {
+        const raw = buffer.slice(0, split.index);
+        buffer = buffer.slice(split.index + split[0].length);
+        const data = raw.split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart());
+        if (data.length) consume(data.join("\n").trim());
+        split = /\r?\n\r?\n/.exec(buffer);
+      }
+    };
+    const decode = (value?: Uint8Array, stream = false): string => {
+      try {
+        return decoder.decode(value, { stream });
+      } catch {
+        throw new Error("Local Studio sent invalid UTF-8 in the assistant stream");
+      }
     };
     try {
       for (;;) {
         const chunk = await reader.read();
         if (chunk.done) break;
-        buffer += decoder.decode(chunk.value, { stream: true });
-        let split = /\r?\n\r?\n/.exec(buffer);
-        while (split) {
-          const raw = buffer.slice(0, split.index);
-          buffer = buffer.slice(split.index + split[0].length);
-          for (const line of raw.split(/\r?\n/)) {
-            if (line.startsWith("data:")) consume(line.slice(5).trim());
-          }
-          split = /\r?\n\r?\n/.exec(buffer);
-        }
+        buffer += decode(chunk.value, true);
+        drain();
       }
+      buffer += decode();
+      drain();
+      if (buffer.trim()) throw new Error("Local Studio assistant stream ended in a partial event");
+      if (!completed) throw new Error("Local Studio assistant stream ended before its final event");
     } finally {
       reader.releaseLock();
     }

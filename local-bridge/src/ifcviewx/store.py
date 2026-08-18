@@ -8,9 +8,13 @@ size is capped, and edit results expire.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import threading
 import time
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +25,8 @@ SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 IFC_MAGIC = b"ISO-10303-21"
 ZIP_MAGIC = b"PK\x03\x04"
 SNIFF_BYTES = 4096
+_STORE_LOCK = threading.RLock()
+_STORE_LOCK_TIMEOUT_S = 30.0
 
 
 class StoreError(Exception):
@@ -65,7 +71,7 @@ def looks_like_ifc(head: bytes) -> bool:
     return IFC_MAGIC in head[:SNIFF_BYTES]
 
 
-def require_space(size: int) -> None:
+def require_space(size: int, written: int = 0) -> None:
     """Refuse before writing rather than half-way through."""
     limits = settings()
     if size > limits.max_upload_bytes:
@@ -74,8 +80,25 @@ def require_space(size: int) -> None:
             f"{size / 1e6:.0f} MB exceeds the {limits.max_upload_bytes / 1e6:.0f} MB upload limit",
         )
     free = shutil.disk_usage(models_dir()).free
-    if size + 512 * 1024**2 > free:
+    remaining = max(0, size - max(0, written))
+    if remaining + 512 * 1024**2 > free:
         raise StoreError("no_space", "not enough free disk space for this model")
+
+
+@contextmanager
+def lease(sha: str):
+    """Keep a stored model alive while a worker is reading it."""
+    if not is_sha(sha):
+        raise StoreError("bad_sha", "not a content hash")
+    marker = models_dir() / f"{sha}.{uuid.uuid4().hex}.lease"
+    # Publish the lease under the same lock used to enumerate leases and pick
+    # eviction candidates. Otherwise sweep can miss a just-starting worker.
+    with _locked_store():
+        marker.touch()
+    try:
+        yield
+    finally:
+        marker.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -126,14 +149,66 @@ def stats() -> dict:
     }
 
 
-def sweep(keep: set[str] | None = None) -> dict:
+@contextmanager
+def _locked_store():
+    """Serialize quota decisions and commits across threads and processes."""
+    lock_path = models_dir() / ".store.lock"
+    with _STORE_LOCK, lock_path.open("a+b") as handle:
+        handle.seek(0, 2)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        deadline = time.monotonic() + _STORE_LOCK_TIMEOUT_S
+        while True:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    raise StoreError("store_busy", "the model store is busy; try again") from exc
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _sweep_unlocked(keep: set[str] | None = None, reserve: int = 0) -> dict:
     """Expire edit results and evict the oldest models over quota.
 
     `keep` holds shas the session still needs; they are never evicted.
     """
     limits = settings()
-    keep = keep or set()
+    keep = set(keep or ())
     now = time.time()
+    leased: set[str] = set()
+    lease_ttl = max(limits.convert_timeout_s, limits.provider_timeout_s) + 300
+    for marker in models_dir().glob("*.lease"):
+        sha = marker.name.partition(".")[0]
+        try:
+            if not is_sha(sha) or now - marker.stat().st_mtime > lease_ttl:
+                marker.unlink(missing_ok=True)
+            else:
+                leased.add(sha)
+        except OSError:
+            continue
+    keep |= leased
     removed_results = 0
     for path in models_dir().glob("edit-*.ifc"):
         try:
@@ -149,19 +224,60 @@ def sweep(keep: set[str] | None = None) -> dict:
         except OSError:
             continue
 
+    reserve = max(0, reserve)
+    if reserve > limits.store_quota_bytes:
+        raise StoreError("quota_exceeded", "this model is larger than the model store quota")
     listing = entries()
     used = sum(e.bytes for e in listing)
     evicted: list[str] = []
     # Oldest first, and a converted model outlives its heavier source.
-    for entry in sorted(listing, key=lambda e: (e.at, e.kind == "ifcx")):
-        if used <= limits.store_quota_bytes:
+    ordered = sorted(listing, key=lambda e: (e.at, e.kind == "ifcx"))
+    candidates = [
+        entry
+        for entry in ordered
+        if entry.sha not in keep and now - entry.at >= 300
+    ]
+    needed = max(0, used + reserve - limits.store_quota_bytes)
+    if reserve and sum(entry.bytes for entry in candidates) < needed:
+        # Do not evict useful caches when the protected/recent remainder means
+        # the incoming reservation cannot succeed anyway.
+        raise StoreError("quota_exceeded", "the model store quota is full")
+    for entry in candidates:
+        if used + reserve <= limits.store_quota_bytes:
             break
-        if entry.sha in keep or now - entry.at < 300:
-            continue
         try:
-            (models_dir() / f"{entry.sha}.{entry.kind}").unlink()
+            target = models_dir() / f"{entry.sha}.{entry.kind}"
+            target.unlink()
+            if entry.kind == "ifcx":
+                target.with_name(f"{target.name}.meta").unlink(missing_ok=True)
         except OSError:
             continue
         used -= entry.bytes
         evicted.append(f"{entry.sha[:12]}.{entry.kind}")
+    if reserve and used + reserve > limits.store_quota_bytes:
+        raise StoreError("quota_exceeded", "the model store quota is full")
     return {"expiredResults": removed_results, "evicted": evicted, "bytes": used}
+
+
+def sweep(keep: set[str] | None = None, reserve: int = 0) -> dict:
+    """Expire old data and reserve quota under the store-wide lock."""
+    with _locked_store():
+        return _sweep_unlocked(keep=keep, reserve=reserve)
+
+
+def commit_staging(staging: Path, target: Path, *, keep: set[str] | None = None) -> dict:
+    """Reserve the staging file's net growth and atomically publish it.
+
+    The target size is measured while holding the same cross-process lock as
+    eviction. This prevents concurrent uploads/conversions from both claiming
+    the same quota, including two writers racing on one content hash.
+    """
+    with _locked_store():
+        incoming = staging.stat().st_size
+        try:
+            old_size = target.stat().st_size
+        except FileNotFoundError:
+            old_size = 0
+        result = _sweep_unlocked(keep=keep, reserve=max(0, incoming - old_size))
+        staging.replace(target)
+        return result

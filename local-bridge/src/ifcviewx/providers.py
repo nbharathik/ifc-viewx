@@ -635,17 +635,17 @@ class CoreProvider:
         progress: Callable[[Mapping[str, Any]], None],
     ) -> Mapping[str, Any]:
         from . import store
-        from .convert import convert
+        from .convert import cache_valid, convert, mark_cache
 
         target = store.converted_path(sha)
-        if target.is_file():
+        if cache_valid(target):
             return {
                 "sha": sha,
                 "url": f"/models/{sha}.ifcx",
                 "bytes": target.stat().st_size,
                 "cached": True,
             }
-        staging = target.with_suffix(".ifcx.part")
+        staging = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
 
         def update(percent: int, meshes: int) -> None:
             progress(
@@ -659,7 +659,8 @@ class CoreProvider:
 
         try:
             stats = convert(source, staging, update)
-            staging.replace(target)
+            store.commit_staging(staging, target, keep={sha})
+            mark_cache(target)
         except Exception:
             staging.unlink(missing_ok=True)
             raise

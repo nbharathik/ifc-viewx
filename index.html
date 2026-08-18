@@ -7,7 +7,15 @@
     <title>IFCViewX</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64' width='64' height='64' role='img' aria-label='IFCViewX'><rect x='0.00' y='0.00' width='64.00' height='64.00' rx='14.40' fill='%230f1115'/><polygon points='9.28%2C45.12 32.00%2C58.24 32.00%2C32.00 9.28%2C18.88' fill='%233b82f6'/><polygon points='54.72%2C45.12 32.00%2C58.24 32.00%2C32.00 54.72%2C18.88' fill='%231e5bd0'/><polygon points='32.00%2C5.76 54.72%2C18.88 32.00%2C32.00 9.28%2C18.88' fill='%2393b9fb'/><polyline points='54.72%2C32.00 32.00%2C45.12' stroke='%233b82f6' stroke-width='3.20' fill='none'/><polyline points='9.28%2C32.00 32.00%2C45.12' stroke='%2393b9fb' stroke-width='3.20' fill='none'/></svg>" />
     <script>
-      document.documentElement.dataset.theme = localStorage.getItem("ifcviewx.theme") || "dark";
+      // Storage can be unavailable in privacy-restricted or sandboxed tabs. A
+      // blocked preference must not stop the application module from loading.
+      let initialTheme = "dark";
+      try {
+        if (localStorage.getItem("ifcviewx.theme") === "light") initialTheme = "light";
+      } catch {
+        // Keep the deterministic default.
+      }
+      document.documentElement.dataset.theme = initialTheme;
     </script>
     <style>
       /* The brand lives here, not in styles.css, because the splash paints

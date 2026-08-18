@@ -4,7 +4,17 @@
 //
 // Collapsed, the strip takes no height. Selecting a tab expands it in place,
 // so the controls always stay attached to the header. The choice persists.
-import { buildMenu, closeLayer, h, icon, menuKeys, openLayer, type MenuItem } from "./kit.js";
+import {
+  buildMenu,
+  closeLayer,
+  h,
+  icon,
+  menuKeys,
+  openLayer,
+  safeStorageGet,
+  safeStorageSet,
+  type MenuItem,
+} from "./kit.js";
 import type { CommandRegistry } from "./commands.js";
 
 export interface RibbonControl {
@@ -48,7 +58,7 @@ export class Ribbon {
   private readonly controls: RibbonControl[] = [];
   private readonly toggleBtn: HTMLButtonElement;
   private active: string;
-  private collapsed = localStorage.getItem(COLLAPSE_KEY) === "1";
+  private collapsed = safeStorageGet(COLLAPSE_KEY) === "1";
 
   constructor(
     tabHost: HTMLElement,
@@ -56,6 +66,8 @@ export class Ribbon {
     private readonly registry: CommandRegistry,
     private readonly tabs: RibbonTab[],
   ) {
+    if (!tabHost.hasAttribute("role")) tabHost.setAttribute("role", "tablist");
+    if (!tabHost.hasAttribute("aria-label")) tabHost.setAttribute("aria-label", "Ribbon");
     this.strip = h("div", { class: "rib-strip" });
     this.body.appendChild(this.strip);
 
@@ -67,9 +79,11 @@ export class Ribbon {
         text: tab.label,
         "aria-selected": "false",
         "aria-controls": "ribbon",
+        tabindex: "-1",
       });
       button.addEventListener("click", () => this.onTabClick(tab.id));
       button.addEventListener("dblclick", () => this.setCollapsed(!this.collapsed));
+      button.addEventListener("keydown", (e) => this.onTabKey(e, tab.id));
       this.tabButtons.set(tab.id, button);
       tabHost.appendChild(button);
     }
@@ -83,7 +97,7 @@ export class Ribbon {
     this.toggleBtn.addEventListener("click", () => this.setCollapsed(!this.collapsed));
     tabHost.appendChild(this.toggleBtn);
 
-    const stored = localStorage.getItem(TAB_KEY);
+    const stored = safeStorageGet(TAB_KEY);
     this.active = tabs.some((t) => t.id === stored) ? stored! : tabs[0].id;
     this.render();
     this.paintCollapsed();
@@ -93,7 +107,7 @@ export class Ribbon {
   select(id: string, viaTab = false): void {
     if (this.active !== id) {
       this.active = id;
-      localStorage.setItem(TAB_KEY, id);
+      safeStorageSet(TAB_KEY, id);
       this.render();
     }
     if (this.collapsed && viaTab) this.setCollapsed(false);
@@ -105,7 +119,7 @@ export class Ribbon {
 
   setCollapsed(collapsed: boolean): void {
     this.collapsed = collapsed;
-    localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0");
+    safeStorageSet(COLLAPSE_KEY, collapsed ? "1" : "0");
     closeLayer();
     this.paintCollapsed();
   }
@@ -130,10 +144,27 @@ export class Ribbon {
     this.select(id, true);
   }
 
+  /** Roving focus keeps the tab strip to one stop while arrows switch tabs. */
+  private onTabKey(e: KeyboardEvent, id: string): void {
+    const at = this.tabs.findIndex((tab) => tab.id === id);
+    const next =
+      e.key === "ArrowRight" ? (at + 1) % this.tabs.length
+      : e.key === "ArrowLeft" ? (at - 1 + this.tabs.length) % this.tabs.length
+      : e.key === "Home" ? 0
+      : e.key === "End" ? this.tabs.length - 1
+      : -1;
+    if (at < 0 || next < 0) return;
+    e.preventDefault();
+    const tab = this.tabs[next];
+    this.select(tab.id, true);
+    this.tabButtons.get(tab.id)?.focus();
+  }
+
   private paintCollapsed(): void {
     this.body.classList.toggle("collapsed", this.collapsed);
     this.toggleBtn.classList.toggle("up", this.collapsed);
     this.toggleBtn.setAttribute("aria-expanded", String(!this.collapsed));
+    this.body.setAttribute("aria-hidden", String(this.collapsed));
     this.toggleBtn.title = this.collapsed ? "Pin the ribbon  Ctrl+F1" : "Collapse the ribbon  Ctrl+F1";
   }
 
@@ -143,7 +174,9 @@ export class Ribbon {
       const on = id === tab.id;
       button.classList.toggle("active", on);
       button.setAttribute("aria-selected", String(on));
+      button.tabIndex = on ? 0 : -1;
     }
+    this.body.setAttribute("aria-label", tab.label);
     this.bound.length = 0;
     this.controls.length = 0;
 

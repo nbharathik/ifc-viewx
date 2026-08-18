@@ -78,7 +78,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   const tabs = h("div", { class: "seg plug-seg cmp-filters" });
   const detailHost = h("div", { class: "cmp-detail-host" });
   const listHost = h("div", { class: "plug-results cmp-results" });
-  const search = h("input", { class: "plug-search-input", type: "search", placeholder: "Filter class, name, level or GlobalId", spellcheck: "false" });
+  const search = h("input", { class: "plug-search-input", type: "search", placeholder: "Filter class, name, level or GlobalId", spellcheck: "false", "aria-label": "Filter by class, name, level, or GlobalId" });
   const picker = h("input", { type: "file", accept: ".ifc,.ifcx", class: "hidden" });
   const beforeLabel = h("span", { class: "cmp-revision before", text: "A  baseline" });
   const afterLabel = h("span", { class: "cmp-revision after", text: "B  open model" });

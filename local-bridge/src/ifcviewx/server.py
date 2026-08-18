@@ -21,6 +21,7 @@ Run:  ifcviewx mcp   (configure exactly that as an MCP server in your client)
 
 import hashlib
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +45,7 @@ def _call(method: str, **params: Any) -> Any:
         return {"error": "no_browser", "message": str(exc)}
     except TimeoutError:
         return {"error": "timeout", "message": f"{method} timed out waiting for the browser"}
-    except Exception as exc:  # noqa: BLE001: tools never raise to the client
+    except Exception as exc:  # noqa: BLE001 - tools never raise to the client
         return {"error": "bridge_error", "message": str(exc)}
 
 
@@ -381,9 +382,12 @@ def convert_model(path: str) -> dict:
     Only .ifc/.ifczip files are read, and only under IFCVIEWX_ROOTS when that
     is configured.
     """
-    from .convert import convert
+    from .convert import cache_valid, mark_cache
+    from .sandbox import run
 
     config = settings()
+    if config.readonly:
+        return {"error": "readonly", "message": "this service is running read-only"}
     source = Path(path).expanduser()
     try:
         source = source.resolve(strict=True)
@@ -414,22 +418,51 @@ def convert_model(path: str) -> dict:
     sha = digest.hexdigest()
     target = store.converted_path(sha)
     audit.record("convert.mcp", path=str(source), sha=sha[:12])
-    if target.is_file():
+    if cache_valid(target):
         return {"sha": sha, "url": f"/models/{sha}.ifcx", "stats": {"cached": True}}
-    staging = target.with_suffix(".ifcx.part")
+    staging = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
     try:
-        stats = convert(source, staging)
+        outcome = run(
+            "convert",
+            {"model": str(source), "out": str(staging)},
+            config.convert_timeout_s,
+            config.memory_bytes,
+        )
+        if outcome.get("error"):
+            staging.unlink(missing_ok=True)
+            return {
+                "error": str(outcome["error"]),
+                "message": str(outcome.get("message", "conversion failed")),
+            }
+        stats = outcome.get("stats") or {}
+        store.commit_staging(staging, target, keep={sha})
+        mark_cache(target)
+    except store.StoreError as exc:
+        staging.unlink(missing_ok=True)
+        return {"error": exc.code, "message": exc.message}
     except Exception as exc:  # noqa: BLE001 - reported to the client
         staging.unlink(missing_ok=True)
         return {"error": "convert_failed", "message": str(exc)}
-    staging.replace(target)
     return {"sha": sha, "url": f"/models/{sha}.ifcx", "stats": stats}
 
 
 @mcp.tool()
 def list_converted_models() -> dict:
     """List models already converted to .ifcx on this machine, newest first."""
-    return {"models": [e.as_dict() for e in store.entries() if e.kind == "ifcx"][:50]}
+    from .convert import cache_valid, is_valid_ifcx
+
+    models = []
+    for entry in store.entries():
+        if entry.kind != "ifcx":
+            continue
+        target = store.converted_path(entry.sha)
+        source_backed = store.source_path(entry.sha).is_file()
+        valid = cache_valid(target) if source_backed else is_valid_ifcx(target)
+        if valid:
+            models.append(entry.as_dict())
+        if len(models) == 50:
+            break
+    return {"models": models}
 
 
 @mcp.tool()

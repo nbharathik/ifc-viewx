@@ -229,6 +229,7 @@ export class FilterPanel {
     type: "search",
     placeholder: "Filter by class, storey or name",
     spellcheck: "false",
+    "aria-label": "Filter elements by class, storey, or name",
   });
   private readonly setName = h("input", { type: "text", placeholder: "Pset (blank searches all of them)", "aria-label": "Property set" });
   private readonly propName = h("input", { type: "text", placeholder: "Property", "aria-label": "Property name" });

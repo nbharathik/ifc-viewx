@@ -63,8 +63,14 @@ def _terminate(process: subprocess.Popen) -> None:
 def _provider_env() -> dict[str, str]:
     config = settings()
     env = child_env()
+    private_home = config.state_dir / "provider-home"
+    private_home.mkdir(parents=True, exist_ok=True)
     env.update(
         {
+            "HOME": str(private_home),
+            "USERPROFILE": str(private_home),
+            "APPDATA": str(private_home),
+            "LOCALAPPDATA": str(private_home),
             "IFCVIEWX_MODELS": str(config.store_dir),
             "IFCVIEWX_STATE": str(config.state_dir),
             "IFCVIEWX_ALLOW_PYTHON": "1" if config.allow_python else "0",
@@ -93,9 +99,15 @@ def run_provider_process(
     stderr_tail: deque[str] = deque(maxlen=8)
     max_line = max(1024 * 1024, settings().max_output_chars * 8)
     max_stream = max_line * 4
+    package_root = str(Path(__file__).resolve().parents[1])
+    bootstrap = (
+        "import sys;"
+        f"sys.path.insert(0,{package_root!r});"
+        "from ifcviewx.provider_runner import _main;_main()"
+    )
     try:
         process = subprocess.Popen(
-            [sys.executable, "-B", "-m", "ifcviewx.provider_runner"],
+            [sys.executable, "-I", "-B", "-c", bootstrap],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

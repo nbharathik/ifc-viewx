@@ -8,6 +8,8 @@ IFCVIEWX_LLM_MULTIMODAL is explicitly enabled.
 from __future__ import annotations
 
 import json
+import re
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -20,6 +22,11 @@ MAX_MESSAGES = 80
 MAX_CHARS = 4_000_000
 MAX_TOOLS = 96
 MAX_TOKENS = 16_384
+MAX_SYSTEM_MESSAGES = 8
+MAX_PROVIDER_BYTES = 16 * 1024 * 1024
+MAX_EVENT_LINE_BYTES = 1024 * 1024
+MAX_RESPONSE_CHARS = 4_000_000
+MAX_TOOL_ARGUMENT_CHARS = 1_000_000
 ANTHROPIC_VERSION = "2023-06-01"
 
 
@@ -77,12 +84,24 @@ def _request(url: str, headers: dict[str, str], body: dict[str, Any]):
 
 def _post(url: str, headers: dict[str, str], body: dict[str, Any]) -> dict[str, Any]:
     with _request(url, headers, body) as response:
-        return json.loads(response.read().decode("utf-8", "replace"))
+        raw = response.read(MAX_PROVIDER_BYTES + 1)
+        if len(raw) > MAX_PROVIDER_BYTES:
+            raise ValueError("the assistant provider response exceeds the proxy size limit")
+        data = json.loads(raw.decode("utf-8", "replace"))
+        if not isinstance(data, dict):
+            raise ValueError("the assistant provider returned a non-object response")
+        return data
 
 
 def _clean_messages(messages: list[dict[str, Any]], multimodal: bool) -> list[dict[str, Any]]:
+    system = [raw for raw in messages if isinstance(raw, dict) and raw.get("role") == "system"]
+    if len(system) > MAX_SYSTEM_MESSAGES:
+        half = MAX_SYSTEM_MESSAGES // 2
+        system = [*system[:half], *system[-half:]]
+    turns = [raw for raw in messages if not (isinstance(raw, dict) and raw.get("role") == "system")]
+    selected = [*system, *turns[-(MAX_MESSAGES - len(system)):]]
     clean: list[dict[str, Any]] = []
-    for raw in messages[-MAX_MESSAGES:]:
+    for raw in selected:
         if not isinstance(raw, dict):
             continue
         message: dict[str, Any] = {
@@ -231,7 +250,10 @@ def _payload(
     model: str | None,
     stream: bool,
 ) -> tuple[str, dict[str, str], dict[str, Any]]:
-    target = model or settings["model"]
+    raw_target = model if model is not None else settings["model"]
+    if not isinstance(raw_target, str) or not raw_target.strip():
+        raise ValueError("the assistant model must be a non-empty string")
+    target = raw_target.strip()
     if settings["provider"] == "anthropic":
         system, turns = _anthropic_messages(clean)
         body: dict[str, Any] = {
@@ -256,9 +278,14 @@ def _payload(
             {"x-api-key": settings["key"], "anthropic-version": ANTHROPIC_VERSION},
             body,
         )
+    token_field = (
+        "max_completion_tokens"
+        if re.match(r"^(?:gpt-5(?:[.-]|$)|o[134](?:[.-]|$))", target, re.IGNORECASE)
+        else "max_tokens"
+    )
     body = {
         "model": target,
-        "max_tokens": MAX_TOKENS,
+        token_field: MAX_TOKENS,
         "messages": _openai_messages(clean),
         "stream": stream,
     }
@@ -283,6 +310,10 @@ def _payload(
 def _turn_from_data(provider: str, data: dict[str, Any], offered: bool) -> dict[str, Any]:
     if provider == "anthropic":
         blocks = data.get("content") or []
+        for block in blocks:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                if len(json.dumps(block.get("input") or {})) > MAX_TOOL_ARGUMENT_CHARS:
+                    raise ValueError("assistant tool arguments exceed the proxy size limit")
         calls = [
             {
                 "id": str(block.get("id", "")),
@@ -293,12 +324,15 @@ def _turn_from_data(provider: str, data: dict[str, Any], offered: bool) -> dict[
             if isinstance(block, dict) and block.get("type") == "tool_use"
         ]
         usage = data.get("usage") or {}
-        return {
-            "content": "".join(
+        content = "".join(
                 str(block.get("text", ""))
                 for block in blocks
                 if isinstance(block, dict) and block.get("type") == "text"
-            ),
+            )
+        if len(content) > MAX_RESPONSE_CHARS:
+            raise ValueError("the assistant provider text exceeds the proxy size limit")
+        return {
+            "content": content,
             "calls": calls,
             "toolsUsed": offered,
             "usage": {
@@ -312,8 +346,11 @@ def _turn_from_data(provider: str, data: dict[str, Any], offered: bool) -> dict[
     calls = []
     for call in message.get("tool_calls") or []:
         function = call.get("function") or {}
+        arguments = str(function.get("arguments") or "{}")
+        if len(arguments) > MAX_TOOL_ARGUMENT_CHARS:
+            raise ValueError("assistant tool arguments exceed the proxy size limit")
         try:
-            inputs = json.loads(function.get("arguments") or "{}")
+            inputs = json.loads(arguments)
         except ValueError:
             inputs = {}
         calls.append(
@@ -324,8 +361,11 @@ def _turn_from_data(provider: str, data: dict[str, Any], offered: bool) -> dict[
             }
         )
     usage = data.get("usage") or {}
+    content = str(message.get("content") or "")
+    if len(content) > MAX_RESPONSE_CHARS:
+        raise ValueError("the assistant provider text exceeds the proxy size limit")
     return {
-        "content": str(message.get("content") or ""),
+        "content": content,
         "calls": calls,
         "toolsUsed": offered,
         "usage": {
@@ -353,7 +393,7 @@ def chat_turn(
         data = _post(url, headers, body)
         return _turn_from_data(settings["provider"], data, bool(offered))
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:300]
+        detail = exc.read(4096).decode("utf-8", "replace")[:300]
         if tools and exc.code in {400, 404} and any(word in detail.lower() for word in ("tool", "function")):
             return {"content": "", "calls": [], "toolsUsed": False}
         return {"error": "provider_error", "message": f"HTTP {exc.code}: {detail}"}
@@ -363,13 +403,37 @@ def chat_turn(
         return {"error": "bad_request", "message": str(exc)}
 
 
-def _data_events(response) -> Iterator[dict[str, Any]]:
+def _response_lines(response) -> Iterator[bytes]:
+    readline = getattr(response, "readline", None)
+    if callable(readline):
+        while raw := readline(MAX_EVENT_LINE_BYTES + 1):
+            if len(raw) > MAX_EVENT_LINE_BYTES:
+                raise ValueError("an assistant provider stream event exceeds the size limit")
+            yield raw
+        return
     for raw in response:
+        if len(raw) > MAX_EVENT_LINE_BYTES:
+            raise ValueError("an assistant provider stream event exceeds the size limit")
+        yield raw
+
+
+def _data_events(response) -> Iterator[dict[str, Any]]:
+    started = time.monotonic()
+    total = 0
+    for raw in _response_lines(response):
+        total += len(raw)
+        if total > MAX_PROVIDER_BYTES:
+            raise ValueError("the assistant provider stream exceeds the proxy size limit")
+        if time.monotonic() - started > TIMEOUT_S:
+            raise TimeoutError("the assistant provider stream exceeded its wall-time limit")
         line = raw.decode("utf-8", "replace").strip()
         if not line.startswith("data:"):
             continue
         payload = line[5:].strip()
-        if not payload or payload == "[DONE]":
+        if not payload:
+            continue
+        if payload == "[DONE]":
+            yield {"_ifcviewx_done": True}
             continue
         try:
             event = json.loads(payload)
@@ -380,10 +444,15 @@ def _data_events(response) -> Iterator[dict[str, Any]]:
 
 
 def _stream_openai(response, offered: bool) -> Iterator[dict[str, Any]]:
-    text = ""
+    text_parts: list[str] = []
+    text_chars = 0
     calls: dict[int, dict[str, str]] = {}
     usage = {"input": 0, "output": 0}
+    terminal = False
     for event in _data_events(response):
+        if event.get("_ifcviewx_done"):
+            terminal = True
+            continue
         raw_usage = event.get("usage") or {}
         if raw_usage:
             usage = {
@@ -391,11 +460,17 @@ def _stream_openai(response, offered: bool) -> Iterator[dict[str, Any]]:
                 "output": int(raw_usage.get("completion_tokens") or 0),
             }
         for choice in event.get("choices") or []:
+            if choice.get("finish_reason") is not None:
+                terminal = True
             delta = choice.get("delta") or {}
             chunk = delta.get("content")
             if chunk:
-                text += str(chunk)
-                yield {"type": "text_delta", "delta": str(chunk)}
+                value = str(chunk)
+                text_chars += len(value)
+                if text_chars > MAX_RESPONSE_CHARS:
+                    raise ValueError("the assistant provider text exceeds the proxy size limit")
+                text_parts.append(value)
+                yield {"type": "text_delta", "delta": value}
             for part in delta.get("tool_calls") or []:
                 index = int(part.get("index") or 0)
                 target = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
@@ -405,7 +480,12 @@ def _stream_openai(response, offered: bool) -> Iterator[dict[str, Any]]:
                 if function.get("name"):
                     target["name"] += str(function["name"])
                 if function.get("arguments"):
-                    target["arguments"] += str(function["arguments"])
+                    argument_chunk = str(function["arguments"])
+                    if len(target["arguments"]) + len(argument_chunk) > MAX_TOOL_ARGUMENT_CHARS:
+                        raise ValueError("assistant tool arguments exceed the proxy size limit")
+                    target["arguments"] += argument_chunk
+    if not terminal:
+        raise ValueError("the assistant provider stream ended before its terminal event")
     normalized = []
     for call in calls.values():
         try:
@@ -419,15 +499,19 @@ def _stream_openai(response, offered: bool) -> Iterator[dict[str, Any]]:
         yield {"type": "tool_call", "call": call}
     if usage["input"] or usage["output"]:
         yield {"type": "usage", "usage": usage}
-    yield {"type": "done", "text": text, "calls": normalized, "toolsUsed": offered}
+    yield {"type": "done", "text": "".join(text_parts), "calls": normalized, "toolsUsed": offered}
 
 
 def _stream_anthropic(response, offered: bool) -> Iterator[dict[str, Any]]:
-    text = ""
+    text_parts: list[str] = []
+    text_chars = 0
     calls: dict[int, dict[str, str]] = {}
     usage = {"input": 0, "output": 0}
+    terminal = False
     for event in _data_events(response):
         kind = event.get("type")
+        if kind == "message_stop":
+            terminal = True
         if kind == "error":
             error = event.get("error") or {}
             yield {"type": "error", "message": str(error.get("message") or "provider stream failed")}
@@ -450,13 +534,20 @@ def _stream_anthropic(response, offered: bool) -> Iterator[dict[str, Any]]:
             delta = event.get("delta") or {}
             if delta.get("type") == "text_delta" and delta.get("text"):
                 chunk = str(delta["text"])
-                text += chunk
+                text_chars += len(chunk)
+                if text_chars > MAX_RESPONSE_CHARS:
+                    raise ValueError("the assistant provider text exceeds the proxy size limit")
+                text_parts.append(chunk)
                 yield {"type": "text_delta", "delta": chunk}
             if delta.get("type") == "input_json_delta":
                 index = int(event.get("index") or 0)
-                calls.setdefault(index, {"id": "", "name": "", "arguments": ""})["arguments"] += str(
-                    delta.get("partial_json") or ""
-                )
+                target = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                argument_chunk = str(delta.get("partial_json") or "")
+                if len(target["arguments"]) + len(argument_chunk) > MAX_TOOL_ARGUMENT_CHARS:
+                    raise ValueError("assistant tool arguments exceed the proxy size limit")
+                target["arguments"] += argument_chunk
+    if not terminal:
+        raise ValueError("the assistant provider stream ended before its terminal event")
     normalized = []
     for call in calls.values():
         try:
@@ -468,7 +559,7 @@ def _stream_anthropic(response, offered: bool) -> Iterator[dict[str, Any]]:
         yield {"type": "tool_call", "call": call}
     if usage["input"] or usage["output"]:
         yield {"type": "usage", "usage": usage}
-    yield {"type": "done", "text": text, "calls": normalized, "toolsUsed": offered}
+    yield {"type": "done", "text": "".join(text_parts), "calls": normalized, "toolsUsed": offered}
 
 
 def stream_chat(
@@ -487,7 +578,12 @@ def stream_chat(
         with _request(url, headers, body) as response:
             content_type = response.headers.get("content-type", "")
             if "text/event-stream" not in content_type:
-                data = json.loads(response.read().decode("utf-8", "replace"))
+                raw = response.read(MAX_PROVIDER_BYTES + 1)
+                if len(raw) > MAX_PROVIDER_BYTES:
+                    raise ValueError("the assistant provider response exceeds the proxy size limit")
+                data = json.loads(raw.decode("utf-8", "replace"))
+                if not isinstance(data, dict):
+                    raise ValueError("the assistant provider returned a non-object response")
                 turn = _turn_from_data(settings["provider"], data, bool(offered))
                 if turn["content"]:
                     yield {"type": "text_delta", "delta": turn["content"]}
@@ -501,7 +597,7 @@ def stream_chat(
             else:
                 yield from _stream_openai(response, bool(offered))
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:300]
+        detail = exc.read(4096).decode("utf-8", "replace")[:300]
         if tools and exc.code in {400, 404} and any(word in detail.lower() for word in ("tool", "function")):
             yield {"type": "done", "text": "", "calls": [], "toolsUsed": False}
             return

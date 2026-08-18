@@ -19,6 +19,7 @@ import os
 import sys
 import time
 import urllib.request
+import uuid
 import webbrowser
 from importlib.util import find_spec
 from pathlib import Path
@@ -45,25 +46,36 @@ def _stage(path: Path) -> tuple[str, str]:
         sys.exit(f"ifcviewx: cannot read {path}: {exc}")
     sha = hashlib.sha256(data).hexdigest()
     if data.startswith(b"IFCX"):
+        from .convert import is_valid_ifcx_bytes
+
+        if not is_valid_ifcx_bytes(data):
+            sys.exit(f"ifcviewx: {path.name} is a corrupt or unsupported .ifcx file")
         target = store.converted_path(sha)
     elif store.looks_like_ifc(data[: store.SNIFF_BYTES]):
         target = store.source_path(sha)
     else:
         sys.exit(f"ifcviewx: {path.name} is not an IFC (STEP) or .ifcx file")
     if not target.is_file():
+        staging = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
         try:
             store.require_space(len(data))
+            staging.write_bytes(data)
+            store.commit_staging(staging, target, keep={sha})
         except store.StoreError as exc:
             sys.exit(f"ifcviewx: {exc.message}")
-        target.write_bytes(data)
+        except OSError as exc:
+            sys.exit(f"ifcviewx: cannot stage {path}: {exc}")
+        finally:
+            staging.unlink(missing_ok=True)
     return sha, path.name
 
 
 def _convert_now(source: Path, sha: str) -> None:
     from . import store
+    from .convert import cache_valid, mark_cache
 
     target = store.converted_path(sha)
-    if target.is_file():
+    if cache_valid(target):
         return
     if find_spec("ifcopenshell") is None:
         sys.exit("ifcviewx: --convert needs IfcOpenShell, which this Python does not have: pip install ifcopenshell")
@@ -72,10 +84,11 @@ def _convert_now(source: Path, sha: str) -> None:
     def report(percent: int, meshes: int) -> None:
         print(f"\r  converting  {percent:3d}%  {meshes} meshes", end="", flush=True)
 
-    staging = target.with_suffix(".ifcx.part")
+    staging = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
     try:
         stats = convert(source, staging, report)
-        staging.replace(target)
+        store.commit_staging(staging, target, keep={sha})
+        mark_cache(target)
     except Exception as exc:  # noqa: BLE001 - the message is the product
         sys.exit(f"\nifcviewx: conversion failed: {exc}")
     finally:
@@ -123,20 +136,39 @@ def main() -> None:
     if args.no_python:
         os.environ["IFCVIEWX_ALLOW_PYTHON"] = "0"
 
-    from .config import settings
+    from .config import reset, settings
 
+    # ``main`` is also used as an embeddable entry point.  Re-read settings
+    # after applying command-line overrides in case the host imported config
+    # before invoking us.
+    reset()
     config = settings()
+    if args.convert and config.readonly:
+        sys.exit("ifcviewx: --convert is unavailable in read-only mode")
     running = _health(config.port)
     if running == {}:
         sys.exit(f"ifcviewx: port {config.port} is used by another program (try --port)")
 
     url = f"http://127.0.0.1:{config.port}/"
     if args.model is not None:
+        from . import store
+
         source = args.model.expanduser()
+        try:
+            with source.open("rb") as model_file:
+                is_ifczip = model_file.read(len(store.ZIP_MAGIC)) == store.ZIP_MAGIC
+        except OSError:
+            # _stage produces the single, user-facing read error below.
+            is_ifczip = False
+        if is_ifczip and config.readonly:
+            sys.exit("ifcviewx: IFCZIP conversion is unavailable in read-only mode")
         sha, name = _stage(source)
-        if args.convert:
+        # IFCZIP is a conversion input, not a browser format. Convert it
+        # automatically so the long-supported CLI workflow opens successfully.
+        if (args.convert or is_ifczip) and store.source_path(sha).is_file():
             _convert_now(source, sha)
-        url += f"?open={sha}&name={quote(name)}"
+        has_source = "1" if store.source_path(sha).is_file() else "0"
+        url += f"?open={sha}&name={quote(name)}&source={has_source}"
 
     if running:
         print(f"Local Studio is already running  {url}")

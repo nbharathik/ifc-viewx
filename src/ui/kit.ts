@@ -22,6 +22,40 @@ export function h<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+/** Browser storage is optional in sandboxed/private contexts; UI state is not. */
+export function safeStorageGet(key: string): string | null {
+  try {
+    return globalThis.localStorage?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function safeStorageSet(key: string, value: string): boolean {
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage) return false;
+    storage.setItem(key, value);
+    return true;
+  } catch {
+    // Callers decide whether this preference failure is benign or a durable
+    // operation must remain pending and surface the error.
+    return false;
+  }
+}
+
+export async function copyText(text: string, success = "Copied"): Promise<boolean> {
+  try {
+    if (!globalThis.navigator?.clipboard) throw new Error("clipboard unavailable");
+    await globalThis.navigator.clipboard.writeText(text);
+    toast(success, "success");
+    return true;
+  } catch {
+    toast("The browser blocked the clipboard", "error");
+    return false;
+  }
+}
+
 /** lucide-style stroke icons on a 24x24 grid, inheriting currentColor. */
 const PATHS: Record<string, string> = {
   cube: '<path d="m12 2 9 5v10l-9 5-9-5V7Z"/><path d="m3 7 9 5 9-5M12 12v10"/>',
@@ -276,13 +310,17 @@ const TOAST_ICON = { info: "info", success: "check-circle", error: "alert" } as 
 let toastHost: HTMLElement | null = null;
 
 export function toast(message: string, kind: "info" | "success" | "error" = "info"): void {
-  toastHost ??= h("div", { id: "toasts" });
+  toastHost ??= h("div", { id: "toasts", role: "region", "aria-label": "Notifications" });
   // A modal dialog paints in the top layer, so a toast parked on <body> would
   // sit behind its backdrop. It rides with whatever is on top instead.
   const owner = document.querySelector<HTMLElement>("dialog[open]") ?? document.body;
   if (toastHost.parentElement !== owner) owner.appendChild(toastHost);
   while (toastHost.childElementCount > 2) toastHost.firstElementChild?.remove();
-  const node = h("div", { class: `toast ${kind}` }, [icon(TOAST_ICON[kind], 14), h("span", { text: message })]);
+  const node = h("div", {
+    class: `toast ${kind}`,
+    role: kind === "error" ? "alert" : "status",
+    "aria-atomic": "true",
+  }, [icon(TOAST_ICON[kind], 14), h("span", { text: message })]);
   const remove = (): void => node.remove();
   node.addEventListener("click", remove);
   toastHost.appendChild(node);
@@ -310,7 +348,7 @@ export function promptForm(
   confirmLabel: string,
   onSubmit: (values: Record<string, string>) => void,
 ): void {
-  const dialog = h("dialog", { class: "form-dialog" });
+  const dialog = h("dialog", { class: "form-dialog", "aria-label": title });
   const inputs = new Map<string, HTMLInputElement | HTMLSelectElement>();
   const body = h("div", { class: "dlg-body" });
   for (const field of fields) {
@@ -509,7 +547,8 @@ export function attachPopover(
     }
     // Before the panel is measured, so a host can make room for it.
     onToggle?.(true);
-    const pop = h("div", { class: `pop ${side}`, role: "dialog" });
+    const label = button.getAttribute("aria-label") || button.title || button.textContent?.trim() || "Options";
+    const pop = h("div", { class: `pop ${side}`, role: "dialog", "aria-label": label });
     build(pop, () => (isPinned ? closePinned() : closeLayer()));
     item.appendChild(pop);
     button.setAttribute("aria-expanded", "true");
@@ -642,9 +681,19 @@ export class CommandPalette {
       type: "text",
       placeholder: "Search commands and element classes",
       spellcheck: "false",
+      role: "combobox",
+      "aria-label": "Search commands",
+      "aria-autocomplete": "list",
+      "aria-controls": "palette-list",
+      "aria-expanded": "true",
     });
-    const list = h("div", { id: "palette-list" });
-    const panel = h("div", { id: "palette", role: "dialog", "aria-modal": "true" }, [
+    const list = h("div", { id: "palette-list", role: "listbox", "aria-label": "Commands" });
+    const panel = h("div", {
+      id: "palette",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-label": "Command palette",
+    }, [
       h("div", { class: "pal-input" }, [icon("search", 15), input]),
       list,
     ]);
@@ -678,11 +727,14 @@ export class CommandPalette {
         // unfiltered list carries section headings.
         if (!query && command.section !== section) {
           section = command.section;
-          frag.appendChild(h("div", { class: "pal-section", text: section }));
+          frag.appendChild(h("div", { class: "pal-section", text: section, role: "presentation" }));
         }
         const item = h("button", {
           class: `pal-item${index === this.cursor ? " active" : ""}`,
           type: "button",
+          id: `palette-option-${index}`,
+          role: "option",
+          "aria-selected": String(index === this.cursor),
         }, [icon(command.icon ?? "command", 14), h("span", { class: "grow", text: command.label })]);
         if (query) item.appendChild(h("span", { class: "sec", text: command.section }));
         if (command.sub) item.appendChild(h("span", { class: "sub", text: command.sub }));
@@ -692,10 +744,13 @@ export class CommandPalette {
         frag.appendChild(item);
       });
       if (this.matches.length === 0) {
-        frag.appendChild(h("div", { class: "pal-section", text: "No matches" }));
+        frag.appendChild(h("div", { class: "pal-section", text: "No matches", role: "status" }));
       }
       list.replaceChildren(frag);
-      (active as HTMLElement | null)?.scrollIntoView({ block: "nearest" });
+      const activeItem = active as HTMLElement | null;
+      if (activeItem) input.setAttribute("aria-activedescendant", activeItem.id);
+      else input.removeAttribute("aria-activedescendant");
+      activeItem?.scrollIntoView({ block: "nearest" });
     };
 
     input.addEventListener("input", () => {
@@ -762,7 +817,7 @@ export function makeResizer(options: {
   max: number;
 }): void {
   const { host, side, cssVar, storageKey, min, max } = options;
-  const stored = Number(localStorage.getItem(storageKey));
+  const stored = Number(safeStorageGet(storageKey));
   const clamp = (n: number): number => Math.min(max, Math.max(min, n));
   if (Number.isFinite(stored) && stored > 0) {
     document.documentElement.style.setProperty(cssVar, `${clamp(stored)}px`);
@@ -791,7 +846,9 @@ export function makeResizer(options: {
   };
   // Persist the clamped target, not a re-measure: the CSS write is deferred to
   // a frame, so measuring here would store a width one step behind.
-  const persist = (): void => localStorage.setItem(storageKey, String(Math.round(target)));
+  const persist = (): void => {
+    safeStorageSet(storageKey, String(Math.round(target)));
+  };
 
   handle.addEventListener("pointerdown", (e) => {
     e.preventDefault();

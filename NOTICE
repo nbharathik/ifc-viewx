@@ -6,9 +6,10 @@ Licensed under the Apache License, Version 2.0.
 This product depends on third-party packages distributed under their own
 licenses, none of which are bundled as source in this repository:
 
-- three (MIT), three-mesh-bvh (MIT), fflate (MIT), exceljs (MIT): npm
+- three (MIT), three-mesh-bvh (MIT), and fflate (MIT): npm
   dependencies.
 - web-ifc (MPL-2.0): used as an unmodified npm dependency.
-- Pyodide (MPL-2.0) and IfcOpenShell (LGPL-3.0): optional runtime downloads,
-  loaded as separate artifacts when the Python features are used; never
-  bundled into the viewer build.
+- Pyodide (MPL-2.0): an optional runtime download loaded as a separate artifact
+  when browser Python features are used; never bundled into the viewer build.
+- IfcOpenShell (LGPL-3.0): installed as a separate, marker-gated Python
+  dependency of Local Studio; never bundled into the browser viewer build.

@@ -3,7 +3,16 @@
 // of the viewport floor. Each icon opens its options sideways, next to itself.
 // It reads and writes the viewer directly, so no tool state is mirrored
 // anywhere else.
-import { attachPopover, busyRow, h, icon, iconButton, toast } from "./kit.js";
+import {
+  attachPopover,
+  busyRow,
+  h,
+  icon,
+  iconButton,
+  safeStorageGet,
+  safeStorageSet,
+  toast,
+} from "./kit.js";
 import { applyColors, colorableKeys, computeColors, computeColorsFromEntries, cssColor, CustomColors, materialColorEntries, type ColorResult, type ColorRule } from "./colorBy.js";
 import { formatArea, formatLength, formatVolume, formatWeight } from "../viewer-core/viewer.js";
 import type { PropertyIndex } from "../sdk/data.js";
@@ -129,7 +138,7 @@ export function measurementKey(viewer: Viewer): string | null {
 
 export function readMeasurements(key: string): MeasurementState[] {
   try {
-    const parsed = JSON.parse(localStorage.getItem(key) ?? "[]") as unknown;
+    const parsed = JSON.parse(safeStorageGet(key) ?? "[]") as unknown;
     return Array.isArray(parsed) ? parsed as MeasurementState[] : [];
   } catch {
     return [];
@@ -143,7 +152,7 @@ export function annotationKey(viewer: Viewer): string | null {
 
 export function readAnnotations(key: string): AnnotationState[] {
   try {
-    const parsed = JSON.parse(localStorage.getItem(key) ?? "[]") as unknown;
+    const parsed = JSON.parse(safeStorageGet(key) ?? "[]") as unknown;
     return Array.isArray(parsed) ? parsed as AnnotationState[] : [];
   } catch {
     return [];
@@ -166,7 +175,7 @@ export function selectionSetKey(viewer: Viewer): string | null {
 
 export function readSelectionSets(key: string): SelectionSet[] {
   try {
-    const parsed = JSON.parse(localStorage.getItem(key) ?? "[]") as SelectionSet[];
+    const parsed = JSON.parse(safeStorageGet(key) ?? "[]") as SelectionSet[];
     return Array.isArray(parsed) ? parsed.filter((set) => set && Array.isArray(set.ids)) : [];
   } catch {
     return [];
@@ -184,7 +193,7 @@ function writeSelectionSets(key: string, sets: SelectionSet[]): boolean {
 
 export function readViewpoints(key: string): Viewpoint[] {
   try {
-    return JSON.parse(localStorage.getItem(key) ?? "[]") as Viewpoint[];
+    return JSON.parse(safeStorageGet(key) ?? "[]") as Viewpoint[];
   } catch {
     return [];
   }
@@ -206,8 +215,7 @@ export function saveViewpoint(viewer: Viewer, name?: string): string | null {
     offsets: viewer.getElementOffsets(),
     annotations: viewer.getAnnotationStates(),
   });
-  localStorage.setItem(key, JSON.stringify(views));
-  return label;
+  return safeStorageSet(key, JSON.stringify(views)) ? label : null;
 }
 
 export class Dock {
@@ -379,7 +387,7 @@ export class Dock {
    */
   private restoreMeasurementFormat(): void {
     try {
-      const stored = JSON.parse(localStorage.getItem(MEASURE_FORMAT_KEY) ?? "null") as MeasurementFormat | null;
+      const stored = JSON.parse(safeStorageGet(MEASURE_FORMAT_KEY) ?? "null") as MeasurementFormat | null;
       const preset = stored && UNIT_PRESETS.find(([, , value]) => value.unit === stored.unit)?.[2];
       if (preset) this.viewer.setMeasurementFormat(preset);
     } catch { /* invalid preferences return to Auto */ }
@@ -392,8 +400,9 @@ export class Dock {
     const revision = this.viewer.getMeasurementRevision();
     if (revision === this.persistedMeasureRevision) return;
     try {
-      localStorage.setItem(key, JSON.stringify(this.viewer.getMeasurementStates()));
-      this.persistedMeasureRevision = revision;
+      if (safeStorageSet(key, JSON.stringify(this.viewer.getMeasurementStates()))) {
+        this.persistedMeasureRevision = revision;
+      }
     } catch {
       // A storage quota should never interrupt measuring; CSV remains available.
     }
@@ -406,8 +415,9 @@ export class Dock {
     const revision = this.viewer.getAnnotationRevision();
     if (revision === this.persistedAnnotationRevision) return;
     try {
-      localStorage.setItem(key, JSON.stringify(this.viewer.getAnnotationStates()));
-      this.persistedAnnotationRevision = revision;
+      if (safeStorageSet(key, JSON.stringify(this.viewer.getAnnotationStates()))) {
+        this.persistedAnnotationRevision = revision;
+      }
     } catch {
       // Quota again: notes stay in the session even when they cannot persist.
     }
@@ -510,7 +520,7 @@ export class Dock {
       const format = UNIT_PRESETS.find(([id]) => id === this.measureUnit.value)?.[2];
       if (!format) return;
       this.viewer.setMeasurementFormat(format);
-      localStorage.setItem(MEASURE_FORMAT_KEY, JSON.stringify(format));
+      safeStorageSet(MEASURE_FORMAT_KEY, JSON.stringify(format));
       this.renderedMeasureRevision = -1;
       this.syncMeasure();
     });
@@ -591,11 +601,11 @@ export class Dock {
     for (const [label, value] of DENSITIES) {
       densitySelect.appendChild(h("option", { value: String(value), text: `${label} ${value} kg/m3` }));
     }
-    const savedDensity = localStorage.getItem(SURVEY_DENSITY_KEY);
+    const savedDensity = safeStorageGet(SURVEY_DENSITY_KEY);
     if (savedDensity && DENSITIES.some(([, value]) => String(value) === savedDensity)) {
       densitySelect.value = savedDensity;
     }
-    densitySelect.addEventListener("change", () => localStorage.setItem(SURVEY_DENSITY_KEY, densitySelect.value));
+    densitySelect.addEventListener("change", () => safeStorageSet(SURVEY_DENSITY_KEY, densitySelect.value));
     const surveyRun = h("button", { class: "btn sm grow", type: "button", text: "Survey selection" });
     surveyRun.addEventListener("click", () => void this.runSurvey(surveyOut, Number(densitySelect.value) || 2400));
     const survey = h("details", { class: "mc-disclosure" }, [
@@ -1805,7 +1815,10 @@ export class Dock {
         const remove = iconButton("x", "Delete", () => {
           const next = readViewpoints(key);
           next.splice(index, 1);
-          localStorage.setItem(key, JSON.stringify(next));
+          if (!safeStorageSet(key, JSON.stringify(next))) {
+            toast("The browser could not delete this viewpoint", "error");
+            return;
+          }
           render();
         }, "icon-btn sm");
         list.appendChild(h("div", { class: "pop-row" }, [apply, remove]));
@@ -1813,7 +1826,10 @@ export class Dock {
     };
 
     save.addEventListener("click", () => {
-      saveViewpoint(this.viewer, name.value);
+      if (!saveViewpoint(this.viewer, name.value)) {
+        toast("The browser could not save this viewpoint", "error");
+        return;
+      }
       name.value = "";
       render();
     });

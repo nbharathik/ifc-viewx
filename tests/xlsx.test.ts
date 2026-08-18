@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { strFromU8, unzipSync } from "fflate";
 import { saveXlsx, toXlsx } from "../src/sdk/data.js";
 
 const HEADERS = ["Class", "Name", "Volume m3"];
@@ -8,13 +9,38 @@ const ROWS: Array<Array<string | number | null>> = [
   ["IfcBeam", null, 0],
 ];
 
-async function read(bytes: ArrayBuffer, sheet: string) {
-  const { Workbook } = await import("exceljs");
-  const book = new Workbook();
-  await book.xlsx.load(bytes);
-  const worksheet = book.getWorksheet(sheet);
-  if (!worksheet) throw new Error(`no worksheet named ${sheet}`);
-  return worksheet;
+function parseXml(source: string): XMLDocument {
+  const document = new DOMParser().parseFromString(source, "application/xml");
+  const error = document.getElementsByTagName("parsererror")[0];
+  if (error) throw new Error(error.textContent ?? "invalid XML");
+  return document;
+}
+
+function read(bytes: ArrayBuffer) {
+  const files = unzipSync(new Uint8Array(bytes));
+  const part = (path: string): XMLDocument => {
+    const data = files[path];
+    if (!data) throw new Error(`workbook has no ${path}`);
+    return parseXml(strFromU8(data));
+  };
+  return {
+    files,
+    workbook: part("xl/workbook.xml"),
+    sheet: part("xl/worksheets/sheet1.xml"),
+    styles: part("xl/styles.xml"),
+    contentTypes: part("[Content_Types].xml"),
+    relationships: part("xl/_rels/workbook.xml.rels"),
+  };
+}
+
+function cell(sheet: XMLDocument, reference: string): Element {
+  const found = [...sheet.getElementsByTagName("c")].find((entry) => entry.getAttribute("r") === reference);
+  if (!found) throw new Error(`no cell ${reference}`);
+  return found;
+}
+
+function value(entry: Element): string {
+  return entry.getElementsByTagName("v")[0]?.textContent ?? entry.getElementsByTagName("t")[0]?.textContent ?? "";
 }
 
 afterEach(() => {
@@ -25,39 +51,82 @@ describe("saveXlsx", () => {
   it("writes a non-empty workbook with the requested sheet and header", async () => {
     const bytes = await toXlsx(HEADERS, ROWS, { sheet: "Takeoff" });
     expect(bytes.byteLength).toBeGreaterThan(1000);
-    const sheet = await read(bytes, "Takeoff");
-    expect(sheet.getRow(1).values).toEqual([undefined, ...HEADERS]);
-    expect(sheet.getRow(1).font?.bold).toBe(true);
-    expect(sheet.getRow(1).fill?.type).toBe("pattern");
-    expect(sheet.views[0]).toMatchObject({ state: "frozen", ySplit: 1 });
-    expect(sheet.getColumn(2).width).toBeGreaterThan(0);
-    expect(sheet.rowCount).toBe(ROWS.length + 1);
+    const book = read(bytes);
+    expect(Object.keys(book.files).sort()).toEqual([
+      "[Content_Types].xml", "_rels/.rels", "xl/_rels/workbook.xml.rels",
+      "xl/styles.xml", "xl/workbook.xml", "xl/worksheets/sheet1.xml",
+    ]);
+    expect(book.workbook.getElementsByTagName("sheet")[0].getAttribute("name")).toBe("Takeoff");
+    expect(["A1", "B1", "C1"].map((reference) => value(cell(book.sheet, reference)))).toEqual(HEADERS);
+    expect(book.sheet.getElementsByTagName("row")[0].getAttribute("s")).toBe("1");
+    expect(book.sheet.getElementsByTagName("row")[0].getAttribute("customFormat")).toBe("1");
+    expect(cell(book.sheet, "A1").getAttribute("s")).toBe("1");
+    expect(book.styles.getElementsByTagName("font")[1].getElementsByTagName("b")).toHaveLength(1);
+    expect(book.styles.getElementsByTagName("patternFill")[2].getAttribute("patternType")).toBe("solid");
+    const pane = book.sheet.getElementsByTagName("pane")[0];
+    expect(pane.getAttribute("state")).toBe("frozen");
+    expect(pane.getAttribute("ySplit")).toBe("1");
+    expect(Number(book.sheet.getElementsByTagName("col")[1].getAttribute("width"))).toBeGreaterThan(0);
+    expect(book.sheet.getElementsByTagName("row")).toHaveLength(ROWS.length + 1);
+    expect(book.sheet.getElementsByTagName("autoFilter")[0].getAttribute("ref")).toBe("A1:C1");
+    expect(book.contentTypes.getElementsByTagName("Override")).toHaveLength(3);
+    expect(book.relationships.getElementsByTagName("Relationship")).toHaveLength(2);
   });
 
   it("clamps auto column widths", async () => {
     const wide = [["IfcWall", "N".repeat(400), 1]];
-    const sheet = await read(await toXlsx(HEADERS, wide, { maxWidth: 30 }), "Sheet1");
-    expect(sheet.getColumn(2).width).toBe(30);
+    const { sheet } = read(await toXlsx(HEADERS, wide, { maxWidth: 30 }));
+    expect(Number(sheet.getElementsByTagName("col")[1].getAttribute("width"))).toBe(30);
   });
 
   it("keeps numbers numeric so Excel can sum them", async () => {
-    const sheet = await read(await toXlsx(HEADERS, ROWS), "Sheet1");
-    expect(typeof sheet.getCell("C2").value).toBe("number");
-    expect(sheet.getCell("C2").value).toBe(12.5);
-    expect(sheet.getCell("C4").value).toBe(0);
+    const { sheet } = read(await toXlsx(HEADERS, ROWS));
+    expect(cell(sheet, "C2").hasAttribute("t")).toBe(false);
+    expect(value(cell(sheet, "C2"))).toBe("12.5");
+    expect(value(cell(sheet, "C4"))).toBe("0");
   });
 
   it("treats a leading = as text rather than a formula", async () => {
-    const sheet = await read(await toXlsx(HEADERS, ROWS), "Sheet1");
-    const cell = sheet.getCell("B2");
-    expect(cell.value).toBe("=SUM(A1:A2)");
-    expect(cell.formula).toBeUndefined();
-    expect(typeof cell.value).toBe("string");
+    const { sheet } = read(await toXlsx(HEADERS, ROWS));
+    const entry = cell(sheet, "B2");
+    expect(entry.getAttribute("t")).toBe("inlineStr");
+    expect(value(entry)).toBe("=SUM(A1:A2)");
+    expect(entry.getElementsByTagName("f")).toHaveLength(0);
   });
 
   it("sanitizes a sheet name Excel would reject", async () => {
     const bytes = await toXlsx(HEADERS, ROWS, { sheet: "Rooms: level [1]/2" });
-    await expect(read(bytes, "Rooms  level  1  2")).resolves.toBeTruthy();
+    expect(read(bytes).workbook.getElementsByTagName("sheet")[0].getAttribute("name")).toBe("Rooms  level  1  2");
+  });
+
+  it("limits sheet names by Excel's UTF-16 unit count without splitting emoji", async () => {
+    const requested = "😀".repeat(16);
+    const bytes = await toXlsx(HEADERS, ROWS, { sheet: requested });
+    const name = read(bytes).workbook.getElementsByTagName("sheet")[0].getAttribute("name")!;
+    expect(name).toBe("😀".repeat(15));
+    expect(name.length).toBeLessThanOrEqual(31);
+    expect(name).not.toContain("�");
+  });
+
+  it("writes booleans and XML-sensitive text without changing their values", async () => {
+    const { sheet } = read(await toXlsx(
+      ["Flag & note"],
+      [[true], ["<wall> & slab"], [false], [Number.NaN], [Number.POSITIVE_INFINITY]],
+    ));
+    expect(cell(sheet, "A2").getAttribute("t")).toBe("b");
+    expect(value(cell(sheet, "A2"))).toBe("1");
+    expect(value(cell(sheet, "A3"))).toBe("<wall> & slab");
+    expect(value(cell(sheet, "A4"))).toBe("0");
+    expect([...sheet.getElementsByTagName("c")].some((entry) => entry.getAttribute("r") === "A5")).toBe(false);
+    expect([...sheet.getElementsByTagName("c")].some((entry) => entry.getAttribute("r") === "A6")).toBe(false);
+  });
+
+  it("uses Excel column references beyond Z and rejects an oversized sheet", async () => {
+    const headers = Array.from({ length: 27 }, (_, at) => `Column ${at + 1}`);
+    const { sheet } = read(await toXlsx(headers, [headers]));
+    expect(value(cell(sheet, "AA1"))).toBe("Column 27");
+    expect(sheet.getElementsByTagName("autoFilter")[0].getAttribute("ref")).toBe("A1:AA1");
+    await expect(toXlsx(Array.from({ length: 16_385 }, () => "x"), [])).rejects.toThrow(/16,384 columns/);
   });
 
   it("downloads with the spreadsheet mime type", async () => {

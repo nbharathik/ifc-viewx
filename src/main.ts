@@ -4,12 +4,12 @@
 // pending-edit lifecycle. Edits only land on an explicit Apply.
 import "./styles.css";
 import { createViewer, type FederatedModel } from "./viewer-core/viewer.js";
-import { listCachedModels, loadCachedSource, storeSourceBytes, type CachedModel } from "./viewer-core/engine/cache.js";
+import { isFormatBytes, listCachedModels, loadCachedSource, storeSourceBytes, type CachedModel } from "./viewer-core/engine/cache.js";
 import type { LoadProgress } from "./viewer-core/engine/types.js";
 import { PythonEngine, type ProposedEdit } from "./python/pythonEngine.js";
 import { IfcEngine, type EditOp, type ValidationReport } from "./ifc/ifcEngine.js";
 import { clashReport } from "./ifc/clash.js";
-import { isStep, sniffSchema, worthConverting } from "./ifc/format.js";
+import { isCompleteStepAsync, isStep, sniffSchema, worthConvertingAsync } from "./ifc/format.js";
 import { findProvider, isConfigured, isVerified, loadSettings, type ChatMessage } from "./llm/llmClient.js";
 import { systemPrompt } from "./llm/prompts.js";
 import { buildModelBrief, elementCounts, elementsByType, type SemanticActions } from "./llm/actions.js";
@@ -35,7 +35,7 @@ import { Connection } from "./ui/connection.js";
 import { CommandRegistry } from "./ui/commands.js";
 import { Ribbon, type RibbonControl, type RibbonTab } from "./ui/ribbon.js";
 import type { SchedulePanel } from "./ui/schedules.js";
-import { buildMenu, busyRow, CommandPalette, confirmAction, h, icon, lightDismiss, menuKeys, openLayer, promptForm, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
+import { buildMenu, busyRow, CommandPalette, confirmAction, copyText, h, icon, lightDismiss, menuKeys, openLayer, promptForm, safeStorageGet, safeStorageSet, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
 import { ageLabel, clearChats, readChats, saveChat, type Conversation } from "./llm/chatStore.js";
 import { sampleModel, SAMPLE_NAME } from "./ui/sample.js";
 import { download } from "./sdk/data.js";
@@ -125,11 +125,13 @@ const DEFAULTS: Settings = {
 };
 let settings: Settings = DEFAULTS;
 try {
-  settings = { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") as Partial<Settings>) };
+  settings = { ...DEFAULTS, ...(JSON.parse(safeStorageGet(SETTINGS_KEY) ?? "{}") as Partial<Settings>) };
 } catch {
   settings = DEFAULTS;
 }
-const persistSettings = (): void => localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+const persistSettings = (): void => {
+  safeStorageSet(SETTINGS_KEY, JSON.stringify(settings));
+};
 
 // ---------------------------------------------------------------------------
 // App state
@@ -485,7 +487,7 @@ function applyTheme(): void {
 function toggleTheme(): void {
   const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
   document.documentElement.dataset.theme = next;
-  localStorage.setItem("ifcviewx.theme", next);
+  safeStorageSet("ifcviewx.theme", next);
   applyTheme();
 }
 
@@ -594,43 +596,86 @@ function dropModelState(): void {
 
 /** A second open supersedes the first; only the newest one owns the chrome. */
 let loadSeq = 0;
-/** applyPending reloads with its own edit staged; every other load drops it. */
-let applying = false;
+/** Preflight also yields for large STEP files, so it needs its own ordering. */
+let loadAttemptSeq = 0;
+const beginLoadAttempt = (): number => ++loadAttemptSeq;
+interface LoadRequestOptions {
+  adoptSha?: string;
+  attempt?: number;
+  /** Only applyPending may keep the proposal while its own reload runs. */
+  preservePending?: boolean;
+}
 
-async function loadBytes(bytes: Uint8Array, name: string, preserveCamera = false, adoptSha?: string): Promise<void> {
+async function loadBytes(
+  bytes: Uint8Array,
+  name: string,
+  preserveCamera = false,
+  options: LoadRequestOptions = {},
+): Promise<boolean> {
+  // Claim the attempt before the asynchronous STEP scan. Keep this separate
+  // from load ownership: an invalid later file must not orphan a valid load
+  // that is already inside the viewer.
+  const attempt = options.attempt ?? beginLoadAttempt();
+  const step = isStep(bytes);
+  if (!step && !isFormatBytes(bytes)) {
+    throw new Error("This file is not an IFC STEP model or an IFCViewX .ifcx file.");
+  }
+  if (step) {
+    const complete = await isCompleteStepAsync(bytes);
+    if (attempt !== loadAttemptSeq) return false;
+    if (!complete) {
+      throw new Error("This IFC STEP file is incomplete (the closing STEP marker is missing).");
+    }
+  }
+  if (attempt !== loadAttemptSeq) return false;
   const mine = ++loadSeq;
-  // An edit staged against the model being replaced can never be applied to
-  // the one arriving, so it goes with the model it was written for.
-  if (pendingEdit && !applying) discardPending();
+  const previousBytes = activeBytes;
+  const previousName = fileName;
+  const previousPose = previousBytes ? viewer.getCamera() : null;
   const pose = preserveCamera ? viewer.getCamera() : null;
   shell.setStatus("Loading", "busy");
   loadingUi.show(name, () => viewer.cancelLoad());
   // Taken before the parser runs: viewer.load hands these bytes to a worker,
   // and a transferred buffer would leave the semantic engine with nothing.
-  const step = isStep(bytes);
   const semanticCopy = step ? bytes.slice() : null;
   try {
     await viewer.load(bytes, { name, onProgress: (progress) => loadingUi.update(progress) });
   } catch (err) {
-    // viewer.load drops whatever was on screen before it parses, so a failure
-    // leaves an empty viewport. App state has to follow it down instead of
-    // going on describing a model nobody can see any more.
-    if (mine === loadSeq) {
+    // A newer viewer load owns the viewport and its progress UI. Its expected
+    // cancellation of this one is not an error to surface or roll back.
+    if (mine !== loadSeq) return false;
+    if (previousBytes && previousName) {
+      try {
+        loadingUi.step(`Restoring ${previousName}`);
+        await viewer.load(previousBytes, { name: previousName, onProgress: (progress) => loadingUi.update(progress) });
+        if (mine === loadSeq) {
+          if (previousPose) viewer.setCamera(previousPose);
+          updateModelChrome();
+        }
+      } catch {
+        if (mine === loadSeq) {
+          dropModelState();
+          viewer.unload({ keepError: true });
+          updateModelChrome();
+        }
+      }
+    } else {
       dropModelState();
-      // The panels read the viewer, so they only follow the model down if the
-      // viewer says it is gone. The error card is the one thing kept.
       viewer.unload({ keepError: true });
       updateModelChrome();
     }
+    if (mine !== loadSeq) return false;
     throw err;
   } finally {
     if (mine === loadSeq) loadingUi.hide();
   }
-  if (mine !== loadSeq) return;
+  if (mine !== loadSeq) return false;
   if (pose) viewer.setCamera(pose);
+  if (pendingEdit && !options.preservePending) discardPending();
   activeBytes = bytes;
   fileName = name;
   schemaName = sniffSchema(bytes);
+  if (checkingLoad !== null && checkingLoad !== mine) checking = false;
   pythonSynced = false;
   summaryDirty = true;
   lastReport = null;
@@ -653,41 +698,55 @@ async function loadBytes(bytes: Uint8Array, name: string, preserveCamera = false
   // edit or an undo, so the hand-over lives on the single load path. A model
   // the service already stores (CLI-opened) is adopted instead of re-uploaded.
   service.forgetModel();
-  if (adoptSha) {
-    service.adoptModel(adoptSha);
+  if (options.adoptSha) {
+    service.adoptModel(options.adoptSha);
     plugins.refresh();
   } else {
     void handOverModel();
   }
+  return true;
 }
 
 /** `ifcviewx model.ifc` stages the file and opens the viewer at ?open=<sha>. */
 async function openFromParam(): Promise<void> {
-  if (pendingEdit) discardPending();
   const params = new URLSearchParams(location.search);
   const sha = params.get("open");
   if (!sha || !/^[0-9a-f]{64}$/.test(sha)) return;
+  const attempt = beginLoadAttempt();
   const given = params.get("name") ?? "model.ifc";
   shell.setStatus("Loading", "busy");
   loadingUi.show(given);
   loadingUi.step("Reading it from Local Studio");
   try {
-    const wasIfcx = given.toLowerCase().endsWith(".ifcx");
+    const sourceFlag = params.get("source");
+    // v0.1.3 and older CLI links had no source flag. Preserve their filename
+    // convention while new links use an explicit byte-classified 1/0 value.
+    const hasSource = sourceFlag === "1"
+      || (sourceFlag === null && !given.toLowerCase().endsWith(".ifcx"));
     let res = await fetch(`${service.origin}/models/${sha}.ifcx`);
+    if (attempt !== loadAttemptSeq) return;
     const gotIfcx = res.ok;
     if (!res.ok) res = await fetch(`${service.origin}/models/${sha}.ifc`);
+    if (attempt !== loadAttemptSeq) return;
     if (!res.ok) throw new Error("Local Studio no longer holds that model. Open it from disk instead.");
     const bytes = new Uint8Array(await res.arrayBuffer());
-    const name = gotIfcx && !wasIfcx ? given.replace(/\.[^.]*$/, ".ifcx") : given;
+    if (attempt !== loadAttemptSeq) return;
+    const name = gotIfcx && !given.toLowerCase().endsWith(".ifcx") ? given.replace(/\.[^.]*$/, ".ifcx") : given;
     // The .ifc source in the store backs native Python and checks; a bare
     // .ifcx has no source, so nothing is adopted and the tier stays browser.
-    await loadBytes(bytes, name, false, wasIfcx ? undefined : sha);
-    shell.log(`Opened ${given} from Local Studio`, "success");
+    if (await loadBytes(bytes, name, false, {
+      adoptSha: hasSource || !gotIfcx ? sha : undefined,
+      attempt,
+    })) {
+      shell.log(`Opened ${given} from Local Studio`, "success");
+    }
   } catch (err) {
-    updateModelChrome();
-    reportError(err);
+    if (attempt === loadAttemptSeq) {
+      updateModelChrome();
+      reportError(err);
+    }
   } finally {
-    loadingUi.hide();
+    if (attempt === loadAttemptSeq) loadingUi.hide();
   }
 }
 
@@ -704,9 +763,9 @@ function updateModelChrome(): void {
  * and it costs nothing to make again.
  */
 async function openSample(): Promise<void> {
-  if (pendingEdit) discardPending();
-  await loadBytes(sampleModel(), SAMPLE_NAME);
-  shell.log("Opened the sample building. Open your own file any time.", "success");
+  if (await loadBytes(sampleModel(), SAMPLE_NAME)) {
+    shell.log("Opened the sample building. Open your own file any time.", "success");
+  }
 }
 
 /**
@@ -723,7 +782,13 @@ async function attachFile(file: File): Promise<void> {
     return;
   }
   if (!hasModel()) return void openFile(file);
+  const targetLoad = loadSeq;
+  const targetBytes = activeBytes;
   const bytes = new Uint8Array(await file.arrayBuffer());
+  if (loadSeq !== targetLoad || activeBytes !== targetBytes) {
+    toast("The open model changed while the attachment was being read. Add it again.", "info");
+    return;
+  }
   shell.setStatus("Loading", "busy");
   loadingUi.show(file.name, () => viewer.cancelLoad());
   try {
@@ -737,24 +802,32 @@ async function attachFile(file: File): Promise<void> {
     updateModelChrome();
   } finally {
     loadingUi.hide();
-    shell.setStatus("Ready", "idle");
+    updateModelChrome();
   }
 }
 
 async function openFile(file: File): Promise<void> {
-  if (pendingEdit) discardPending();
+  const attempt = beginLoadAttempt();
+  // A startup/cache read may own the pre-load overlay; this request supersedes it.
+  loadingUi.hide();
   const bytes = new Uint8Array(await file.arrayBuffer());
-  await loadBytes(bytes, file.name);
+  if (attempt !== loadAttemptSeq) return;
+  if (!(await loadBytes(bytes, file.name, false, { attempt }))) return;
   void storeSourceBytes(bytes, file.name).then(renderRecents);
   shell.log(`Opened ${file.name}`, "success");
   // web-ifc draws every file here, so a multi-minute IfcOpenShell conversion
   // never blocks a load: the log only says when one would pay off.
-  if (!settings.offerConvert || !worthConverting(bytes, file.name)) return;
-  shell.log(
-    canLocal("convert")
-      ? "Large or brep-heavy model: Model ▸ Convert makes every reopen instant."
-      : "Large or brep-heavy model: Local Studio converts it with IfcOpenShell for instant reopens.",
-  );
+  if (settings.offerConvert) {
+    const openedLoad = loadSeq;
+    void worthConvertingAsync(bytes, file.name).then((worthIt) => {
+      if (!worthIt || activeBytes !== bytes || loadSeq !== openedLoad) return;
+      shell.log(
+        canLocal("convert")
+          ? "Large or brep-heavy model: Model ▸ Convert makes every reopen instant."
+          : "Large or brep-heavy model: Local Studio converts it with IfcOpenShell for instant reopens.",
+      );
+    });
+  }
 }
 
 /**
@@ -787,6 +860,12 @@ function handOverModel(): Promise<void> {
 }
 
 function closeModel(): void {
+  // Closing is itself the newest model decision. Pending reads/preflights must
+  // not reopen it, and a cancelled viewer load must not restore its snapshot.
+  beginLoadAttempt();
+  loadSeq += 1;
+  viewer.cancelLoad();
+  loadingUi.hide();
   dropModelState();
   // The viewer holds the scene, the tree, the properties and every cache keyed
   // to the model, so closing has to reach it or the panels keep describing a
@@ -801,14 +880,27 @@ function closeModel(): void {
 /** Closing throws away edits that only live in this tab, so it asks first. */
 function closeOrConfirm(): void {
   const staged = pendingEdit !== null;
-  if (!staged && checkpoints.length === 0) return closeModel();
+  if (!staged && checkpoints.length === 0 && redoStack.length === 0) return closeModel();
   confirmAction(
     "Close this model?",
     staged
-      ? "The staged edit and the undo history are dropped. Export first to keep them."
-      : "The undo history is dropped. Export first to keep the edits you applied.",
+      ? "The staged edit and the undo/redo history are dropped. Export first to keep them."
+      : "The undo/redo history is dropped. Export first to keep the edits you applied.",
     "Close",
     closeModel,
+  );
+}
+
+function replaceOrConfirm(run: () => void): void {
+  const staged = pendingEdit !== null;
+  if (!staged && checkpoints.length === 0 && redoStack.length === 0) return run();
+  confirmAction(
+    "Open another model?",
+    staged
+      ? "The staged edit and undo/redo history belong to this model. Export first to keep applied edits."
+      : "The undo/redo history belongs to this model. Export first to keep applied edits.",
+    "Open model",
+    run,
   );
 }
 
@@ -818,7 +910,7 @@ async function undo(): Promise<void> {
   const previous = checkpoints[checkpoints.length - 1];
   const current = activeBytes;
   if (!previous || !current) return;
-  await loadBytes(previous, fileName, true);
+  if (!(await loadBytes(previous, fileName, true))) return;
   checkpoints.pop();
   redoStack.push(current);
   shell.log("Reverted to previous checkpoint", "info", true);
@@ -828,7 +920,7 @@ async function redo(): Promise<void> {
   const next = redoStack[redoStack.length - 1];
   const current = activeBytes;
   if (!next || !current) return;
-  await loadBytes(next, fileName, true);
+  if (!(await loadBytes(next, fileName, true))) return;
   redoStack.pop();
   checkpoints.push(current);
   shell.log("Redid the edit", "info", true);
@@ -1003,6 +1095,7 @@ function togglePlan(): void {
 function saveViewpoint(): void {
   const name = storeViewpoint(viewer);
   if (name) shell.log(`Saved ${name}`, "success", true);
+  else toast("The browser could not save this viewpoint", "error");
 }
 
 function setHud(on: boolean): void {
@@ -1335,12 +1428,8 @@ async function applyPending(): Promise<void> {
   const previous = activeBytes;
   // Staged until the reload lands: a failed apply that had already cleared the
   // bar would lose the edit and leave a checkpoint that changed nothing.
-  applying = true;
-  try {
-    await loadBytes(edit.bytes, fileName, true);
-  } finally {
-    applying = false;
-  }
+  const applied = await loadBytes(edit.bytes, fileName, true, { preservePending: true });
+  if (!applied) return;
   pendingEdit = null;
   pendingBar.set(null);
   checkpoints.push(previous);
@@ -1702,26 +1791,36 @@ function requireLocal(capability: string, what: string): boolean {
 async function convertWithService(): Promise<void> {
   if (!activeBytes) return toast("Open a model first", "info");
   if (!requireLocal("convert", "Conversion")) return;
+  const sourceBytes = activeBytes;
+  const sourceName = fileName;
+  const sourceLoad = loadSeq;
+  let commitLoad = 0;
   try {
     shell.setStatus("Converting", "busy");
     shell.log("Converting with IfcOpenShell, this can take minutes");
-    loadingUi.show(`Converting ${fileName}`);
+    loadingUi.show(`Converting ${sourceName}`);
     await handOverModel();
+    if (activeBytes !== sourceBytes || loadSeq !== sourceLoad) return;
     const source = service.getSha();
     const converted = await service.convert((text) => {
+      if (activeBytes !== sourceBytes || loadSeq !== sourceLoad) return;
       shell.setHint(text);
       loadingUi.step(text);
     });
-    await loadBytes(converted, fileName.replace(/\.ifc$/i, ".ifcx"));
+    if (activeBytes !== sourceBytes || loadSeq !== sourceLoad) return;
+    commitLoad = sourceLoad + 1;
+    if (!(await loadBytes(converted, sourceName.replace(/\.ifc$/i, ".ifcx")))) return;
     // The viewer now shows the .ifcx; native tools keep using the stored source.
     if (source) service.adoptModel(source);
     plugins.refresh();
     shell.log("Converted. This model now opens instantly.", "success", true);
   } catch (err) {
-    reportError(err);
-    updateModelChrome();
+    if (activeBytes === sourceBytes && (loadSeq === sourceLoad || loadSeq === commitLoad)) {
+      reportError(err);
+      updateModelChrome();
+    }
   } finally {
-    loadingUi.hide();
+    if (loadSeq === sourceLoad) loadingUi.hide();
   }
 }
 
@@ -1729,27 +1828,40 @@ async function convertWithService(): Promise<void> {
 // Model checks (native, no generated code)
 let lastReport: ValidationReport | null = null;
 let checking = false;
+let checkingLoad: number | null = null;
 
 async function validateModel(): Promise<void> {
-  if (!activeBytes || checking) return toast(checking ? "The checks are already running" : "Open a model first", "info");
+  if (!activeBytes || (checking && checkingLoad === loadSeq)) {
+    return toast(activeBytes ? "The checks are already running" : "Open a model first", "info");
+  }
+  const sourceBytes = activeBytes;
+  const sourceLoad = loadSeq;
   shell.setStatus("Checking", "busy");
   // Shown before the wait, not after it: a pass over every entity takes
   // seconds, and the pane it lands in is where the user should be watching.
   checking = true;
+  checkingLoad = sourceLoad;
   refreshSummary(true);
   ribbon.sync();
   try {
-    lastReport = await ifc.validate();
-    const { error, warning } = lastReport.counts;
+    const report = await ifc.validate();
+    if (activeBytes !== sourceBytes || loadSeq !== sourceLoad) return;
+    lastReport = report;
+    const { error, warning } = report.counts;
     shell.log(
       `Model checks: ${error} error${error === 1 ? "" : "s"}, ${warning} warning${warning === 1 ? "" : "s"}`,
       error ? "error" : "success",
       true,
     );
   } finally {
-    checking = false;
-    refreshSummary();
-    updateModelChrome();
+    if (checkingLoad === sourceLoad) {
+      checking = false;
+      checkingLoad = null;
+      if (activeBytes === sourceBytes && loadSeq === sourceLoad) {
+        refreshSummary();
+        updateModelChrome();
+      }
+    }
   }
 }
 
@@ -1842,16 +1954,28 @@ async function renderRecents(): Promise<void> {
 }
 
 function openRecent(sha: string, name: string): void {
-  if (pendingEdit) discardPending();
-  void loadCachedSource(sha)
-    .then((bytes) => {
-      if (!bytes) {
-        toast(`${name} is no longer cached. Open it from disk.`, "info");
-        return renderRecents();
-      }
-      return loadBytes(bytes, name).then(() => shell.log(`Opened ${name}`, "success"));
-    })
-    .catch(reportError);
+  replaceOrConfirm(() => {
+    const attempt = beginLoadAttempt();
+    loadingUi.show(name);
+    loadingUi.step("Reading it from browser storage");
+    void loadCachedSource(sha)
+      .then(async (bytes) => {
+        if (attempt !== loadAttemptSeq) return;
+        if (!bytes) {
+          toast(`${name} is no longer cached. Open it from disk.`, "info");
+          return renderRecents();
+        }
+        if (await loadBytes(bytes, name, false, { attempt })) {
+          shell.log(`Opened ${name}`, "success");
+        }
+      })
+      .catch((err) => {
+        if (attempt === loadAttemptSeq) reportError(err);
+      })
+      .finally(() => {
+        if (attempt === loadAttemptSeq) loadingUi.hide();
+      });
+  });
 }
 
 function recentMenu(): MenuItem[] {
@@ -1953,7 +2077,7 @@ const registry = new CommandRegistry();
 registry.add([
   { id: "file.open", label: "Open", icon: "folder", section: "File", shortcut: "Ctrl+O", hint: "Open an IFC or .ifcx file", run: () => fileInput.click() },
   { id: "file.attach", label: "Add model", icon: "layers", section: "File", hint: "Load a second model beside this one", enabled: hasModel, run: () => attachInput.click() },
-  { id: "file.sample", label: "Sample model", icon: "cube", section: "File", hint: "A small two-storey building, generated here, to try the viewer on", run: () => void openSample().catch(reportError) },
+  { id: "file.sample", label: "Sample model", icon: "cube", section: "File", hint: "A small two-storey building, generated here, to try the viewer on", run: () => replaceOrConfirm(() => void openSample().catch(reportError)) },
   { id: "file.export", label: "Export", icon: "download", section: "File", hint: "Download the active IFC", enabled: hasModel, run: exportModel },
   { id: "file.mesh", label: "Export mesh", icon: "cube", section: "File", hint: "glTF, GLB, STL or OBJ of what is on screen, or of the selection", enabled: hasModel, run: exportMeshFile },
   { id: "file.plan", label: "Export plan", icon: "section", section: "File", hint: "The 2D plan as a PNG, cut where the section is", enabled: hasModel, run: () => void savePlanImage() },
@@ -2470,12 +2594,14 @@ viewer.onRenderTick(() => {
 
 // Right-drag pans the camera; only a stationary right-click is a menu.
 let rightDown: [number, number] = [0, 0];
+let contextSeq = 0;
 shell.viewerHost.addEventListener("pointerdown", (e) => {
   if (e.button === 2) rightDown = [e.clientX, e.clientY];
 });
 
 shell.viewerHost.addEventListener("contextmenu", (e) => {
   e.preventDefault();
+  const mine = ++contextSeq;
   if (Math.hypot(e.clientX - rightDown[0], e.clientY - rightDown[1]) > 5) return;
   const pick = viewer.pickAt(e.clientX, e.clientY);
   if (!pick) {
@@ -2489,6 +2615,7 @@ shell.viewerHost.addEventListener("contextmenu", (e) => {
   // on everything the user picked; right-clicking elsewhere selects that one.
   if (!viewer.getSelectedIds().includes(pick.expressID)) viewer.select(pick.expressID);
   void viewer.getProperties(pick.expressID).then((props) => {
+    if (mine !== contextSeq || !viewer.getSelectedIds().includes(pick.expressID)) return;
     const type = props?.type ?? "Element";
     const count = viewer.getSelectedIds().length;
     const scope = count > 1 ? ` (${count})` : "";
@@ -2528,8 +2655,7 @@ shell.viewerHost.addEventListener("contextmenu", (e) => {
           ? [{
               label: "Copy GUID",
               run: () => {
-                void navigator.clipboard.writeText(guid);
-                toast("GUID copied", "success");
+                void copyText(guid, "GUID copied");
               },
             }]
           : [];
@@ -2537,8 +2663,7 @@ shell.viewerHost.addEventListener("contextmenu", (e) => {
       {
         label: "Copy express ID",
         run: () => {
-          void navigator.clipboard.writeText(String(pick.expressID));
-          toast("Express ID copied", "success");
+          void copyText(String(pick.expressID), "Express ID copied");
         },
       },
     ]);
@@ -2634,7 +2759,7 @@ bridge.register("list_viewpoints", () => {
 });
 bridge.register("save_viewpoint", (params) => {
   const name = storeViewpoint(viewer, typeof params.name === "string" ? params.name : undefined);
-  if (!name) throw new Error("no model loaded");
+  if (!name) throw new Error(viewpointKey(viewer) ? "browser could not persist viewpoint" : "no model loaded");
   return { saved: name };
 });
 // No run_python here on purpose. An MCP client is an AI client, and generated
@@ -2646,7 +2771,7 @@ bridge.register("save_viewpoint", (params) => {
 // Input: files, drag and drop, keyboard
 fileInput.addEventListener("change", () => {
   const file = fileInput.files?.[0];
-  if (file) void openFile(file).catch(reportError);
+  if (file) replaceOrConfirm(() => void openFile(file).catch(reportError));
   fileInput.value = "";
 });
 attachInput.addEventListener("change", () => {
@@ -2655,7 +2780,7 @@ attachInput.addEventListener("change", () => {
   attachInput.value = "";
 });
 $("btn-open-first").addEventListener("click", () => fileInput.click());
-$("btn-sample").addEventListener("click", () => void openSample().catch(reportError));
+$("btn-sample").addEventListener("click", () => replaceOrConfirm(() => void openSample().catch(reportError)));
 
 let dragDepth = 0;
 window.addEventListener("dragenter", (e) => {
@@ -2679,10 +2804,10 @@ window.addEventListener("drop", (e) => {
   if (activeBytes) dropzone.classList.add("hidden");
   const file = e.dataTransfer?.files?.[0];
   if (!file) return void toast("Drop an .ifc or .ifcx file", "info");
-  if (!/\.(ifc|ifcx|ifczip)$/i.test(file.name)) {
+  if (!/\.(ifc|ifcx)$/i.test(file.name)) {
     return void toast(`${file.name} is not an IFC file`, "error");
   }
-  void openFile(file).catch(reportError);
+  replaceOrConfirm(() => void openFile(file).catch(reportError));
 });
 
 window.addEventListener("keydown", (e) => {
@@ -2695,6 +2820,9 @@ window.addEventListener("keydown", (e) => {
     target instanceof HTMLTextAreaElement ||
     target instanceof HTMLSelectElement ||
     target?.isContentEditable === true;
+  const interactive = Boolean(target?.closest(
+    "button, a[href], summary, [role='button'], [role='menu'], [role='listbox'], [role='tree']",
+  ));
 
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
@@ -2703,7 +2831,7 @@ window.addEventListener("keydown", (e) => {
   // Esc is handled inside viewer-core (close popover / clear selection / exit
   // measure); this only resyncs the controls that mirror that state.
   if (e.key === "Escape") return syncTools();
-  if (typing || palette.isOpen()) return;
+  if (typing || interactive || palette.isOpen()) return;
   registry.handleKey(e);
 });
 

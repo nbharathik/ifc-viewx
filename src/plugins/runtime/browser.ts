@@ -5,7 +5,7 @@
 // get back or a third to open it. Local Studio plugins are listed with
 // everything else so the catalog is honest about what exists, and what the app
 // already carries as a panel is a shortcut group rather than a second copy.
-import { confirmAction, h, icon, iconButton, lightDismiss, toast } from "../../ui/kit.js";
+import { confirmAction, copyText, h, icon, iconButton, lightDismiss, toast } from "../../ui/kit.js";
 import { INSTALL_CMD } from "../../ui/connection.js";
 import { CATALOG, isBuiltIn, isLive } from "../registry.js";
 import type { CatalogPlugin } from "../registry.js";
@@ -35,7 +35,7 @@ export class PluginBrowser {
     private readonly actions: BrowserActions,
     private readonly installed: InstalledExtensionManager,
   ) {
-    this.search = h("input", { type: "search", placeholder: "Search plugins", spellcheck: "false" });
+    this.search = h("input", { type: "search", placeholder: "Search plugins", spellcheck: "false", "aria-label": "Search plugins" });
     this.search.addEventListener("input", () => this.render());
     this.search.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
@@ -409,7 +409,7 @@ export class PluginBrowser {
     }
     const copy = h("button", { class: "btn sm", type: "button", text: "Copy command" });
     copy.addEventListener("click", () => {
-      void navigator.clipboard?.writeText(INSTALL_CMD).then(() => toast("Command copied", "success"));
+      void copyText(INSTALL_CMD, "Command copied");
     });
     const connect = h("button", { class: "btn sm accent", type: "button", text: "What's the difference?" });
     connect.addEventListener("click", () => {

@@ -1,11 +1,11 @@
 [project]
 name = "ifcviewx"
-version = "0.1.2"
+version = "0.1.4"
 description = "IFCViewX Local Studio: fast, private IFC viewer with IfcOpenShell conversion, native Python, model checks and an MCP bridge"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Bharathi Kannan" }]
 keywords = ["ifc", "bim", "viewer", "ifcopenshell", "mcp", "openbim"]
 classifiers = [
@@ -17,7 +17,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 dependencies = [
-    "mcp>=1.2.0",
+    # MCP 2 removed mcp.server.fastmcp. Stay on its compatible API line until
+    # the bridge is deliberately migrated and its public tool schemas retested.
+    "mcp>=1.2.0,<2",
     "fastapi>=0.110",
     "uvicorn>=0.27",
     "python-multipart>=0.0.9",
@@ -34,6 +36,8 @@ convert = []
 # Optional because structural checks need nothing extra, and CI images that
 # never pass --ids should not carry it.
 check = ["ifctester>=0.8.1"]
+# Development-only quality tools used by CI and contributors.
+test = ["pytest>=8,<9", "ruff>=0.8,<1"]
 
 [project.scripts]
 ifcviewx = "ifcviewx.cli:main"
@@ -51,7 +55,7 @@ build-backend = "hatchling.build"
 packages = ["src/ifcviewx"]
 
 [tool.hatch.build.targets.sdist]
-only-include = ["src/ifcviewx", "hatch_build.py", "README.md", "pyproject.toml", "LICENSE"]
+only-include = ["src/ifcviewx", "hatch_build.py", "README.md", "pyproject.toml", "LICENSE", "NOTICE"]
 
 # The built viewer is copied into src/ifcviewx/app by hatch_build.py; it is
 # gitignored, so it must be declared an artifact to ship.

@@ -78,12 +78,16 @@ mkdocs build --strict
 ## Release `ifcviewx`
 
 ```bash
-npm run bump -- 0.1.2
-git commit -am "release v0.1.2"
-git tag -a v0.1.2 -m "IFCViewX 0.1.2"
+npm run bump -- 0.1.4
+git status --short
+git add -A
+git diff --cached --check
+git commit -m "release v0.1.4"
+git tag -a v0.1.4 -m "IFCViewX 0.1.4"
 git push origin main --follow-tags
 ```
 
 `npm run bump` updates `package.json` and `local-bridge/pyproject.toml`. The tag
-must match the Python package version. A tag builds the viewer, creates the wheel
-and source archive, publishes to PyPI, and creates a GitHub release.
+must match the Python package version. Review every staged path before committing;
+`git commit -am` omits newly added release files. A tag builds the viewer, creates
+the wheel and source archive, publishes to PyPI, and creates a GitHub release.

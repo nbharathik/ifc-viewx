@@ -105,6 +105,7 @@ export class PropertiesPanel {
     this.filter.className = 'ifc-input';
     this.filter.type = 'search';
     this.filter.placeholder = 'Filter properties';
+    this.filter.setAttribute('aria-label', 'Filter properties');
     this.filter.addEventListener('input', () => this.applyFilter());
     head.appendChild(this.filter);
     this.root.appendChild(head);

@@ -41,6 +41,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from . import audit, llm, store
 from .config import settings
+from .convert import cache_valid, is_valid_ifcx
 from .guard import guard_code
 from .provider_jobs import JobRequestError, ProviderJobManager
 from .providers import PROTOCOL_MAX, PROTOCOL_MIN, ProviderRegistry
@@ -115,7 +116,8 @@ def _capabilities() -> list[str]:
     config = settings()
     caps = ["mcp", "models"]
     if find_spec("ifcopenshell") is not None:
-        caps.append("convert")
+        if not config.readonly:
+            caps.append("convert")
         caps.append("inspect")
         if config.allow_python:
             caps.append("python")
@@ -383,16 +385,13 @@ def create_app(hub: BrowserHub) -> FastAPI:
                         head = chunk[: store.SNIFF_BYTES]
                         if not store.looks_like_ifc(head):
                             raise store.StoreError("not_ifc", "this file is not an IFC (STEP) document")
-                    size += len(chunk)
-                    if size > config.max_upload_bytes:
-                        raise store.StoreError(
-                            "too_large",
-                            f"the upload exceeds {config.max_upload_bytes / 1e6:.0f} MB",
-                        )
+                    projected = size + len(chunk)
+                    store.require_space(projected, written=size)
+                    size = projected
                     digest.update(chunk)
                     out.write(chunk)
-                    if size % (64 * 1024 * 1024) == 0:
-                        store.require_space(0)
+                if size == 0:
+                    raise store.StoreError("not_ifc", "this file is empty")
         except store.StoreError as exc:
             staging.unlink(missing_ok=True)
             code = 413 if exc.code == "too_large" else 400
@@ -403,18 +402,30 @@ def create_app(hub: BrowserHub) -> FastAPI:
 
         sha = digest.hexdigest()
         source = store.source_path(sha)
-        if source.exists():
+        try:
+            # Publish even over an existing target while holding the store
+            # lock. Checking first could race eviction and recreate an empty
+            # source after discarding this valid staging file.
+            store.commit_staging(staging, source, keep={sha})
+        except store.StoreError as exc:
             staging.unlink(missing_ok=True)
-            source.touch()
-        else:
-            staging.replace(source)
+            return JSONResponse(
+                {"error": exc.code, "message": exc.message},
+                status_code=507,
+            )
+        except OSError as exc:
+            staging.unlink(missing_ok=True)
+            return JSONResponse(
+                {"error": "write_failed", "message": str(exc)},
+                status_code=507,
+            )
         audit.record("model.upload", sha=sha[:12], bytes=size, name=file.filename)
         store.sweep(keep={sha})
         return JSONResponse(
             {
                 "sha": sha,
                 "bytes": size,
-                "converted": store.converted_path(sha).is_file(),
+                "converted": cache_valid(store.converted_path(sha)),
                 "url": f"/models/{sha}.ifcx",
             }
         )
@@ -441,6 +452,11 @@ def create_app(hub: BrowserHub) -> FastAPI:
         target = store.models_dir() / name
         if not target.is_file():
             return JSONResponse({"error": "unknown_model"}, status_code=404)
+        if suffix == "ifcx":
+            source_backed = store.source_path(stem).is_file()
+            valid = cache_valid(target) if source_backed else is_valid_ifcx(target)
+            if not valid:
+                return JSONResponse({"error": "invalid_model"}, status_code=404)
         # A 256-bit name is the capability; the middleware already vetted the origin.
         return FileResponse(
             target,
@@ -460,7 +476,7 @@ def create_app(hub: BrowserHub) -> FastAPI:
             return JSONResponse({"error": "no_ifcopenshell"}, status_code=501)
         body = await _json(request)
         sha = str(body.get("sha", ""))
-        if store.is_sha(sha) and store.converted_path(sha).is_file():
+        if store.is_sha(sha) and cache_valid(store.converted_path(sha)):
             return JSONResponse({"status": "done", "percent": 100, "url": f"/models/{sha}.ifcx"})
         try:
             job = provider_jobs.submit(
@@ -767,6 +783,15 @@ def _inject_token(html: str, token: str, port: int) -> str:
     """Hand the app this service served its session token, so Local Studio
     opens ready to work and no human ever handles the token."""
     marker = json.dumps({"token": token, "port": port, "served": True})
+    escapes = (
+        ("&", "\\u0026"),
+        ("<", "\\u003c"),
+        (">", "\\u003e"),
+        ("\u2028", "\\u2028"),
+        ("\u2029", "\\u2029"),
+    )
+    for raw, escaped in escapes:
+        marker = marker.replace(raw, escaped)
     tag = f"<script>window.__IFC_SERVICE__={marker};</script>"
     return html.replace("</head>", f"{tag}</head>", 1) if "</head>" in html else tag + html
 

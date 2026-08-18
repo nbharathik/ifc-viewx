@@ -61,7 +61,27 @@ DUNDER_TEXT = re.compile(r"^__\w+__$")
 FORMAT_DUNDER = re.compile(r"\{[^{}]*\.__")
 #: Callables that resolve an attribute name in C, past `_safe_getattr`. Without
 #: these, `attrgetter("__cla" + "ss__")` walks straight out of the sandbox.
-DENIED_ATTRS = frozenset({"attrgetter", "methodcaller", "Formatter", "format_map", "write"})
+DENIED_ATTRS = frozenset(
+    {
+        "Formatter",
+        "_getframe",
+        "ag_frame",
+        "attrgetter",
+        "builtins",
+        "cr_frame",
+        "f_builtins",
+        "f_globals",
+        "f_locals",
+        "format_map",
+        "gi_frame",
+        "methodcaller",
+        "modules",
+        "os",
+        "sys",
+        "tb_frame",
+        "write",
+    }
+)
 MAX_CODE_CHARS = 100_000
 
 
@@ -89,6 +109,9 @@ class _Walker(ast.NodeVisitor):
             self.fail("relative imports are not allowed")
         elif (node.module or "").split(".")[0] not in ALLOWED_IMPORTS:
             self.fail(f'import of "{node.module}" is not allowed')
+        for alias in node.names:
+            if alias.name in DENIED_ATTRS:
+                self.fail(f'import of "{alias.name}" is not allowed')
         self.generic_visit(node)
 
     # -- names and attributes ----------------------------------------------

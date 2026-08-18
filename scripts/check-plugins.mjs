@@ -4,12 +4,12 @@
 // import "@ifcviewx/sdk" and nothing else from the app. Reaching into core
 // works right up until core moves, so it is caught here instead.
 import { readdir, readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join, sep } from "node:path";
+import { hasNonLiteralDynamicImport, importedPluginId, moduleSpecifiers, pluginImportProblem } from "./plugin-imports.mjs";
 
 const PLUGINS = join("src", "plugins");
+const PLUGIN_PREFIX = `${PLUGINS}${sep}`;
 const NOT_A_PLUGIN = new Set(["runtime"]);
-const IMPORT = /(?:from\s*|import\s*\(\s*)["']([^"']+)["']/g;
-
 const problems = [];
 const fail = (file, message) => problems.push(`${file}: ${message}`);
 
@@ -62,15 +62,16 @@ for (const id of folders) {
     }
   }
 
-  for (const file of files.filter((f) => f.endsWith(".ts"))) {
-    const path = join(dir, file);
+  for await (const path of walk(dir)) {
+    if (!path.endsWith(".ts")) continue;
+    const file = basename(path);
     const source = await readFile(path, "utf8");
-    for (const [, specifier] of source.matchAll(IMPORT)) {
-      const local = specifier.startsWith(".") || specifier.startsWith("/");
-      const escapes = specifier.startsWith("..");
-      if (specifier === "@ifcviewx/sdk") continue;
-      if (local && !escapes) continue;
-      fail(path, `imports "${specifier}"; plugins may only import "@ifcviewx/sdk" and their own files`);
+    for (const specifier of moduleSpecifiers(source, path)) {
+      const problem = pluginImportProblem(dir, path, specifier);
+      if (problem) fail(path, problem);
+    }
+    if (hasNonLiteralDynamicImport(source, path)) {
+      fail(path, "uses a computed dynamic import whose package boundary cannot be verified");
     }
     if (file === "panel.ts") {
       if (/\b(?:PluginContext|ExtensionContextV2)\b/.test(source)) {
@@ -88,12 +89,12 @@ for (const id of folders) {
 // made about plugins being removable stops being true.
 for await (const path of walk("src")) {
   if (!path.endsWith(".ts")) continue;
-  if (path.startsWith(join("src", "plugins"))) continue;
+  if (path.startsWith(PLUGIN_PREFIX)) continue;
   const source = await readFile(path, "utf8");
-  for (const [, specifier] of source.matchAll(IMPORT)) {
-    const reach = /(?:^|\/)plugins\/([^/]+)\/(?!runtime)/.exec(specifier);
-    if (reach && !NOT_A_PLUGIN.has(reach[1])) {
-      fail(path, `imports the "${reach[1]}" plugin; core must not depend on a plugin folder`);
+  for (const specifier of moduleSpecifiers(source, path)) {
+    const pluginId = importedPluginId(specifier);
+    if (pluginId && !NOT_A_PLUGIN.has(pluginId)) {
+      fail(path, `imports the "${pluginId}" plugin; core must not depend on a plugin folder`);
     }
   }
 }

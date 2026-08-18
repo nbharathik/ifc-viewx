@@ -26,13 +26,14 @@ export class SchedulePanel {
   private readonly props = h("input", { type: "text", placeholder: "Pset.Property, Property", list: "schedule-props", "aria-label": "Property columns" });
   private readonly datalist = h("datalist", { id: "schedule-props" });
   private readonly runBtn = h("button", { class: "btn accent", type: "button", text: "Run" });
-  private readonly exportBtn = h("button", { class: "btn", type: "button", title: "Download CSV" }, [icon("download", 14)]);
-  private readonly importBtn = h("button", { class: "btn", type: "button", title: "Import an edited CSV, staged for approval" }, [icon("upload", 14)]);
+  private readonly exportBtn = h("button", { class: "btn", type: "button", title: "Download CSV", "aria-label": "Download CSV" }, [icon("download", 14)]);
+  private readonly importBtn = h("button", { class: "btn", type: "button", title: "Import an edited CSV, staged for approval", "aria-label": "Import an edited CSV" }, [icon("upload", 14)]);
   private readonly importInput = h("input", { type: "file", accept: ".csv,.txt,.tsv", hidden: "" });
   private readonly status = h("div", { class: "status-line" });
   private readonly host = h("div", { class: "grid-wrap hidden" });
   private readonly empty = emptyState("table", "No schedule yet", "Pick a class and run to build a table of every element.");
   private report: ScheduleReport | null = null;
+  private runSeq = 0;
 
   constructor(mount: HTMLElement, private readonly actions: ScheduleActions) {
     this.exportBtn.disabled = true;
@@ -70,6 +71,9 @@ export class SchedulePanel {
 
   /** Repopulate the class list; call after a model loads. */
   refreshTypes(): void {
+    this.runSeq += 1;
+    this.runBtn.disabled = false;
+    this.runBtn.classList.remove("busy");
     const current = this.type.value;
     const types = this.actions.types();
     this.type.replaceChildren(
@@ -95,6 +99,7 @@ export class SchedulePanel {
 
   private async run(): Promise<void> {
     if (this.runBtn.disabled) return;
+    const mine = ++this.runSeq;
     const type = this.type.value || "IfcElement";
     const properties = this.props.value
       .split(",")
@@ -108,17 +113,21 @@ export class SchedulePanel {
     this.status.classList.remove("error");
     try {
       const report = await this.actions.run(type, properties);
+      if (mine !== this.runSeq) return;
       this.report = report;
       this.render(report);
     } catch (err) {
+      if (mine !== this.runSeq) return;
       // A failure with the previous run's table still on screen reads as if
       // that table were the result; drop it, then say what went wrong.
       this.clear();
       this.status.textContent = err instanceof Error ? err.message : String(err);
       this.status.classList.add("error");
     } finally {
-      this.runBtn.disabled = false;
-      this.runBtn.classList.remove("busy");
+      if (mine === this.runSeq) {
+        this.runBtn.disabled = false;
+        this.runBtn.classList.remove("busy");
+      }
     }
   }
 
@@ -145,18 +154,45 @@ export class SchedulePanel {
 
     const head = h("tr", {}, report.columns.map((name) => h("th", { text: name, title: name })));
     const body = h("tbody");
-    for (const row of report.rows) {
+    const renderedRows: HTMLTableRowElement[] = [];
+    let focusIndex = 0;
+    const focusAt = (next: number, focus = true): void => {
+      const bounded = Math.max(0, Math.min(renderedRows.length - 1, next));
+      renderedRows[focusIndex]?.setAttribute("tabindex", "-1");
+      focusIndex = bounded;
+      renderedRows[focusIndex]?.setAttribute("tabindex", "0");
+      if (focus) renderedRows[focusIndex]?.focus();
+    };
+    for (const [index, row] of report.rows.entries()) {
       const id = Number(row.expressID);
-      const tr = h("tr", { title: `Select #${id}` }, report.columns.map((name) => {
+      const tr = h("tr", { title: `Select #${id}`, tabindex: index === 0 ? "0" : "-1", role: "button", "aria-label": `Select element ${id}` }, report.columns.map((name) => {
         const value = row[name];
         const text = value === null || value === undefined ? "" : String(value);
         return h("td", { class: typeof value === "number" ? "num" : "", text, title: text });
       }));
-      tr.addEventListener("click", () => {
+      const select = (): void => {
+        focusAt(index, false);
         body.querySelector("tr.sel")?.classList.remove("sel");
         tr.classList.add("sel");
         if (Number.isFinite(id)) this.actions.select(id);
+      };
+      tr.addEventListener("click", select);
+      tr.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          select();
+          return;
+        }
+        const next = event.key === "ArrowDown" ? index + 1
+          : event.key === "ArrowUp" ? index - 1
+            : event.key === "Home" ? 0
+              : event.key === "End" ? report.rows.length - 1
+                : null;
+        if (next === null) return;
+        event.preventDefault();
+        focusAt(next);
       });
+      renderedRows.push(tr);
       body.appendChild(tr);
     }
     this.host.replaceChildren(h("table", { class: "grid" }, [h("thead", {}, [head]), body]));

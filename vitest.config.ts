@@ -15,10 +15,16 @@ export default defineConfig({
   },
   test: {
     include: ["tests/**/*.test.ts"],
+    // A jsdom instance per CPU can exhaust memory on high-core developer
+    // machines and starve slower workbook/WASM tests. Four keeps useful
+    // parallelism while making the suite deterministic locally and in CI.
+    maxWorkers: 4,
     // UI modules reach for `document` at import time, so even the pure logic
     // they sit beside needs a DOM to be importable.
     environment: "jsdom",
-    // web-ifc has to compile its wasm before the first parse.
-    testTimeout: 30_000,
+    // web-ifc compiles Wasm and workbook tests compress ZIPs in-process. Keep
+    // headroom for their cold tests on contended runners without removing the
+    // guard against genuinely stuck work.
+    testTimeout: 45_000,
   },
 });

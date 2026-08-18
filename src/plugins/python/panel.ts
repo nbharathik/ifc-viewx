@@ -130,7 +130,11 @@ export function mount(host: HTMLElement, ctx: ExtensionContext, payload?: unknow
         output,
         h("div", { class: "out-actions" }, [
           iconButton("copy", "Copy", () => {
-            void navigator.clipboard?.writeText(output.textContent ?? "").then(() => toast("Copied", "success"));
+            if (!navigator.clipboard) return void toast("The browser blocked the clipboard", "error");
+            void navigator.clipboard.writeText(output.textContent ?? "").then(
+              () => toast("Copied", "success"),
+              () => toast("The browser blocked the clipboard", "error"),
+            );
           }, "icon-btn sm ghost"),
           iconButton("trash", "Clear output", () => (output.textContent = ""), "icon-btn sm ghost"),
         ]),

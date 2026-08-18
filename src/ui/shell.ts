@@ -76,6 +76,9 @@ export class Shell {
   private readonly projectDot: HTMLElement;
   private readonly selection: HTMLElement;
   private readonly themeButton: HTMLButtonElement;
+  private readonly compactQuery = typeof window.matchMedia === "function"
+    ? window.matchMedia("(max-width: 900px)")
+    : null;
   private readonly mounted = new Set<TabId>();
   private activeTab: TabId = "properties";
 
@@ -90,6 +93,8 @@ export class Shell {
     this.project = h("span", { class: "model-chip blank" }, [this.projectDot, this.projectName]);
 
     this.themeButton = iconButton("moon", "Switch theme", actions.toggleTheme);
+    const sourceLink = iconLink("github", "Source on GitHub", "https://github.com/nbharathik/ifc-viewx");
+    sourceLink.classList.add("topbar-optional");
     // Panel collapse lives in each panel, not up here: the control belongs
     // next to the thing it hides.
     $("topbar-right").append(
@@ -101,7 +106,7 @@ export class Shell {
       this.themeButton,
       iconButton("settings", "Settings  Ctrl+,", actions.openSettings),
       iconButton("help", "Keyboard shortcuts  ?", actions.openHelp),
-      iconLink("github", "Source on GitHub", "https://github.com/nbharathik/ifc-viewx"),
+      sourceLink,
     );
     $("outliner-actions").appendChild(
       iconButton("panel-left-close", "Collapse  Ctrl+B", () => this.togglePanel("outliner"), "icon-btn sm"),
@@ -149,6 +154,18 @@ export class Shell {
 
     makeResizer({ host: this.outliner, side: "left", cssVar: "--w-outliner", storageKey: "ifcviewx.w.outliner", min: 200, max: 520 });
     makeResizer({ host: this.inspector, side: "right", cssVar: "--w-inspector", storageKey: "ifcviewx.w.inspector", min: 280, max: 680 });
+
+    // Two fixed overlays obscure one another on a phone-sized viewport. Start
+    // with the model unobstructed; either persistent edge control opens one.
+    if (this.isCompactLayout()) {
+      if (this.isPanelOpen("outliner")) this.togglePanel("outliner");
+      if (this.isPanelOpen("inspector")) this.togglePanel("inspector");
+    }
+    this.compactQuery?.addEventListener("change", (event) => {
+      if (event.matches && this.isPanelOpen("outliner") && this.isPanelOpen("inspector")) {
+        this.togglePanel("outliner");
+      }
+    });
   }
 
   // -- chrome ---------------------------------------------------------------
@@ -264,11 +281,18 @@ export class Shell {
 
   togglePanel(which: "outliner" | "inspector"): void {
     const host = which === "outliner" ? this.outliner : this.inspector;
+    if (host.classList.contains("collapsed") && this.isCompactLayout()) {
+      const otherWhich = which === "outliner" ? "inspector" : "outliner";
+      const other = otherWhich === "outliner" ? this.outliner : this.inspector;
+      if (!other.classList.contains("collapsed")) this.togglePanel(otherWhich);
+    }
     const collapsed = host.classList.toggle("collapsed");
+    host.setAttribute("aria-hidden", String(collapsed));
     if (which === "inspector") {
       // The rail is always on screen and reopens the panel, so no pull tab.
       for (const [id, button] of this.tabButtons) {
         button.classList.toggle("active", !collapsed && id === this.activeTab);
+        button.setAttribute("aria-selected", String(!collapsed && id === this.activeTab));
       }
       return;
     }
@@ -279,6 +303,7 @@ export class Shell {
         id: "pull-outliner",
         type: "button",
         title: "Show structure panel  Ctrl+B",
+        "aria-label": "Show structure panel",
       }, [icon("panel-left-open", 12)]);
       tab.addEventListener("click", () => this.togglePanel("outliner"));
       $("workspace").appendChild(tab);
@@ -288,6 +313,10 @@ export class Shell {
   isPanelOpen(which: "outliner" | "inspector"): boolean {
     const host = which === "outliner" ? this.outliner : this.inspector;
     return !host.classList.contains("collapsed");
+  }
+
+  private isCompactLayout(): boolean {
+    return this.compactQuery?.matches ?? false;
   }
 
   setTheme(dark: boolean): void {

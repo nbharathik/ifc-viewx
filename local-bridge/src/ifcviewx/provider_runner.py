@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from contextlib import nullcontext
 from typing import Any, Mapping
 
 from . import store
@@ -30,18 +31,21 @@ def _main() -> None:
     )
     sha = request.get("modelSha")
     context: dict[str, Any] = {"protocolVersion": 1, "modelSha": sha}
-    if sha:
-        model_path = store.source_path(str(sha))
-        if not model_path.is_file():
-            _send("error", code="unknown_model", message="the service does not hold that model")
-            return
-        context["modelPath"] = str(model_path)
-    returned = record.provider.run(
-        str(request["capabilityId"]),
-        context,
-        dict(request.get("input") or {}),
-        _progress,
-    )
+    with store.lease(str(sha)) if sha else nullcontext():
+        # Resolve after the lease marker is published. If eviction won the
+        # lock first we report absence; if leasing won, sweep must retain it.
+        if sha:
+            model_path = store.source_path(str(sha))
+            if not model_path.is_file():
+                _send("error", code="unknown_model", message="the service does not hold that model")
+                return
+            context["modelPath"] = str(model_path)
+        returned = record.provider.run(
+            str(request["capabilityId"]),
+            context,
+            dict(request.get("input") or {}),
+            _progress,
+        )
     result = dict(returned) if isinstance(returned, Mapping) else returned
     if isinstance(result, dict) and result.get("error"):
         _send(

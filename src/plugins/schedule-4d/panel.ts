@@ -147,7 +147,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   const gantt = h("div", { class: "s4d-gantt" });
   const detail = h("div", { class: "s4d-detail" });
   const empty = emptyState("clock", "No schedule loaded", "Open an IFC with tasks or import a CSV with Task ID, Start, Finish and Progress columns.");
-  const search = h("input", { class: "plug-search-input", type: "search", placeholder: "Find task, activity ID or schedule", spellcheck: "false" });
+  const search = h("input", { class: "plug-search-input", type: "search", placeholder: "Find task, activity ID or schedule", spellcheck: "false", "aria-label": "Find task, activity ID, or schedule" });
   const disciplineSelect = select([["all", "All disciplines"]], discipline, (value) => {
     discipline = value;
     syncModelVisibility();

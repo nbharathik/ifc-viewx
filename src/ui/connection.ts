@@ -11,7 +11,7 @@
 // has nothing to pair, so the badge in the top bar is a statement of where you
 // are, not a switch. It opens a popover with the one action that state needs:
 // how to get Local Studio, or what this Local Studio is doing.
-import { closeLayer, h, icon, iconButton, lightDismiss, openLayer, toast } from "./kit.js";
+import { closeLayer, copyText, h, icon, iconButton, lightDismiss, openLayer } from "./kit.js";
 import type { ServiceClient, ServiceMode } from "../bridge/serviceClient.js";
 
 export const INSTALL_CMD = "pip install ifcviewx";
@@ -158,7 +158,7 @@ export class Connection {
   private copyButton(): HTMLElement {
     const copy = h("button", { class: "btn sm accent", type: "button", text: "Copy install command" });
     copy.addEventListener("click", () => {
-      void navigator.clipboard?.writeText(INSTALL_CMD).then(() => toast("Install command copied", "success"));
+      void copyText(INSTALL_CMD, "Install command copied");
     });
     return copy;
   }

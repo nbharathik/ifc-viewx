@@ -6,7 +6,10 @@ import {
   type LocalProvider,
 } from "../src/bridge/serviceClient.js";
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 function localClient(): ServiceClient {
   const client = new ServiceClient();
@@ -26,6 +29,22 @@ function localClient(): ServiceClient {
 
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+}
+
+function eventStream(chunks: Array<string | Uint8Array>): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(typeof chunk === "string" ? encoder.encode(chunk) : chunk);
+      }
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
 }
 
 function job(status: LocalJob["status"]): LocalJob {
@@ -82,6 +101,27 @@ describe("Local Studio provider version matching", () => {
       .rejects.toMatchObject({ name: "AbortError" });
     expect(String(fetchMock.mock.calls[1][0])).toContain("/cancel");
   });
+
+  it("cancels a provider job that exceeds its declared deadline", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (request) => {
+      const url = String(request);
+      return response(job(url.endsWith("/cancel") ? "cancelled" : "running"));
+    });
+    const client = localClient();
+    const provider = (client as unknown as { providers: LocalProvider[] }).providers[0];
+    provider.capabilities[0].timeoutSeconds = 1;
+
+    const pending = client.invokeLocal("org.example.native", "^1.2", "geometry.exact");
+    const outcome = pending.then(
+      () => new Error("job unexpectedly resolved"),
+      (error: unknown) => error instanceof Error ? error : new Error(String(error)),
+    );
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(31_100);
+    expect((await outcome).message).toContain("exceeded its 1-second deadline");
+    expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain("/cancel");
+  });
 });
 
 describe("Local Studio assistant stream", () => {
@@ -116,5 +156,43 @@ describe("Local Studio assistant stream", () => {
     expect(turn).toEqual({ text: "Checking", calls: [{ id: "c1", name: "counts", input: {} }], toolsUsed: true });
     expect(deltas).toEqual(["Checking"]);
     expect(usage).toEqual({ input: 19, output: 4 });
+  });
+
+  it("rejects a stream that closes without a final event", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(eventStream([
+      'data: {"type":"text_delta","delta":"partial"}\n\n',
+    ]));
+
+    await expect(localClient().converse([{ role: "user", content: "Count" }], []))
+      .rejects.toThrow("ended before its final event");
+  });
+
+  it("rejects malformed and non-object event payloads", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    for (const payload of ["{", "null", "[]"]) {
+      fetchMock.mockResolvedValueOnce(eventStream([`data: ${payload}\n\n`]));
+      await expect(localClient().converse([{ role: "user", content: "Count" }], []))
+        .rejects.toThrow("malformed assistant stream event");
+    }
+  });
+
+  it("rejects events after the final event", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(eventStream([
+      'data: {"type":"done","text":"complete"}\n\n',
+      'data: {"type":"text_delta","delta":"late"}\n\n',
+    ]));
+
+    await expect(localClient().converse([{ role: "user", content: "Count" }], []))
+      .rejects.toThrow("data after the final assistant event");
+  });
+
+  it("flushes the UTF-8 decoder and rejects a truncated code point", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(eventStream([
+      'data: {"type":"done","text":"complete"}\n\n',
+      new Uint8Array([0xf0, 0x9f]),
+    ]));
+
+    await expect(localClient().converse([{ role: "user", content: "Count" }], []))
+      .rejects.toThrow("invalid UTF-8");
   });
 });

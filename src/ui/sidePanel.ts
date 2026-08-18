@@ -99,8 +99,8 @@ export class AssistantPanel {
     this.busyText,
     this.busyClock,
   ]);
-  private readonly input = h("textarea", { rows: "1" });
-  private readonly send = h("button", { class: "btn accent send", type: "button", title: "Send  Enter" }, [icon("message", 14)]);
+  private readonly input = h("textarea", { rows: "1", "aria-label": "Assistant message" });
+  private readonly send = h("button", { class: "btn accent send", type: "button", title: "Send  Enter", "aria-label": "Send message" }, [icon("message", 14)]);
 
   private readonly modeButtons = new Map<AssistantMode, HTMLButtonElement>();
   private readonly settings: AssistantSettings;

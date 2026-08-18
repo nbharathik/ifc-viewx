@@ -496,12 +496,14 @@ export async function loadCachedSource(sha: string): Promise<Uint8Array | null> 
   return store.readSource(sha);
 }
 
-/** True when the buffer is a format v1 container (magic "IFCX"). */
+/** True when the buffer has a committed format-v1 header and trailer. */
 export function isFormatBytes(bytes: Uint8Array): boolean {
-  return (
-    bytes.byteLength > 16 &&
-    new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true) === MAGIC
-  );
+  if (bytes.byteLength < 16) return false;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint32(0, true) !== MAGIC || view.getUint32(4, true) !== FORMAT_VERSION) return false;
+  const manifestBytes = view.getUint32(bytes.byteLength - 8, true);
+  return view.getUint32(bytes.byteLength - 4, true) === MAGIC_END
+    && manifestBytes <= bytes.byteLength - 16;
 }
 
 /**

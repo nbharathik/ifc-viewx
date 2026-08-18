@@ -32,6 +32,10 @@ ESCAPES = [
     "async def go():\n    pass",
     "def f():\n    global model",
     "def __init__(self):\n    pass",
+    "import uuid\nuuid.os.mkdir('outside')",
+    "from uuid import os as helper\nhelper.mkdir('outside')",
+    "import typing\nframe = typing.sys._getframe(1)\nresult = frame.f_builtins",
+    "import typing\nresult = typing.sys.modules",
 ]
 
 ALLOWED = [

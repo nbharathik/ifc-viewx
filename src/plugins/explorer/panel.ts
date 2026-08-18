@@ -37,7 +37,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): void {
   const controls = h("div", {});
   const chips = h("div", { class: "chips" });
   const table = h("div", { class: "plug-results" });
-  const search = h("input", { type: "search", class: "plug-search-input", placeholder: "Search every column" });
+  const search = h("input", { type: "search", class: "plug-search-input", placeholder: "Search every column", "aria-label": "Search every column" });
   search.addEventListener("input", () => {
     query = search.value.trim().toLowerCase();
     paint();

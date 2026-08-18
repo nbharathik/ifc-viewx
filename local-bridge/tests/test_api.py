@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import struct
 import time
 
 import pytest
 
 from ifcviewx import store
+from ifcviewx.convert import FORMAT_VERSION, MAGIC, MAGIC_END, mark_cache
+
+
+def _ifcx_bytes() -> bytes:
+    manifest = json.dumps({"stats": {}, "bounds": {}, "tree": []}).encode()
+    return (
+        struct.pack("<2I", MAGIC, FORMAT_VERSION)
+        + manifest
+        + struct.pack("<2I", len(manifest), MAGIC_END)
+    )
 
 GUARDED = [
     ("post", "/model"),
@@ -39,6 +52,28 @@ def test_health_is_public_but_thin_without_a_token(client, auth) -> None:
 
     private = client.get("/health", headers=auth).json()
     assert "store" in private and "llm" in private
+
+
+def test_invalid_numeric_configuration_falls_back_to_safe_values(env) -> None:
+    settings = env(
+        IFCVIEWX_PORT="nan",
+        IFCVIEWX_MEMORY_GB="-1",
+        IFCVIEWX_MAX_UPLOAD_MB="inf",
+        IFCVIEWX_PYTHON_TIMEOUT="-5",
+        IFCVIEWX_STORE_GB="1e300",
+    )
+    assert settings.port == 8765
+    assert settings.memory_bytes == 4 * 1024**3
+    assert settings.max_upload_bytes == 2048 * 1024**2
+    assert settings.python_timeout_s == 120
+    assert settings.store_quota_bytes == 20 * 1024**3
+
+
+def test_configured_directories_are_absolute(env, tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    settings = env(IFCVIEWX_MODELS="relative-models", IFCVIEWX_STATE="relative-state")
+    assert settings.store_dir.is_absolute()
+    assert settings.state_dir.is_absolute()
 
 
 def test_pre_rename_env_names_still_work(env) -> None:
@@ -120,6 +155,14 @@ def test_upload_rejects_files_that_are_not_ifc(client, auth) -> None:
     assert response.json()["error"] == "not_ifc"
 
 
+def test_upload_rejects_an_empty_file(client, auth) -> None:
+    response = client.post(
+        "/model", headers=auth, files={"file": ("empty.ifc", b"", "application/octet-stream")}
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "not_ifc"
+
+
 def test_upload_stores_by_content_hash(client, auth, sample_ifc) -> None:
     payload = sample_ifc.read_bytes()
     first = client.post("/model", headers=auth, files={"file": ("m.ifc", payload)}).json()
@@ -127,6 +170,56 @@ def test_upload_stores_by_content_hash(client, auth, sample_ifc) -> None:
     assert store.is_sha(first["sha"])
     assert first["sha"] == second["sha"], "the same bytes must not be stored twice"
     assert store.source_path(first["sha"]).is_file()
+
+
+def test_source_backed_ifcx_requires_a_current_cache_marker(
+    client, auth, sample_ifc
+) -> None:
+    payload = sample_ifc.read_bytes()
+    sha = hashlib.sha256(payload).hexdigest()
+    target = store.converted_path(sha)
+    target.write_bytes(_ifcx_bytes())
+
+    stale = client.post(
+        "/model", headers=auth, files={"file": ("m.ifc", payload, "application/octet-stream")}
+    )
+    assert stale.status_code == 200
+    assert stale.json()["converted"] is False
+    assert client.get(f"/models/{sha}.ifcx").status_code == 404
+
+    mark_cache(target)
+    current = client.post(
+        "/model", headers=auth, files={"file": ("m.ifc", payload, "application/octet-stream")}
+    )
+    assert current.json()["converted"] is True
+    assert client.get(f"/models/{sha}.ifcx").status_code == 200
+
+
+def test_bare_imported_ifcx_does_not_require_a_cache_marker(client) -> None:
+    sha = "a" * 64
+    store.converted_path(sha).write_bytes(_ifcx_bytes())
+    assert not store.source_path(sha).exists()
+    assert client.get(f"/models/{sha}.ifcx").status_code == 200
+
+
+def test_upload_reservation_keeps_the_matching_converted_cache(
+    client, auth, sample_ifc, monkeypatch
+) -> None:
+    payload = sample_ifc.read_bytes()
+    sha = hashlib.sha256(payload).hexdigest()
+    calls: list[tuple[object, object, set[str]]] = []
+    original_commit = store.commit_staging
+
+    def tracking_commit(staging, target, *, keep: set[str] | None = None):
+        calls.append((staging, target, set(keep or ())))
+        return original_commit(staging, target, keep=keep)
+
+    monkeypatch.setattr(store, "commit_staging", tracking_commit)
+    response = client.post(
+        "/model", headers=auth, files={"file": ("m.ifc", payload, "application/octet-stream")}
+    )
+    assert response.status_code == 200
+    assert any(target == store.source_path(sha) and sha in keep for _, target, keep in calls)
 
 
 def test_model_route_refuses_names_that_are_not_hashes(client) -> None:
@@ -155,6 +248,17 @@ def test_readonly_blocks_writes_but_allows_reads(env, auth, sample_ifc) -> None:
     upload = ro.post("/model", headers=auth, files={"file": ("m.ifc", sample_ifc.read_bytes())})
     assert upload.status_code == 403
     assert ro.get("/health").status_code == 200
+    assert "convert" not in ro.get("/health").json()["capabilities"]
+
+
+def test_custom_token_is_escaped_before_html_injection() -> None:
+    from ifcviewx.app import _inject_token
+
+    token = "</script><script>globalThis.pwned=1</script>"
+    html = _inject_token("<html><head></head><body></body></html>", token, 8765)
+    assert html.count("</script>") == 1
+    assert token not in html
+    assert "\\u003c/script\\u003e" in html
 
 
 def test_python_can_be_disabled_entirely(env, auth) -> None:

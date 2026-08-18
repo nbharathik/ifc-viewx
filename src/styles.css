@@ -182,6 +182,7 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
 ::-webkit-scrollbar-corner { background: transparent; }
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; border-radius: var(--r1); }
+.ifc-tree-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 /* ---- Shell ---------------------------------------------------------------- */
 #app {
@@ -189,6 +190,9 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
   /* bar, ribbon, pending edit, workspace, status. Rows are pinned because a
      hidden pending bar generates no box and would slide the rest up one row. */
   grid-template-rows: var(--h-bar) auto auto 1fr var(--h-status);
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  min-width: 0;
   height: 100vh;
   overflow: hidden;
   position: relative;
@@ -208,6 +212,7 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
   border-bottom: 1px solid var(--line);
   position: relative;
   z-index: 40;
+  min-width: 0;
 }
 
 /* The mark and its tile come from index.html, which defines them before this
@@ -647,7 +652,14 @@ kbd {
 /* ---- Workspace ------------------------------------------------------------ */
 /* outliner | viewport | inspector | rail. The rail is never collapsed, so the
    way back to a panel is always in the same place. */
-#workspace { display: grid; grid-template-columns: auto 1fr auto auto; position: relative; min-height: 0; }
+#workspace {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
 
 #outliner,
 #inspector {
@@ -3182,9 +3194,11 @@ table.grid tr.warn td { color: var(--warn); }
    keeping the viewport and its analysis instruments usable without hiding any
    user panel state. */
 @media (max-width: 1120px) {
+  #workspace { grid-template-columns: minmax(0, 1fr) auto; }
   #inspector { position: absolute; right: calc(38px * var(--ui, 1)); top: 0; bottom: 0; z-index: 9; box-shadow: var(--shadow); }
   #outliner { position: absolute; left: 0; top: 0; bottom: 0; z-index: 9; box-shadow: var(--shadow); }
-  #viewer-host { grid-column: 1 / span 3; }
+  #viewer-host { grid-column: 1; }
+  #rail { grid-column: 2; }
   #measure-card {
     top: auto;
     left: auto;
@@ -3199,6 +3213,24 @@ table.grid tr.warn td { color: var(--warn); }
   #inspector { width: min(var(--w-inspector), 60vw); }
 }
 @media (max-width: 720px) {
+  #topbar { padding-left: 5px; }
+  #topbar > .grow { display: none; }
+  .brand { margin-right: 3px; }
+  #ribbon-tabs {
+    flex: 1 1 auto;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: none;
+  }
+  #ribbon-tabs::-webkit-scrollbar { height: 0; }
+  #topbar-right { flex: 0 0 auto; }
+  #topbar-right > .model-chip,
+  #topbar-right > .sb-item,
+  #topbar-right > .bar-sep,
+  #topbar-right > .top-slot,
+  #topbar-right > .topbar-optional { display: none; }
+  .rib-tab { padding-inline: 8px; }
+
   #plugin-dialog .dlg-head { flex-wrap: wrap; }
   #plugin-dialog .dlg-head > span:nth-child(2) { margin-right: auto; }
   #plugin-dialog .plug-search { order: 4; flex-basis: 100%; max-width: none; margin: 3px 0 0; }
