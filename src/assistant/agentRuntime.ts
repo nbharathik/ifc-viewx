@@ -28,6 +28,8 @@ export interface AgentRuntimeUi {
   addEvidence(references: EvidenceReference[]): void;
   addRestoreView(label: string, restore: () => void): void;
   addIssueProposal(payload: Record<string, unknown>, references: EvidenceReference[]): void;
+  /** A view, computed property or ruleset the assistant authored. */
+  addDefinitionProposal?(payload: Record<string, unknown>): void;
   setBusy(busy: boolean): void;
   setStatus(text: string, isError?: boolean): void;
   resetAttachment(): void;
@@ -192,6 +194,12 @@ export class AgentRuntime {
             allEvidence.push(...outcome.done.evidence);
             if (outcome.done.capabilityId === "issue.stage" && outcome.done.value && typeof outcome.done.value === "object") {
               ui.addIssueProposal(outcome.done.value as Record<string, unknown>, outcome.done.evidence);
+            }
+            // A definition is the safest thing the assistant can produce: the
+            // user reads it, names it and keeps it, rather than watching the
+            // view change and having to work out what happened.
+            if (outcome.done.capabilityId.startsWith("definition.") && outcome.done.value && typeof outcome.done.value === "object") {
+              ui.addDefinitionProposal?.(outcome.done.value as Record<string, unknown>);
             }
           } else failed = true;
           const giveUp = !outcome.done && repairs >= MAX_REPAIRS;

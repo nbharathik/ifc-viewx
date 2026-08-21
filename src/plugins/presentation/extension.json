@@ -1,0 +1,41 @@
+{
+  "manifestVersion": 2,
+  "id": "presentation",
+  "name": "Presentation",
+  "version": "1.0.0",
+  "sdk": ">=2.0.0 <3",
+  "description": "Ordered slides built from saved views, with camera paths between them, playback and a recorded walkthrough.",
+  "runtime": { "kind": "bundled", "entry": "panel.ts" },
+  "activationEvents": ["onPanel:presentation"],
+  "permissions": [
+    "model.summary.read",
+    "model.structure.read",
+    "model.index.build",
+    "view.read",
+    "view.control",
+    "viewport.capture",
+    "storage.extension",
+    "file.export"
+  ],
+  "contributes": {
+    "panels": [{ "id": "presentation", "title": "Presentation", "icon": "walk" }],
+    "exporters": [
+      { "id": "presentation.deck", "title": "Slide deck", "mimeTypes": ["application/json"] },
+      { "id": "presentation.video", "title": "Recorded walkthrough", "mimeTypes": ["video/webm"] }
+    ]
+  },
+  "catalog": {
+    "tagline": "Saved views as an ordered walkthrough, played or recorded",
+    "about": "Once views exist, a design review is mostly sequencing. Order them into slides, give each a dwell time, and the camera flies between them on an eased path. Play it in the meeting, or record it as a video and send that instead of the screen recording somebody makes by hand at the end of every review.",
+    "icon": "walk",
+    "category": "Review",
+    "keywords": "presentation slides walkthrough flythrough camera path record video design review demo",
+    "does": [
+      "Build slides from saved views, in any order",
+      "Eased camera flight between slides, with per-slide dwell and travel time",
+      "Play full screen, or step through with the keyboard",
+      "Record the walkthrough to a WebM video",
+      "Save the deck as a file the project keeps"
+    ]
+  }
+}

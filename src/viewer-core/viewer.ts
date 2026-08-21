@@ -12,6 +12,7 @@ import { AxisGizmo } from './panels/axisGizmo.js';
 import { LoadingOverlay, ErrorCard } from './panels/overlays.js';
 import { CancelledError } from './engine/types.js';
 import { TriangleStore } from './scene/triangleStore.js';
+import { XrController, type XrMode } from './scene/xr.js';
 import { expressOf, modelOf, packId } from './ids.js';
 import { explodeOffsets, storeyElementSets, storeySlideOffsets } from './arrange.js';
 import { compassPoint, heading, metres, speedLabel, storeyAt, type StoreyBand } from './flyStats.js';
@@ -355,6 +356,8 @@ export interface VisibilityRule {
   label: string;
   mode: 'keep' | 'hide';
   ids: number[];
+  /** How the rule was built, when the caller could say. Saved views read it. */
+  selector?: unknown;
 }
 
 /** One point in the visibility history: everything `applyVisibility` reads. */
@@ -566,6 +569,14 @@ export interface Viewer {
   getLodCulled(): number;
   /** Re-read the host's theme variables and recolor the viewport. */
   updateTheme(): void;
+  /** Light the model from a real sun direction; null restores the neutral rig. */
+  setSun(direction: [number, number, number] | null): void;
+  getSun(): [number, number, number] | null;
+  /** Draw a scan as points, in scene coordinates. Null clears it. */
+  setPointCloud(positions: Float32Array | null, colors?: Float32Array | null, size?: number): void;
+  setPointCloudSize(size: number): void;
+  setPointCloudVisible(visible: boolean): void;
+  hasPointCloud(): boolean;
   fitToModel(): CameraPose;
   fitToElement(expressID: number): CameraPose | null;
   /** Frame an arbitrary point, such as where two elements collide. */
@@ -729,6 +740,19 @@ export interface Viewer {
   captureImage(maxWidth?: number, type?: string, quality?: number): Promise<Blob | null>;
   /** The 2D plan alone, square, at its own resolution. Null when it is off. */
   capturePlanImage(size?: number, type?: string, quality?: number): Promise<Blob | null>;
+  /**
+   * A live video stream of the viewport, for recording a walkthrough. Null in
+   * a browser without captureStream. The caller owns stopping it.
+   */
+  captureStream(fps?: number): MediaStream | null;
+  // -- immersive review ------------------------------------------------------
+  /** Whether this browser and headset can run the mode at all. */
+  xrSupported(mode: XrMode): Promise<boolean>;
+  /** Enter VR or AR. Must be called from a user gesture. */
+  startXr(mode: XrMode): Promise<void>;
+  exitXr(): Promise<void>;
+  xrMode(): XrMode | null;
+  onXrChange(listener: (mode: XrMode | null) => void): () => void;
   /** Save the plan as a PNG; false when there is no plan to save. */
   downloadPlan(name?: string): Promise<boolean>;
   /** Performance settings. */
@@ -770,6 +794,41 @@ const SNAP_LABEL: Record<SnapKind, string> = {
   surface: 'Face',
 };
 
+/** Update the small flight table without parsing model-owned text as markup. */
+export function updateFlyReadout(
+  readout: HTMLElement,
+  rows: readonly (readonly [label: string, value: string])[],
+): void {
+  const current = [...readout.children];
+  const reusable =
+    current.length === rows.length &&
+    current.every((row, index) =>
+      row.children.length === 2 &&
+      row.firstElementChild?.tagName === 'SPAN' &&
+      row.firstElementChild.textContent === rows[index][0] &&
+      row.lastElementChild?.tagName === 'B',
+    );
+  if (!reusable) {
+    const doc = readout.ownerDocument;
+    readout.replaceChildren(
+      ...rows.map(([label, value]) => {
+        const row = doc.createElement('div');
+        const name = doc.createElement('span');
+        const output = doc.createElement('b');
+        name.textContent = label;
+        output.textContent = value;
+        row.append(name, output);
+        return row;
+      }),
+    );
+    return;
+  }
+  rows.forEach(([, value], index) => {
+    const output = current[index].lastElementChild!;
+    if (output.textContent !== value) output.textContent = value;
+  });
+}
+
 class ViewerImpl implements Viewer {
   private engine: AsyncIfcEngine | null = null;
   private readonly scene: SceneController;
@@ -779,6 +838,7 @@ class ViewerImpl implements Viewer {
   private readonly treePanel: TreePanel | null;
   private readonly perfHud: PerfHud;
   private readonly axisGizmo: AxisGizmo;
+  private readonly xr: XrController;
   private readonly loadingOverlay: LoadingOverlay | null;
   private readonly errorCard: ErrorCard;
   private initialized: Promise<AsyncIfcEngine> | null = null;
@@ -891,6 +951,18 @@ class ViewerImpl implements Viewer {
     this.scene = new SceneController(this.canvas, {
       background: options.background ?? 0x1e1e1e,
       antialias: options.antialias,
+    });
+    this.xr = new XrController({
+      renderer: this.scene.renderer,
+      draw: () => this.scene.render(),
+      // Standing on the floor of the model, under the point the camera was
+      // looking at, rather than at a scene origin that may be far outside it.
+      standAt: () => {
+        const pose = this.controls.getPose();
+        const bounds = this.scene.getBounds();
+        return [pose.target[0], bounds.min.y, pose.target[2]];
+      },
+      setPresenting: (on) => this.scene.setPresenting(on),
     });
     this.controls = new ViewerControls(this.scene, this.container, () => this.scene.render(), {
       // Ctrl/Cmd/Shift-click adds to or removes from the selection; a plain
@@ -2887,16 +2959,15 @@ class ViewerImpl implements Viewer {
     const facing = heading(this.scene.getViewDirection(), this.scene.getViewUp());
     const storey = storeyAt(this.storeyBands, p[1]);
     const speed = this.controls.getFlySpeed() ?? 0;
-    const row = (label: string, value: string): string =>
-      `<div><span>${label}</span><b>${value}</b></div>`;
-    const text =
-      row('At', `${metres(p[0] + origin[0])}, ${metres(p[2] + origin[2])}`) +
-      row('Height', `${metres(p[1] + origin[1])} m`) +
-      (storey ? row('Level', storey) : '') +
-      row('Facing', `${compassPoint(facing)} ${Math.round(facing)}°`) +
-      row('Speed', speedLabel(speed)) +
-      row('Zoom', `${Math.round(this.scene.getFieldOfView())}°`);
-    if (this.flyReadout && this.flyReadout.innerHTML !== text) this.flyReadout.innerHTML = text;
+    const rows: Array<readonly [string, string]> = [
+      ['At', `${metres(p[0] + origin[0])}, ${metres(p[2] + origin[2])}`],
+      ['Height', `${metres(p[1] + origin[1])} m`],
+      ...(storey ? [['Level', storey] as const] : []),
+      ['Facing', `${compassPoint(facing)} ${Math.round(facing)}°`],
+      ['Speed', speedLabel(speed)],
+      ['Zoom', `${Math.round(this.scene.getFieldOfView())}°`],
+    ];
+    if (this.flyReadout) updateFlyReadout(this.flyReadout, rows);
   }
 
   private syncPlanFrame(): void {
@@ -3882,6 +3953,62 @@ class ViewerImpl implements Viewer {
     return new Promise((resolve) => source.toBlob((blob) => resolve(blob), type, quality));
   }
 
+  xrSupported(mode: XrMode): Promise<boolean> {
+    return this.xr.supported(mode);
+  }
+
+  startXr(mode: XrMode): Promise<void> {
+    return this.xr.start(mode);
+  }
+
+  exitXr(): Promise<void> {
+    return this.xr.end();
+  }
+
+  xrMode(): XrMode | null {
+    return this.xr.current();
+  }
+
+  onXrChange(listener: (mode: XrMode | null) => void): () => void {
+    return this.xr.onChange(listener);
+  }
+
+  setSun(direction: [number, number, number] | null): void {
+    this.scene.setSun(direction);
+    this.scene.render();
+  }
+
+  getSun(): [number, number, number] | null {
+    return this.scene.getSun();
+  }
+
+  setPointCloud(positions: Float32Array | null, colors: Float32Array | null = null, size = 0.02): void {
+    this.scene.setPointCloud(positions, colors, size);
+    this.scene.render();
+  }
+
+  setPointCloudSize(size: number): void {
+    this.scene.setPointCloudSize(size);
+    this.scene.render();
+  }
+
+  setPointCloudVisible(visible: boolean): void {
+    this.scene.setPointCloudVisible(visible);
+    this.scene.render();
+  }
+
+  hasPointCloud(): boolean {
+    return this.scene.hasPointCloud();
+  }
+
+  captureStream(fps = 30): MediaStream | null {
+    const canvas = this.canvas as HTMLCanvasElement & { captureStream?: (rate: number) => MediaStream };
+    if (typeof canvas.captureStream !== 'function') return null;
+    // A frame is only produced when the canvas is drawn to, so a still model
+    // records as a still frame rather than as a stalled stream.
+    return canvas.captureStream(fps);
+  }
+
   capturePlanImage(size = 1600, type = 'image/png', quality = 0.92): Promise<Blob | null> {
     const canvas = this.scene.capturePlan(size);
     if (!canvas) return Promise.resolve(null);
@@ -3953,6 +4080,9 @@ class ViewerImpl implements Viewer {
   }
 
   dispose(): void {
+    // Stop the headset-owned animation loop and initiate session closure while
+    // the renderer it is attached to is still alive.
+    this.xr.dispose();
     if (this.hoverFrame) cancelAnimationFrame(this.hoverFrame);
     this.hoverFrame = 0;
     this.hoverPending = null;

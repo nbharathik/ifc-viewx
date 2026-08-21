@@ -84,6 +84,9 @@ export const TOOLS = [
   ["result__open", "make a prior result active and return its first page", { handle: { type: "string" }, row: { type: "integer" } }, ["handle"]],
   ["result__select", "select elements referenced by prior result rows", { handle: { type: "string" }, rows: { type: "array", items: { type: "integer" } } }, ["handle"]],
   ["result__isolate", "isolate elements referenced by prior result rows", { handle: { type: "string" }, rows: { type: "array", items: { type: "integer" } } }, ["handle"]],
+  ["graph__neighbours", "the graph around one element: its spatial path, what shares its storey, and what it touches", { expressId: { type: "integer" }, touching: { type: "boolean" }, limit: { type: "integer" } }, ["expressId"]],
+  ["graph__spaces", "which spaces an element passes through, by geometry rather than by property", { expressId: { type: "integer" }, expressIds: { type: "array", items: { type: "integer" } } }, []],
+  ["docket__triage", "group the findings docket, rank it and propose a responsible discipline per group", { set: { type: "string" }, limit: { type: "integer" } }, []],
 ];
 
 const SYSTEM = `You are the assistant inside IFCViewX, a fast IFC viewer. The IFC file and geometry stay on this device. Compact viewer context and tool reports go to the configured provider.

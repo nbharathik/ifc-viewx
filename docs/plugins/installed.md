@@ -23,8 +23,17 @@ Validated packages and settings are stored in browser OPFS. If OPFS is not
 available, IFCViewX uses session memory and records that fallback in the audit.
 Uninstalling removes both saved package versions and namespaced settings.
 
-There is no URL installer, marketplace, automatic update, or automatic trust
-decision. Installation and updates always start from a local file.
+There is no automatic update or automatic trust decision. A release may also
+enable a read-only registry browser by pinning one publisher key at build time.
+Every registry index must be signed by that key, and every downloaded package
+must match the exact size and SHA-256 hash in the signed index before the normal
+permission review opens. Builds without a pinned key keep the registry disabled;
+local file installation remains available.
+
+Maintainers enable a registry by setting `VITE_PLUGIN_REGISTRY_JWK` to the JSON
+encoding of a public P-256 JWK during the production build. Registry URLs must
+use HTTPS (plain HTTP is accepted only on localhost for development). The key is
+not fetched from the registry, so changing publishers requires a new app build.
 
 ## Package layout
 

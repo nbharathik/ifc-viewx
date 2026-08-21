@@ -19,8 +19,15 @@ Drop an IFC file on it. Nothing to install, nothing uploaded.
 
 * Local-first IFC viewer: runs on your machine, with no uploads, no tracking, and no cloud dependency
 * Private by default: your models stay local, with secure local tools and offline reporting
-* Built for BIM workflows: model tree, measurements, sections, saved views, filters, legends, and selection sets
-* Quality and coordination: IDS validation, clash detection, model compare, quantity takeoff, and more
+* Built for BIM workflows: model tree, measurements, sections, filters, legends, and selection sets
+* A definitions layer: saved views and computed properties stored as rules, so one file re-runs on the next
+  revision and can be handed to the rest of the team
+* Quality and coordination: IDS validation, a rule engine for the geometric checks IDS cannot express, offline
+  IFC conformance checking, clash detection, model compare, quantity takeoff and a free-form report builder
+* The drawing set: import the issued PDF, calibrate it, overlay the model's own plan cut, click through to 3D
+  and raise BCF from a markup
+* Installable and offline: add it to a tablet's home screen and open a cached model with no connection, or hand
+  over one share package holding the model, the views, the drawings and the issues
 * Extensible platform: plugin support for browser and local studio workflows, plus Python and IfcOpenShell tools
 
 No file to hand? Open the viewer and pick **try a sample building** to check out the viewer and its tools.
@@ -56,7 +63,7 @@ Bundled and installable extensions share one permission-scoped SDK contract.
 
 | In the browser | Local Studio | Built into the app |
 | --- | --- | --- |
-| Clash Detection, Element Explorer, Model Compare, Python Console, Quantity Takeoff, Room Book, Storey Navigator | Assistant Key Vault, IfcOpenShell Converter, MCP Bridge, Native Python | Element Schedules, IDS Validation, Issue Tracker, Model Checks, Model Edits, Smart Filters |
+| Clash Detection, Element Explorer, Model Compare, Point Cloud, Presentation, Python Console, Quantity Takeoff, Report Builder, Room Book, Rule Studio, Sheets, Storey Navigator, Sun and Shadow | Assistant Key Vault, IfcOpenShell Converter, MCP Bridge, Native Python | Element Schedules, IDS Validation, IFC Conformance, Issue Tracker, Model Checks, Model Edits, Results Dock, Saved Views, Smart Filters |
 
 Want to build an extension? See [Writing an extension](https://nbharathik.github.io/ifc-viewx/docs/plugins/), the [SDK reference](https://nbharathik.github.io/ifc-viewx/docs/plugins/api/), and [working on the repo](https://nbharathik.github.io/ifc-viewx/docs/contributing/).
 

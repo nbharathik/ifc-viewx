@@ -335,6 +335,10 @@ export class ViewerControls {
     this.fly = fly;
     this.orbit.enabled = false;
     this.interacting = true;
+    // Ribbon/menu activation leaves focus on its button. The keyboard guard
+    // correctly reserves button keystrokes for UI, so hand focus to the
+    // viewport before WASD begins; pointer lock does not do that for us.
+    dom.focus({ preventScroll: true });
     // The plan doubles as the locator while flying, so it comes up with the
     // flight and goes away again unless it was already open. Rendering is on
     // change, so the inset needs a frame asked for or it waits for the first
@@ -457,6 +461,11 @@ export class ViewerControls {
     this.orbit.mouseButtons = on
       ? { LEFT: null, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }
       : { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+    // A tablet has no second button, so the same handover happens by finger
+    // count: one finger belongs to the tool and two still move the camera.
+    this.orbit.touches = on
+      ? { ONE: null, TWO: THREE.TOUCH.DOLLY_PAN }
+      : { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
   }
 
   /** Apply a pose, keeping OrbitControls' target in sync. */

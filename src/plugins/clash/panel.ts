@@ -651,6 +651,22 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       `${open.length.toLocaleString()} open coordination result(s) in ${definition().name}. ${resolved.length.toLocaleString()} resolved.`,
       findings,
     );
+    // The same rows on the shared dock, so a coordination meeting can walk
+    // clash and rule findings in one list instead of two panels.
+    ctx.feedback.publishResults({
+      title: definition().name,
+      summary: `${open.length.toLocaleString()} open, ${resolved.length.toLocaleString()} resolved, ${ignored.toLocaleString()} ignored`,
+      rows: open.slice(0, 1000).map((row) => ({
+        id: row.fingerprint,
+        severity: row.kind === "hard" && row.distance * 1000 > SEVERE_MM ? "error" : "warning",
+        title: `${shortType(row.aType)} vs ${shortType(row.bType)}`,
+        detail: `${row.kind === "hard" ? "penetration" : "gap"} ${Math.round(row.distance * 1000)} mm`,
+        group: `${shortType(row.aType)} vs ${shortType(row.bType)}`,
+        ids: [row.a, row.b],
+        point: row.point,
+        assignee: row.assignee,
+      })),
+    });
   };
 
   const visibleRows = (): ClashReviewRow[] => reviewRows.filter((row) => (

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   OpenCdeClient,
   OpenCdeEndpointTrustError,
+  type OpenCdeAuth,
   type OpenCdeFetch,
 } from "../src/opencde/client.js";
 
@@ -75,5 +76,70 @@ describe("OpenCDE client", () => {
     await expect(client.connect("http://cde.example.com", { kind: "none" }))
       .rejects.toMatchObject({ code: "insecure_server" });
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("does not expose mutable session or authentication state", async () => {
+    const calls: Array<{ url: string; headers: Headers; redirect?: RequestRedirect }> = [];
+    const fetcher: OpenCdeFetch = vi.fn(async (input, init) => {
+      const url = String(input);
+      calls.push({ url, headers: new Headers(init?.headers), redirect: init?.redirect });
+      if (url.endsWith("/foundation/versions")) return response({ versions: [
+        { api_id: "foundation", version_id: "1.0", api_base_url: "https://cde.test/foundation/1.0" },
+        { api_id: "bcf", version_id: "3.0", api_base_url: "https://cde.test/bcf/3.0" },
+      ] });
+      return response([]);
+    });
+    const auth: OpenCdeAuth = { kind: "bearer", token: "original" };
+    const client = new OpenCdeClient(fetcher);
+
+    const returned = await client.connect("cde.test", auth);
+    returned.bcfBaseUrl = "https://attacker.test/bcf";
+    returned.versions[0].api_base_url = "https://attacker.test/foundation";
+    auth.token = "mutated";
+    const snapshot = client.getSession()!;
+    snapshot.bcfBaseUrl = "https://attacker.test/again";
+    await client.projects();
+
+    expect(calls.at(-1)?.url).toContain("https://cde.test/bcf/3.0/projects");
+    expect(calls.at(-1)?.headers.get("Authorization")).toBe("Bearer original");
+    expect(calls.at(-1)?.redirect).toBe("error");
+  });
+
+  it("does not send a request for an already-aborted operation", async () => {
+    const fetcher = vi.fn<OpenCdeFetch>(async (input) => String(input).endsWith("/foundation/versions")
+      ? response({ versions: [
+        { api_id: "foundation", version_id: "1.0", api_base_url: "https://cde.test/foundation/1.0" },
+        { api_id: "bcf", version_id: "3.0", api_base_url: "https://cde.test/bcf/3.0" },
+      ] })
+      : response([]));
+    const client = new OpenCdeClient(fetcher);
+    await client.connect("cde.test", { kind: "none" });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(client.projects(controller.signal)).rejects.toMatchObject({ code: "cancelled" });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("prevents an older connection response from replacing a newer session", async () => {
+    const pending = new Map<string, (response: Response) => void>();
+    const fetcher: OpenCdeFetch = vi.fn(async (input) => new Promise<Response>((resolve) => {
+      pending.set(new URL(String(input)).hostname, resolve);
+    }));
+    const versions = (host: string) => response({ versions: [
+      { api_id: "foundation", version_id: "1.0", api_base_url: `https://${host}/foundation/1.0` },
+      { api_id: "bcf", version_id: "3.0", api_base_url: `https://${host}/bcf/3.0` },
+    ] });
+    const client = new OpenCdeClient(fetcher);
+    const older = client.connect("older.test", { kind: "none" });
+    const olderOutcome = older.then(() => null, (error: unknown) => error);
+    const newer = client.connect("newer.test", { kind: "none" });
+
+    await vi.waitFor(() => expect([...pending.keys()].sort()).toEqual(["newer.test", "older.test"]));
+    pending.get("newer.test")!(versions("newer.test"));
+    await newer;
+    pending.get("older.test")!(versions("older.test"));
+    await expect(olderOutcome).resolves.toMatchObject({ code: "connection_superseded" });
+    expect(client.getSession()?.serverUrl).toBe("https://newer.test");
   });
 });

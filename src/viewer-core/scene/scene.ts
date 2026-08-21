@@ -231,6 +231,13 @@ export class SceneController {
   private readonly raycaster = new THREE.Raycaster();
   /** Invoked after every render pass; used to keep DOM overlays in sync. */
   onAfterRender: (() => void) | null = null;
+  /** True while an immersive session owns the frame loop. */
+  private presenting = false;
+  private keyLight: THREE.DirectionalLight | null = null;
+  private fillLight: THREE.DirectionalLight | null = null;
+  private hemiLight: THREE.HemisphereLight | null = null;
+  private sunDirection: [number, number, number] | null = null;
+  private pointCloud: THREE.Points | null = null;
 
   constructor(canvas: HTMLCanvasElement, colors: SceneColors = DEFAULT_COLORS) {
     this.colors = colors;
@@ -257,6 +264,9 @@ export class SceneController {
     const dir2 = new THREE.DirectionalLight(0xffffff, 0.5);
     dir2.position.set(-6, 4, -5);
     this.scene.add(dir2);
+    this.keyLight = dir;
+    this.fillLight = dir2;
+    this.hemiLight = hemi;
 
     this.batcher = new ModelBatcher();
     this.scene.add(this.batcher.group);
@@ -1649,6 +1659,93 @@ export class SceneController {
     this.batcher.setDoubleSided(double);
   }
 
+  /**
+   * Light the model from the real sun instead of the studio rig. The
+   * direction points from the sun toward the model, so the light sits the
+   * other way along it. Null puts the neutral rig back.
+   */
+  setSun(direction: [number, number, number] | null): void {
+    this.sunDirection = direction;
+    if (!this.keyLight || !this.fillLight || !this.hemiLight) return;
+    if (!direction) {
+      this.keyLight.position.set(5, 10, 7.5);
+      this.keyLight.intensity = 1.6;
+      this.fillLight.intensity = 0.5;
+      this.hemiLight.intensity = 1.1;
+      return;
+    }
+    const length = Math.hypot(direction[0], direction[1], direction[2]) || 1;
+    const reach = Math.max(50, this.batcher.getBounds().max.y * 4);
+    this.keyLight.position.set(
+      (-direction[0] / length) * reach,
+      (-direction[1] / length) * reach,
+      (-direction[2] / length) * reach,
+    );
+    // Below the horizon the sun contributes nothing; the sky alone is what a
+    // dusk study should look like rather than a light shining up from below.
+    const above = -direction[1] / length;
+    this.keyLight.intensity = above > 0 ? 1.2 + above * 1.4 : 0;
+    this.fillLight.intensity = above > 0 ? 0.18 : 0.1;
+    this.hemiLight.intensity = above > 0 ? 0.75 : 0.55;
+  }
+
+  getSun(): [number, number, number] | null {
+    return this.sunDirection;
+  }
+
+  /**
+   * A scan, drawn as points. One layer at a time: a second call replaces the
+   * first, and the geometry it built is disposed rather than left on the GPU.
+   * Positions are scene coordinates; the caller owns the placement.
+   */
+  setPointCloud(positions: Float32Array | null, colors: Float32Array | null, size = 0.02): void {
+    if (this.pointCloud) {
+      this.scene.remove(this.pointCloud);
+      this.pointCloud.geometry.dispose();
+      (this.pointCloud.material as THREE.Material).dispose();
+      this.pointCloud = null;
+    }
+    if (!positions || positions.length < 3) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    if (colors && colors.length === positions.length) {
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    }
+    geometry.computeBoundingSphere();
+    const material = new THREE.PointsMaterial({
+      size,
+      sizeAttenuation: true,
+      vertexColors: Boolean(colors && colors.length === positions.length),
+      color: 0xdddddd,
+    });
+    const points = new THREE.Points(geometry, material);
+    // A scan is context, not model: it must not be picked, and it must not
+    // drag the fit-to-model framing out to the far end of a survey.
+    points.frustumCulled = true;
+    points.renderOrder = -1;
+    points.name = 'ifc-point-cloud';
+    this.scene.add(points);
+    this.pointCloud = points;
+  }
+
+  setPointCloudSize(size: number): void {
+    if (!this.pointCloud) return;
+    (this.pointCloud.material as THREE.PointsMaterial).size = Math.max(0.001, size);
+  }
+
+  setPointCloudVisible(visible: boolean): void {
+    if (this.pointCloud) this.pointCloud.visible = visible;
+  }
+
+  hasPointCloud(): boolean {
+    return this.pointCloud !== null;
+  }
+
+  /** Inside a headset, the gizmo corner and the plan inset are meaningless. */
+  setPresenting(on: boolean): void {
+    this.presenting = on;
+  }
+
   render(): void {
     const t0 = performance.now();
     if (needsMeasureLayout(this.measureSpans, this.measureLive, this.measureHover, this.measure?.visible ?? false)) {
@@ -1659,12 +1756,15 @@ export class SceneController {
     // reports, which is a handful of arrows rather than the model.
     this.renderer.info.reset();
     this.lodCulled = this.lodThreshold > 0
-      ? this.batcher.applyLod(this.camera, this.renderer.domElement.height, this.lodThreshold)
+      ? this.batcher.applyLod(this.camera, this.renderer.domElement.height, this.lodThreshold) +
+        this.batcher.applyElementLod(this.camera, this.renderer.domElement.height, this.lodThreshold)
       : 0;
     this.renderer.render(this.scene, this.camera);
     if (this.showThrough && this.batcher.hasHighlight()) this.renderShowThrough();
-    this.renderGizmos();
-    if (this.plan) this.renderPlan();
+    if (!this.presenting) {
+      this.renderGizmos();
+      if (this.plan) this.renderPlan();
+    }
     this.lastRenderMs = performance.now() - t0;
     this.renderTimestamps.push(t0);
     if (this.renderTimestamps.length > 240) this.renderTimestamps.shift();

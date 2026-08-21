@@ -3,10 +3,13 @@ import type { GridAxisLine, IfcGridInfo } from "../viewer-core/engine/types.js";
 type Line = Record<string, unknown> & { expressID?: number };
 type Point = [number, number, number];
 
-export interface GridAxesSource {
-  grids: Line[];
+export interface PlacementSource {
   line(expressID: number): Line | null;
   typeName(expressID: number): string;
+}
+
+export interface GridAxesSource extends PlacementSource {
+  grids: Line[];
   /** Multiplier turning file plane-angle values into radians. */
   angleFactor: number;
   /** Optional 4x4 column-major matrix applied after the placement chain. */
@@ -70,12 +73,12 @@ function tripleOf(coords: unknown): Point | null {
   return [nums[0] ?? 0, nums[1] ?? 0, nums[2] ?? 0];
 }
 
-function pointOf(id: number | null, source: GridAxesSource): Point | null {
+function pointOf(id: number | null, source: PlacementSource): Point | null {
   const line = id === null ? null : source.line(id);
   return line ? tripleOf(line.Coordinates) : null;
 }
 
-function directionOf(id: number | null, source: GridAxesSource): Point | null {
+function directionOf(id: number | null, source: PlacementSource): Point | null {
   const line = id === null ? null : source.line(id);
   return line ? tripleOf(line.DirectionRatios) : null;
 }
@@ -109,7 +112,7 @@ export function multiply(a: number[], b: number[]): number[] {
   return out;
 }
 
-function apply(m: number[], p: Point): Point {
+export function transformPoint(m: number[], p: Point): Point {
   return [
     m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
     m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
@@ -118,7 +121,7 @@ function apply(m: number[], p: Point): Point {
 }
 
 /** IfcAxis2Placement3D or 2D to a column-major matrix; 2D fields default into 3D. */
-function axis2Matrix(place: Line, source: GridAxesSource): number[] {
+function axis2Matrix(place: Line, source: PlacementSource): number[] {
   const location = pointOf(ref(place.Location), source) ?? [0, 0, 0];
   const axis = directionOf(ref(place.Axis), source) ?? [0, 0, 1];
   const refDir = directionOf(ref(place.RefDirection), source) ?? [1, 0, 0];
@@ -129,22 +132,60 @@ function axis2Matrix(place: Line, source: GridAxesSource): number[] {
   return [x[0], x[1], x[2], 0, y[0], y[1], y[2], 0, z[0], z[1], z[2], 0, location[0], location[1], location[2], 1];
 }
 
-/** Composed IfcLocalPlacement chain; stops at anything else (IfcGridPlacement). */
-function placementMatrix(product: Line, source: GridAxesSource): number[] {
+interface PlacementResolution {
+  matrix: number[];
+  complete: boolean;
+}
+
+/** Composed IfcLocalPlacement chain, retaining whether every link was usable. */
+function resolvePlacement(product: Line, source: PlacementSource): PlacementResolution {
   let matrix = identity();
   let placementId = ref(product.ObjectPlacement);
   const seen = new Set<number>();
-  while (placementId !== null && !seen.has(placementId)) {
+  let complete = true;
+  while (placementId !== null) {
+    if (seen.has(placementId)) {
+      complete = false;
+      break;
+    }
     seen.add(placementId);
-    if (source.typeName(placementId) !== "IfcLocalPlacement") break;
+    if (source.typeName(placementId) !== "IfcLocalPlacement") {
+      complete = false;
+      break;
+    }
     const placement = source.line(placementId);
-    if (!placement) break;
+    if (!placement) {
+      complete = false;
+      break;
+    }
     const relId = ref(placement.RelativePlacement);
     const relative = relId === null ? null : source.line(relId);
-    if (relative) matrix = multiply(axis2Matrix(relative, source), matrix);
+    if (relative) {
+      const type = source.typeName(relId!);
+      if (type !== "IfcAxis2Placement2D" && type !== "IfcAxis2Placement3D") complete = false;
+      if (ref(relative.Location) === null || pointOf(ref(relative.Location), source) === null) complete = false;
+      const axisId = ref(relative.Axis);
+      const refDirectionId = ref(relative.RefDirection);
+      if (axisId !== null && directionOf(axisId, source) === null) complete = false;
+      if (refDirectionId !== null && directionOf(refDirectionId, source) === null) complete = false;
+      matrix = multiply(axis2Matrix(relative, source), matrix);
+    } else {
+      complete = false;
+    }
     placementId = ref(placement.PlacementRelTo);
   }
-  return matrix;
+  return { matrix, complete };
+}
+
+/** Composed placement for permissive callers such as grid display. */
+function placementMatrix(product: Line, source: PlacementSource): number[] {
+  return resolvePlacement(product, source).matrix;
+}
+
+/** A complete local-placement chain, or null when evaluating it would guess. */
+export function completeLocalPlacementMatrix(product: Line, source: PlacementSource): number[] | null {
+  const resolved = resolvePlacement(product, source);
+  return resolved.complete ? resolved.matrix : null;
 }
 
 interface TrimSelect {
@@ -354,7 +395,7 @@ export function extractGridAxes(source: GridAxesSource): IfcGridInfo[] {
         if (!boolValue(axis.SameSense, true)) local.reverse();
         const points: number[] = [];
         for (const point of local) {
-          const placed = apply(matrix, point);
+          const placed = transformPoint(matrix, point);
           points.push(placed[0], placed[1], placed[2]);
         }
         axes.push({ label: nullableText(axis.AxisTag), axisGroup, points });

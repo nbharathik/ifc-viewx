@@ -4,6 +4,7 @@
 // round trip per element. It is built once per model and shared, so opening a
 // second data plugin costs nothing.
 import { toast } from "../ui/kit.js";
+import type { ComputedSet, ComputeContext } from "../data/computed.js";
 import type { ModelElement } from "./types.js";
 import type { SpatialNode, Viewer } from "../viewer-core/viewer.js";
 
@@ -54,12 +55,62 @@ export class PropertyIndex {
   private builtFor = "";
   private building: Promise<ElementRow[]> | null = null;
   private generation = 0;
+  private revisionCount = 0;
+  /** Derived properties folded into every row, so they read like real ones. */
+  private computed: ComputedSet | null = null;
   private readonly listeners = new Set<(done: number, total: number) => void>();
+  private readonly changed = new Set<() => void>();
 
   constructor(
     private readonly viewer: Viewer,
     private readonly modelKey: () => string,
   ) {}
+
+  /**
+   * Install the computed-property set. Rows already built are recomputed in
+   * place, so a definition edited mid-session shows up everywhere at once.
+   */
+  setComputed(computed: ComputedSet | null): void {
+    this.computed = computed;
+    if (this.ready()) this.applyComputed();
+    this.revisionCount++;
+    for (const listener of this.changed) listener();
+  }
+
+  /** Increments whenever the rows or the computed values change. */
+  revision(): number {
+    return this.revisionCount;
+  }
+
+  onChange(listener: () => void): () => void {
+    this.changed.add(listener);
+    return () => this.changed.delete(listener);
+  }
+
+  private computeContext(): ComputeContext {
+    return {
+      geometry: (id: number) => {
+        const bounds = this.viewer.getElementBounds(id);
+        return bounds
+          ? { min: [bounds.min.x, bounds.min.y, bounds.min.z], max: [bounds.max.x, bounds.max.y, bounds.max.z] }
+          : null;
+      },
+    };
+  }
+
+  private applyComputed(): void {
+    const context = this.computeContext();
+    for (const row of this.rows) {
+      if (!row) continue;
+      if (this.computed) this.computed.applyTo(row, context);
+      else {
+        for (const key of Object.keys(row.props)) {
+          if (key.startsWith("Computed.")) delete row.props[key];
+        }
+      }
+    }
+    this.keys = [];
+  }
 
   ready(): boolean {
     return this.builtFor !== "" && this.builtFor === this.modelKey();
@@ -127,6 +178,9 @@ export class PropertyIndex {
     this.rows = rows;
     this.keys = [];
     this.builtFor = key;
+    this.applyComputed();
+    this.revisionCount++;
+    for (const listener of this.changed) listener();
     return rows;
   }
 
@@ -162,7 +216,11 @@ export function download(name: string, data: BlobPart, type: string): void {
 
 export function toCsv(headers: string[], rows: Array<Array<Value | undefined>>): string {
   const cell = (value: Value | undefined): string => {
-    const text = value === null || value === undefined ? "" : String(value);
+    const raw = value === null || value === undefined ? "" : String(value);
+    // IFC property values are untrusted input. Spreadsheet applications can
+    // execute leading formula operators in CSV cells; preserve actual numeric
+    // values, but force operator-prefixed strings to remain literal text.
+    const text = typeof value === "string" && /^[=+\-@\t\r\n]/.test(raw) ? `'${raw}` : raw;
     return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   };
   return [headers, ...rows].map((row) => row.map(cell).join(",")).join("\r\n");

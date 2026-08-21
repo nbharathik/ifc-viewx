@@ -128,6 +128,9 @@ export class Ribbon {
     return this.collapsed;
   }
 
+  /** Chrome outside the ribbon that mirrors the same state, kept in step. */
+  onSync: (() => void) | null = null;
+
   /** Refresh enabled/pressed state of what is currently on screen. */
   sync(): void {
     for (const { el, id } of this.bound) {
@@ -138,6 +141,7 @@ export class Ribbon {
       el.classList.toggle("off", !this.registry.isAvailable(id));
     }
     for (const control of this.controls) control.sync?.();
+    this.onSync?.();
   }
 
   private onTabClick(id: string): void {

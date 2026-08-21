@@ -2,11 +2,15 @@
 // wires it the same way, but there is nothing to download: web-ifc is already
 // in the bundle, so checks, schedules and edits are available on first paint.
 import type { ValidationReport } from "./checks.js";
+import type { ConformanceReport } from "./conformance.js";
+import type { AlignmentReport } from "./alignment.js";
 import type { ScheduleReport } from "./schedule.js";
 import type { EditOp, EditOutcome } from "./edits.js";
 import type { IfcRequest, IfcResponse } from "./ifc.worker.js";
 
 export type { ValidationReport, Check, Severity } from "./checks.js";
+export type { ConformanceCheck, ConformanceReport } from "./conformance.js";
+export type { AlignmentReport, SampledAlignment } from "./alignment.js";
 export type { ScheduleReport } from "./schedule.js";
 export type { EditOp, EditDiff, EditOutcome } from "./edits.js";
 
@@ -141,6 +145,26 @@ export class IfcEngine {
     const message = await this.send({ type: "validate", id: 0 });
     this.assertRevision(revision);
     return (message as { payload: ValidationReport }).payload;
+  }
+
+  /**
+   * The offline conformance pass. Same worker, same parsed model, and the
+   * file never leaves the machine, which is the whole point of running it
+   * here rather than sending it to a service.
+   */
+  async conformance(): Promise<ConformanceReport> {
+    const revision = await this.ready();
+    const message = await this.send({ type: "conformance", id: 0 });
+    this.assertRevision(revision);
+    return (message as { payload: ConformanceReport }).payload;
+  }
+
+  /** IFC 4.3 alignments, sampled into drivable paths with their chainage. */
+  async alignments(): Promise<AlignmentReport> {
+    const revision = await this.ready();
+    const message = await this.send({ type: "alignments", id: 0 });
+    this.assertRevision(revision);
+    return (message as { payload: AlignmentReport }).payload;
   }
 
   async schedule(ifcType: string, properties: string[] = [], limit = 500): Promise<ScheduleReport> {

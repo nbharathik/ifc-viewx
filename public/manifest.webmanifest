@@ -1,0 +1,26 @@
+{
+  "name": "IFCViewX",
+  "short_name": "IFCViewX",
+  "description": "Fast, private IFC viewing. Files never leave this device.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b0c0e",
+  "theme_color": "#0b0c0e",
+  "categories": ["productivity", "utilities", "business"],
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ],
+  "file_handlers": [
+    {
+      "action": ".",
+      "accept": {
+        "application/x-step": [".ifc"],
+        "application/octet-stream": [".ifcx"],
+        "application/vnd.ifcviewx.package": [".ifcpkg"]
+      }
+    }
+  ]
+}

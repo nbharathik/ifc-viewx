@@ -1,24 +1,27 @@
 import type { JsonSchema } from "../capabilities/types.js";
 
-export type ExtensionPermission =
-  | "model.summary.read"
-  | "model.structure.read"
-  | "model.properties.read"
-  | "model.index.build"
-  | "geometry.query"
-  | "geometry.mesh.read"
-  | "view.read"
-  | "view.control"
-  | "view.overlay"
-  | "review.issue.create"
-  | "edit.propose"
-  | "automation.python"
-  | "file.open"
-  | "file.export"
-  | "storage.extension"
-  | "assistant.contribute"
-  | "local.invoke"
-  | "viewport.capture";
+export const EXTENSION_PERMISSIONS = [
+  "model.summary.read",
+  "model.structure.read",
+  "model.properties.read",
+  "model.index.build",
+  "geometry.query",
+  "geometry.mesh.read",
+  "view.read",
+  "view.control",
+  "view.overlay",
+  "review.issue.create",
+  "edit.propose",
+  "automation.python",
+  "file.open",
+  "file.export",
+  "storage.extension",
+  "assistant.contribute",
+  "local.invoke",
+  "viewport.capture",
+] as const;
+
+export type ExtensionPermission = typeof EXTENSION_PERMISSIONS[number];
 
 export interface PanelContribution {
   id: string;

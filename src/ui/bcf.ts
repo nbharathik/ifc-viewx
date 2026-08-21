@@ -1,7 +1,7 @@
 // BCF: issues pinned to a viewpoint. Topics can stay beside the model in this
 // browser, travel as a .bcfzip (BCF 2.1), or sync with an OpenCDE BCF 3 project.
 // Cameras use viewer world coordinates so they round trip exactly here.
-import { confirmAction, h, icon, iconButton, lightDismiss, toast } from "./kit.js";
+import { busyRow, confirmAction, h, icon, iconButton, lightDismiss, promptForm, toast } from "./kit.js";
 import { emptyState } from "./shell.js";
 import type { ReportIssue } from "./report.js";
 import type { CameraPose, Viewer } from "../viewer-core/viewer.js";
@@ -360,6 +360,8 @@ export interface BcfActions {
   viewer: Viewer;
   modelName(): string;
   log(message: string, kind?: "info" | "success" | "error"): void;
+  /** Load a file the CDE handed over: as the model, or beside it to compare. */
+  openDocument?(name: string, bytes: Uint8Array, intent: "open" | "compare"): Promise<void>;
   openCdeFetch?: OpenCdeFetch;
 }
 
@@ -685,6 +687,15 @@ export class BcfPanel {
     }, [icon("refresh", 13), h("span", { text: this.syncing ? "Syncing" : "Sync" })]);
     sync.addEventListener("click", () => void this.sync());
     const disconnect = iconButton("x", "Disconnect project", () => this.disconnect(), "icon-btn sm");
+    // Revisions arriving through the connection they were issued on, rather
+    // than through the downloads folder, is the other half of a CDE link.
+    const documents = iconButton(
+      "folder",
+      this.client.hasDocuments() ? "Documents on this CDE" : "This server does not advertise the Documents API",
+      () => void this.openDocuments(),
+      "icon-btn sm",
+    );
+    documents.disabled = !this.client.hasDocuments();
     const host = new URL(active.serverUrl).host;
     const detail = count
       ? `${count} queued · ${host}`
@@ -699,9 +710,105 @@ export class BcfPanel {
         h("span", { text: detail, title: active.serverUrl }),
       ]),
       count ? h("span", { class: "cde-queue", text: String(count), title: "Queued changes" }) : h("span"),
+      documents,
       sync,
       disconnect,
     );
+  }
+
+  /**
+   * The Documents half of the CDE link. A document listed here is pulled
+   * straight into the viewer: opened, added to the federation, or sent into
+   * Model Compare against what is already open, which is the whole reason a
+   * revision matters.
+   */
+  async openDocuments(): Promise<void> {
+    if (!this.client.hasDocuments()) {
+      return void toast("This server does not advertise the OpenCDE Documents API", "info");
+    }
+    const list = h("div", { class: "reg-list" });
+    const body = h("div", { class: "dlg-body" }, [busyRow("Reading the document register")]);
+    const close = h("button", { class: "btn primary", type: "button", text: "Close" });
+    const reference = h("button", { class: "btn", type: "button", text: "Open a reference" });
+    const dialog = h("dialog", { class: "form-dialog wide", "aria-label": "CDE documents" }, [
+      h("div", { class: "dlg-head" }, [h("span", { text: "Documents" })]),
+      body,
+      h("div", { class: "dlg-foot" }, [reference, close]),
+    ]) as HTMLDialogElement;
+    close.addEventListener("click", () => dialog.close());
+    reference.addEventListener("click", () => {
+      promptForm(
+        "Open a document reference",
+        [{ key: "url", label: "Reference URL", hint: "The URL a BCF topic or the server's picker handed over." }],
+        "Open",
+        (values) => {
+          const url = values.url.trim();
+          if (!url) return;
+          void this.client
+            .documentReference(url)
+            .then((document_) => this.pullDocument(document_))
+            .catch((error: unknown) => toast(error instanceof Error ? error.message : String(error), "error"));
+        },
+      );
+    });
+    dialog.addEventListener("close", () => dialog.remove());
+    document.body.appendChild(dialog);
+    dialog.showModal();
+
+    try {
+      const documents = await this.client.documents();
+      if (documents.length === 0) {
+        body.replaceChildren(h("div", {
+          class: "note",
+          text: "This server lists no documents through the API. Use Open a reference with the URL its own picker or a BCF topic gives you.",
+        }));
+        return;
+      }
+      for (const document_ of documents) list.appendChild(this.documentRow(document_));
+      body.replaceChildren(list);
+    } catch (error) {
+      body.replaceChildren(h("div", { class: "note error", text: error instanceof Error ? error.message : String(error) }));
+    }
+  }
+
+  private documentRow(document_: { guid: string; name: string; version?: string; size?: number }): HTMLElement {
+    const open = h("button", { class: "btn sm accent", type: "button", text: "Open" });
+    open.addEventListener("click", () => {
+      open.disabled = true;
+      void this.pullDocument(document_).finally(() => {
+        open.disabled = false;
+      });
+    });
+    const compare = h("button", { class: "btn sm", type: "button", text: "Compare" });
+    compare.addEventListener("click", () => {
+      compare.disabled = true;
+      void this.pullDocument(document_, "compare").finally(() => {
+        compare.disabled = false;
+      });
+    });
+    return h("div", { class: "reg-row" }, [
+      h("div", { class: "grow" }, [
+        h("b", { text: `${document_.name}${document_.version ? ` ${document_.version}` : ""}` }),
+        h("small", { text: document_.size ? `${(document_.size / 1e6).toFixed(1)} MB` : document_.guid }),
+      ]),
+      compare,
+      open,
+    ]);
+  }
+
+  private async pullDocument(
+    document_: { guid: string; name: string; downloadUrl?: string },
+    intent: "open" | "compare" = "open",
+  ): Promise<void> {
+    if (!this.actions.openDocument) {
+      return void toast("This build cannot open a document from the CDE", "error");
+    }
+    try {
+      const content = await this.client.documentContent(document_);
+      await this.actions.openDocument(content.name, content.bytes, intent);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
   }
 
   private disconnect(): void {

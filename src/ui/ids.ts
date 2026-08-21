@@ -1,4 +1,5 @@
 // IDS validation shared by the inspector, assistant and IDS Studio plugin.
+import { publishDocket, type DocketRow } from "./resultsDock.js";
 import { h, icon, spinner } from "./kit.js";
 import { emptyState } from "./shell.js";
 import { scanElements } from "./filters.js";
@@ -424,7 +425,54 @@ export async function runIds(
     onSpec?.(result, index, total);
   }
   last = summarize(results);
+  publishIdsDocket(results);
   return results;
+}
+
+/** The run, as rows on the shared dock, grouped by specification. */
+function publishIdsDocket(results: SpecResult[]): void {
+  const rows: DocketRow[] = [];
+  for (const result of results) {
+    const group = result.spec.name;
+    if (result.blocked.length) {
+      rows.push({
+        id: `${group}-blocked`,
+        severity: "warning",
+        title: `${group} could not be evaluated`,
+        detail: `Unsupported applicability: ${result.blocked.join(", ")}`,
+        group,
+        ids: [],
+      });
+      continue;
+    }
+    if (result.applicabilityIssue) {
+      rows.push({
+        id: `${group}-applicability`,
+        severity: "error",
+        title: result.applicabilityIssue,
+        group,
+        ids: [],
+      });
+    }
+    for (const failure of result.failures) {
+      rows.push({
+        id: `${group}-${failure.id}`,
+        severity: "error",
+        title: failure.reason,
+        detail: failure.suggestion,
+        group,
+        ids: [failure.id],
+      });
+    }
+  }
+  const failed = results.filter((result) => result.failures.length || result.applicabilityIssue).length;
+  publishDocket({
+    id: "ids",
+    producer: "IDS",
+    title: loaded?.title ?? "IDS",
+    summary: `${failed} of ${results.length} specification(s) failed`,
+    rows,
+  });
 }
 
 export type IdsSpecReport = {
@@ -457,6 +505,11 @@ export type IdsReport = {
 let last: IdsReport | null = null;
 
 export const lastIdsReport = (): IdsReport | null => last;
+
+/** A model load invalidates the previous run, while keeping the IDS file ready to run again. */
+export const clearLastIdsReport = (): void => {
+  last = null;
+};
 
 /** One run flattened, shared by the assistant and the report. */
 function summarize(results: SpecResult[]): IdsReport {

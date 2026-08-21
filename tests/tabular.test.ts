@@ -110,6 +110,12 @@ describe("round trip", () => {
     const back = parseDelimited(toCsv(table[0], table.slice(1)));
     expect(diffTable(tricky, back).changes).toEqual([]);
   });
+
+  it("neutralizes formula-like model text without changing numeric values", () => {
+    const csv = toCsv(["Name", "Offset"], [["=HYPERLINK(\"https://attacker.invalid\")", -1.5]]);
+    const back = parseDelimited(csv);
+    expect(back[1]).toEqual(["'=HYPERLINK(\"https://attacker.invalid\")", "-1.5"]);
+  });
 });
 
 describe("diffTable", () => {

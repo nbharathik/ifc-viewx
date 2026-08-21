@@ -4,11 +4,11 @@ import type { Viewer } from "../viewer-core/viewer.js";
 import type {
   DistanceResult, DistanceSpec, GeometryDiagnostics, GeometryRequest, GeometryResponse, LaserResult, LaserSpec,
   MeshesResult, MeshesSpec, SectionContourResult, SectionContourSpec, GeometrySignatureResult, GeometrySignatureSpec,
-  VolumesResult, VolumesSpec, PlaneClassifyResult, PlaneClassifySpec,
+  DeviationResult, DeviationSpec, SunResult, SunSpec, VolumesResult, VolumesSpec, PlaneClassifyResult, PlaneClassifySpec,
 } from "./types.js";
 
 interface Pending {
-  kind: "clash" | "distance" | "laser" | "sectionContours" | "signatures" | "volumes" | "classifyPlane" | "meshes";
+  kind: "clash" | "distance" | "laser" | "sectionContours" | "signatures" | "volumes" | "sun" | "deviation" | "classifyPlane" | "meshes";
   resolve(value: unknown): void;
   reject(error: Error): void;
   onProgress?(progress: SweepProgress): void;
@@ -26,6 +26,8 @@ interface InlineRunner {
   sectionContours(spec: SectionContourSpec, cancelled?: () => boolean): Promise<SectionContourResult>;
   signatures(spec: GeometrySignatureSpec, cancelled?: () => boolean): Promise<GeometrySignatureResult>;
   volumes(spec: VolumesSpec, cancelled?: () => boolean): Promise<VolumesResult>;
+  sun(spec: SunSpec, cancelled?: () => boolean): Promise<SunResult>;
+  deviation(spec: DeviationSpec, cancelled?: () => boolean): Promise<DeviationResult>;
   classifyPlane(spec: PlaneClassifySpec, cancelled?: () => boolean): Promise<PlaneClassifyResult>;
   meshes(spec: MeshesSpec, cancelled?: () => boolean): Promise<MeshesResult>;
 }
@@ -38,6 +40,7 @@ export class GeometryService {
   private readonly cancelled = new Set<number>();
   private readonly inlineActive = new Map<number, Pending["kind"]>();
   private sequence = 0;
+  private failure: Error | null = null;
 
   constructor(private readonly store: TriangleStore) {}
 
@@ -61,8 +64,10 @@ export class GeometryService {
     signal?: AbortSignal,
   ): Promise<SweepResult> {
     if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
-    this.cancelKind("clash");
     await this.start();
+    // Two calls can share the first startup promise. Cancel only after that
+    // barrier, when an earlier call has actually registered its work.
+    this.cancelKind("clash");
     const id = ++this.sequence;
     this.cancelled.delete(id);
     if (this.inline) {
@@ -71,7 +76,7 @@ export class GeometryService {
       this.inlineActive.set(id, "clash");
       try {
         const result = await this.inline.clash(spec, onProgress, () => this.cancelled.has(id));
-        if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
+        if (signal?.aborted || this.cancelled.has(id)) throw new DOMException("Geometry query cancelled", "AbortError");
         return result;
       } finally {
         this.inlineActive.delete(id);
@@ -272,6 +277,83 @@ export class GeometryService {
     });
   }
 
+  async sun(spec: SunSpec, signal?: AbortSignal): Promise<SunResult> {
+    if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
+    await this.start();
+    const id = ++this.sequence;
+    this.cancelled.delete(id);
+    if (this.inline) {
+      const abort = (): void => void this.cancelled.add(id);
+      signal?.addEventListener("abort", abort, { once: true });
+      this.inlineActive.set(id, "sun");
+      try {
+        const result = await this.inline.sun(spec, () => this.cancelled.has(id));
+        if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
+        return result;
+      } finally {
+        this.inlineActive.delete(id);
+        signal?.removeEventListener("abort", abort);
+        this.cancelled.delete(id);
+      }
+    }
+    return new Promise<SunResult>((resolve, reject) => {
+      const abort = (): void => this.cancelRequest(id);
+      this.pending.set(id, {
+        kind: "sun",
+        resolve,
+        reject,
+        cleanup: () => signal?.removeEventListener("abort", abort),
+      });
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) return abort();
+      this.worker?.postMessage({ type: "sun", id, priority: 1, spec } satisfies GeometryRequest, [
+        spec.points.buffer,
+        spec.directions.buffer,
+        spec.ids.buffer,
+        spec.offsets.buffer,
+        ...(spec.transforms ? [spec.transforms.buffer] : []),
+      ] as Transferable[]);
+    });
+  }
+
+  async deviation(spec: DeviationSpec, signal?: AbortSignal): Promise<DeviationResult> {
+    if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
+    await this.start();
+    const id = ++this.sequence;
+    this.cancelled.delete(id);
+    if (this.inline) {
+      const abort = (): void => void this.cancelled.add(id);
+      signal?.addEventListener("abort", abort, { once: true });
+      this.inlineActive.set(id, "deviation");
+      try {
+        const result = await this.inline.deviation(spec, () => this.cancelled.has(id));
+        if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
+        return result;
+      } finally {
+        this.inlineActive.delete(id);
+        signal?.removeEventListener("abort", abort);
+        this.cancelled.delete(id);
+      }
+    }
+    return new Promise<DeviationResult>((resolve, reject) => {
+      const abort = (): void => this.cancelRequest(id);
+      this.pending.set(id, {
+        kind: "deviation",
+        resolve,
+        reject,
+        cleanup: () => signal?.removeEventListener("abort", abort),
+      });
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) return abort();
+      this.worker?.postMessage({ type: "deviation", id, priority: 1, spec } satisfies GeometryRequest, [
+        spec.points.buffer,
+        spec.ids.buffer,
+        spec.offsets.buffer,
+        ...(spec.transforms ? [spec.transforms.buffer] : []),
+      ] as Transferable[]);
+    });
+  }
+
   async classifyPlane(spec: PlaneClassifySpec, signal?: AbortSignal): Promise<PlaneClassifyResult> {
     if (signal?.aborted) throw new DOMException("Geometry query cancelled", "AbortError");
     await this.start();
@@ -351,6 +433,7 @@ export class GeometryService {
   }
 
   private start(): Promise<void> {
+    if (this.failure) return Promise.reject(this.failure);
     if (this.starting) return this.starting;
     if (typeof Worker === "undefined") {
       this.starting = Promise.all([
@@ -361,11 +444,13 @@ export class GeometryService {
         import("./sectionQuery.js"),
         import("./signatureQuery.js"),
         import("./volumeQuery.js"),
+        import("./sunQuery.js"),
+        import("./deviationQuery.js"),
         import("./planeQuery.js"),
         import("./meshQuery.js"),
       ]).then(([
         { GeometryIndex }, { runSweep }, { runDistance }, { runLaser },
-        { runSectionContours }, { runGeometrySignatures }, { runVolumes }, { runClassifyPlane }, { runMeshes },
+        { runSectionContours }, { runGeometrySignatures }, { runVolumes }, { runSun }, { runDeviation }, { runClassifyPlane }, { runMeshes },
       ]) => {
         const index = new GeometryIndex();
         this.inline = {
@@ -385,6 +470,14 @@ export class GeometryService {
             yieldTurn: () => new Promise((resolve) => setTimeout(resolve, 0)),
           }),
           volumes: (spec, cancelled) => runVolumes(index, spec, {
+            cancelled,
+            yieldTurn: () => new Promise((resolve) => setTimeout(resolve, 0)),
+          }),
+          sun: (spec, cancelled) => runSun(index, spec, {
+            cancelled,
+            yieldTurn: () => new Promise((resolve) => setTimeout(resolve, 0)),
+          }),
+          deviation: (spec, cancelled) => runDeviation(index, spec, {
             cancelled,
             yieldTurn: () => new Promise((resolve) => setTimeout(resolve, 0)),
           }),
@@ -416,12 +509,18 @@ export class GeometryService {
     const worker = new Worker(new URL("./geometry.worker.ts", import.meta.url), { type: "module" });
     worker.onmessage = (event: MessageEvent<GeometryResponse>) => this.receive(event.data);
     worker.onerror = (event) => {
-      const error = new Error(event.message || "the geometry worker stopped");
+      const error = new Error(`${event.message || "The geometry worker stopped"}. Reload the viewer before running another geometry query.`);
       for (const pending of this.pending.values()) {
         pending.cleanup?.();
         pending.reject(error);
       }
       this.pending.clear();
+      worker.terminate();
+      if (this.worker === worker) this.worker = null;
+      this.starting = null;
+      // The triangle store transferred its only CPU buffers into this worker,
+      // so silently starting an empty replacement would return false results.
+      this.failure = error;
     };
     this.worker = worker;
     this.store.connect({
@@ -499,6 +598,7 @@ export class GeometryService {
     this.worker = null;
     this.inline = null;
     this.starting = null;
+    this.failure = null;
     this.cancelled.clear();
     this.inlineActive.clear();
   }

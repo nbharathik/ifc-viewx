@@ -73,11 +73,132 @@ export { isAxisSection } from "../viewer-core/viewer.js";
 export { exportMesh, saveMesh } from "../export/mesh.js";
 export type { MeshExportOptions, MeshExportResult, MeshFormat } from "../export/mesh.js";
 export { measureVolumes } from "../geometry/volumes.js";
+export { measureSun } from "../geometry/sun.js";
+export { measureDeviation } from "../geometry/deviation.js";
+export type { DeviationOptions } from "../geometry/deviation.js";
+export type { DeviationResult } from "../geometry/types.js";
+export { centreOn, isLas, isText, readPointCloud, toScene, DEFAULT_POINT_LIMIT } from "../pointcloud/las.js";
+export type { CloudPlacement, PointCloud } from "../pointcloud/las.js";
+export type { SunOptions } from "../geometry/sun.js";
+export type { SunResult, SunSample } from "../geometry/types.js";
+export { dayArc, daylightHours, siteLocalInstant, sunDirection, sunPosition } from "../geo/solar.js";
+export type { SunPosition } from "../geo/solar.js";
 export type { VolumeOptions, VolumesResult, ElementVolume } from "../geometry/volumes.js";
 export { classifyByPlane } from "../geometry/plane.js";
 export type { PlaneClassifyOptions } from "../geometry/plane.js";
 export type { PlaneClassifyResult } from "../geometry/types.js";
 export type { Bm25Index, SearchHit, TextSource } from "../llm/retrieval.js";
+
+// Rules beyond IDS: the geometric, topological and relational checks IDS
+// cannot express. Importing the library registers the twelve shipped rules.
+export {
+  boxesOverlap,
+  centreOf,
+  defaultRuleset,
+  findRule,
+  parseRuleset,
+  registerRule,
+  resolveRule,
+  ruleDefinitions,
+  runRuleset,
+  serializeRuleset,
+  sizeOf,
+  RULESET_FORMAT,
+} from "../rules/engine.js";
+export type {
+  Box,
+  ClashHit,
+  ParamValue,
+  ResolvedRule,
+  RuleDefinition,
+  RuleFinding,
+  RuleInstance,
+  RuleModel,
+  RuleParam,
+  RuleReport,
+  RuleRunContext,
+  RuleSeverity,
+  Ruleset,
+  StoreyInfo,
+} from "../rules/engine.js";
+export { RULE_COUNT } from "../rules/library.js";
+export { contextRuleModel, storeyBands } from "../rules/contextModel.js";
+
+// The drawing set. Rasterizing a PDF page and keeping the pages live in core,
+// because pdf.js and IndexedDB are not things a plugin may reach for itself.
+export {
+  autoPlacement,
+  isPdf,
+  measureOnSheet,
+  metresPerPixel,
+  newSheet,
+  placementDrift,
+  placementScale,
+  placementTransform,
+  readImagePage,
+  renderPdfPage,
+  renderPdfPages,
+  scaleLabel,
+  sheetStore,
+  sheetToWorld,
+  worldToSheet,
+  PAGE_RASTER_WIDTH,
+} from "../sheets/sheet.js";
+export type {
+  RenderedPage,
+  RenderPdfPagesOptions,
+  RenderPdfPagesResult,
+  SheetCalibration,
+  SheetMarkup,
+  SheetPlacement,
+  SheetPoint,
+  SheetRecord,
+  StoredSheet,
+} from "../sheets/sheet.js";
+
+// Saved views: the definitions layer a plugin can read, apply and author.
+export {
+  applySavedView,
+  applyView,
+  captureView,
+  describeSelector,
+  isPortable,
+  matchText,
+  MAX_SELECTOR_STRING_LENGTH,
+  MAX_VIEW_FILE_BYTES,
+  MAX_VIEW_FILE_VIEWS,
+  needsIndex,
+  normalizeSelector,
+  parseViewFile,
+  readRowProperty,
+  resolveSelector,
+  selectorPortable,
+  serializeViews,
+  viewNeedsIndex,
+  ViewStore,
+} from "../views/definition.js";
+export type {
+  ApplyReport,
+  SavedViewApplyOptions,
+  Selector,
+  TextOp,
+  ViewDefinition,
+  ViewFilter,
+} from "../views/definition.js";
+
+// Computed properties, so a panel reads derived values the same way the app does.
+export {
+  checkFormula,
+  computedKey,
+  ComputedSet,
+  ComputedStore,
+  evaluateProperty,
+  geometryMeasure,
+  parseComputedFile,
+  serializeComputed,
+  COMPUTED_SET,
+} from "../data/computed.js";
+export type { ComputedKind, ComputedProperty, ComputeContext } from "../data/computed.js";
 
 // What `ctx.publishFindings` takes, so a panel's results land in the report.
 export type { ReportFinding } from "../ui/report.js";

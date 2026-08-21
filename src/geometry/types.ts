@@ -141,6 +141,68 @@ export interface SectionContourResult {
   geometryRevision: number;
 }
 
+/** One sample point on a surface, and where it faces. */
+export interface SunSample {
+  point: [number, number, number];
+  normal: [number, number, number];
+}
+
+export interface SunSpec {
+  /** Sample points, three numbers each, already nudged off the surface. */
+  points: Float64Array;
+  /** Sun directions, three numbers each, pointing from the sun to the model. */
+  directions: Float64Array;
+  /** Minutes each direction stands for, which is what turns a count into hours. */
+  stepMinutes: number;
+  /** Elements that may cast a shadow. */
+  ids: Float64Array;
+  modelOrigin: [number, number, number];
+  offsets: Float64Array;
+  transforms?: Float64Array;
+  maxDistance?: number;
+  epsilon?: number;
+}
+
+export interface SunResult {
+  /** Sunlit hours per sample point, in the same order the points were given. */
+  exposure: Float32Array;
+  stepMinutes: number;
+  directions: number;
+  testedElements: number;
+  missing: number;
+  elapsedMs: number;
+  fidelity: "mesh";
+  engine: "browser-sun";
+  geometryRevision: number;
+}
+
+export interface DeviationSpec {
+  /** Scan points in scene coordinates, three numbers each. */
+  points: Float64Array;
+  /** Elements the scan is compared against. */
+  ids: Float64Array;
+  modelOrigin: [number, number, number];
+  offsets: Float64Array;
+  transforms?: Float64Array;
+  /** Beyond this, a point is reported as having no nearby surface. */
+  maxDistance?: number;
+}
+
+export interface DeviationResult {
+  /** Distance to the nearest surface per point; NaN where nothing was near. */
+  distances: Float32Array;
+  /** Which element answered, per point; zero where nothing did. */
+  elements: Float64Array;
+  measured: number;
+  points: number;
+  maxDistance: number;
+  missing: number;
+  elapsedMs: number;
+  fidelity: "mesh";
+  engine: "browser-deviation";
+  geometryRevision: number;
+}
+
 export interface VolumesSpec {
   ids: Float64Array;
   offsets: Float64Array;
@@ -234,6 +296,8 @@ export type GeometryRequest =
   | { type: "sectionContours"; id: number; priority: 0; spec: SectionContourSpec }
   | { type: "signatures"; id: number; priority: 1; spec: GeometrySignatureSpec }
   | { type: "volumes"; id: number; priority: 1; spec: VolumesSpec }
+  | { type: "sun"; id: number; priority: 1; spec: SunSpec }
+  | { type: "deviation"; id: number; priority: 1; spec: DeviationSpec }
   | { type: "classifyPlane"; id: number; priority: 0; spec: PlaneClassifySpec }
   | { type: "meshes"; id: number; priority: 1; spec: MeshesSpec }
   | { type: "cancel"; id: number };
@@ -246,6 +310,8 @@ export type GeometryResponse =
   | { type: "sectionContourResult"; id: number; result: SectionContourResult }
   | { type: "signatureResult"; id: number; result: GeometrySignatureResult }
   | { type: "volumesResult"; id: number; result: VolumesResult }
+  | { type: "sunResult"; id: number; result: SunResult }
+  | { type: "deviationResult"; id: number; result: DeviationResult }
   | { type: "classifyPlaneResult"; id: number; result: PlaneClassifyResult }
   | { type: "meshesResult"; id: number; result: MeshesResult }
   | { type: "fail"; id: number; message: string };

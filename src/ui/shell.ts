@@ -16,6 +16,7 @@ export interface ShellActions {
 
 export type TabId =
   | "properties"
+  | "views"
   | "filters"
   | "geo"
   | "ids"
@@ -40,6 +41,7 @@ const PANES: Array<[string, PaneId]> = [
  */
 const TABS: Array<{ id: TabId; label: string; icon: string; key: string; handoff?: boolean }> = [
   { id: "properties", label: "Properties", icon: "info", key: "P" },
+  { id: "views", label: "Views", icon: "bookmark", key: "W" },
   { id: "filters", label: "Filters", icon: "funnel", key: "R" },
   { id: "ids", label: "IDS", icon: "clipboard", key: "" },
   { id: "bcf", label: "Issues", icon: "flag", key: "" },
@@ -63,6 +65,8 @@ export class Shell {
   readonly viewerHost = $("viewer-host");
   /** Where main.ts mounts the Web Studio / Local Studio chip. */
   readonly barSlot = h("span", { class: "sb-item" });
+  /** Status-bar slot on the right, for the results-dock chip. */
+  readonly statusSlot = h("span", { class: "sb-item" });
   /** Top bar icon cluster; main.ts mounts the plugins button here. */
   readonly topSlot = h("span", { class: "top-slot" });
   private readonly tabButtons = new Map<TabId, HTMLButtonElement>();
@@ -75,6 +79,8 @@ export class Shell {
   private readonly projectName: HTMLElement;
   private readonly projectDot: HTMLElement;
   private readonly selection: HTMLElement;
+  /** Every modifier currently narrowing or recolouring the view. */
+  private readonly viewState = h("span", { class: "sb-view-state" });
   private readonly themeButton: HTMLButtonElement;
   private readonly compactQuery = typeof window.matchMedia === "function"
     ? window.matchMedia("(max-width: 900px)")
@@ -124,6 +130,11 @@ export class Shell {
     // stays as shipped.
     if (!document.getElementById("pane-organize")) {
       $("pane-types").insertAdjacentElement("afterend", h("div", { class: "panel-body hidden", id: "pane-organize" }));
+    }
+    if (!document.getElementById("tab-views")) {
+      $("tab-filters").insertAdjacentElement("beforebegin", h("div", {
+        class: "panel-body hidden", id: "tab-views", role: "tabpanel", tabindex: "0", "aria-labelledby": "rail-views",
+      }));
     }
     if (!document.getElementById("tab-ids")) {
       $("tab-bcf").insertAdjacentElement("beforebegin", h("div", {
@@ -180,7 +191,9 @@ export class Shell {
       h("span", { class: "sb-item" }, [dot, state]),
       h("span", { class: "sb-sep" }),
       counts,
+      this.viewState,
       h("span", { class: "grow" }),
+      this.statusSlot,
       this.selection,
       hint,
       h("span", { class: "sb-sep" }),
@@ -352,6 +365,38 @@ export class Shell {
 
   setFrameTime(text: string): void {
     this.status.frame.textContent = text;
+  }
+
+  /**
+   * The view-state bar: one chip per active modifier, each clearing exactly
+   * itself. This is the permanent answer to "why can't I see anything?", so
+   * it lives on the status bar rather than inside a panel nobody has open.
+   */
+  setViewState(entries: Array<{ label: string; detail?: string; icon?: string; clear?: () => void }>): void {
+    if (entries.length === 0) {
+      this.viewState.replaceChildren();
+      return;
+    }
+    const nodes: HTMLElement[] = [h("span", { class: "sb-sep" })];
+    for (const entry of entries) {
+      const title = entry.detail ? `${entry.label}: ${entry.detail}` : entry.label;
+      const chip = h("span", { class: "sb-state", title }, [
+        icon(entry.icon ?? "funnel", 11),
+        h("b", { text: entry.label }),
+      ]);
+      if (entry.clear) {
+        const clear = h("button", {
+          class: "sb-state-x",
+          type: "button",
+          title: `Clear ${entry.label.toLowerCase()}`,
+          "aria-label": `Clear ${entry.label.toLowerCase()}`,
+        }, [icon("x", 10)]);
+        clear.addEventListener("click", entry.clear);
+        chip.appendChild(clear);
+      }
+      nodes.push(chip);
+    }
+    this.viewState.replaceChildren(...nodes);
   }
 
   /** Selected element readout in the status bar, with a clear affordance. */

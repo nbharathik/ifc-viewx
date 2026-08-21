@@ -115,6 +115,23 @@ export interface BcfViewpoint {
   };
 }
 
+/**
+ * One document version on a CDE. The Documents API describes a document as a
+ * reference the client resolves for metadata and then downloads; different
+ * servers spell the download link differently, so the reader accepts all
+ * three shapes rather than only the one the first server used.
+ */
+export interface OpenCdeDocument {
+  guid: string;
+  name: string;
+  version?: string;
+  size?: number;
+  created_at?: string;
+  content_type?: string;
+  /** Where the bytes are, once resolved. */
+  downloadUrl?: string;
+}
+
 export interface BcfTopicWrite {
   guid?: string;
   topic_type?: string;
@@ -138,6 +155,10 @@ export interface OpenCdeSession {
 }
 
 export type OpenCdeFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+const JSON_LIMIT = 8 * 1024 * 1024;
+const SNAPSHOT_LIMIT = 32 * 1024 * 1024;
+const DOCUMENT_LIMIT = 768 * 1024 * 1024;
 
 export class OpenCdeError extends Error {
   constructor(
@@ -171,6 +192,7 @@ function serverUrl(input: string): URL {
   if (url.protocol !== "https:" && !(url.protocol === "http:" && localHost(url.hostname))) {
     throw new OpenCdeError("Use HTTPS for a remote OpenCDE server. HTTP is accepted only on localhost.", 0, "insecure_server");
   }
+  if (url.username || url.password) throw new OpenCdeError("Enter CDE credentials in the authentication fields, not in the server URL.", 0, "url_credentials");
   url.search = "";
   url.hash = "";
   url.pathname = url.pathname
@@ -184,6 +206,7 @@ function endpoint(value: string | undefined, fallback: string, root: URL): URL {
   if (url.protocol !== "https:" && !(url.protocol === "http:" && localHost(url.hostname))) {
     throw new OpenCdeError("The server advertised an insecure OpenCDE endpoint.", 0, "insecure_endpoint");
   }
+  if (url.username || url.password) throw new OpenCdeError("The server advertised an endpoint containing credentials.", 0, "endpoint_credentials");
   url.pathname = url.pathname.replace(/\/$/, "");
   return url;
 }
@@ -195,6 +218,26 @@ function authorization(auth: OpenCdeAuth): string | null {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return `Basic ${btoa(binary)}`;
+}
+
+function copyAuth(auth: OpenCdeAuth): OpenCdeAuth {
+  if (auth.kind === "none") return { kind: "none" };
+  if (auth.kind === "bearer" && typeof auth.token === "string") return { kind: "bearer", token: auth.token };
+  if (auth.kind === "basic" && typeof auth.username === "string" && typeof auth.password === "string") {
+    return { kind: "basic", username: auth.username, password: auth.password };
+  }
+  throw new OpenCdeError("Choose a valid OpenCDE authentication method.", 0, "invalid_auth");
+}
+
+function copySession(session: OpenCdeSession): OpenCdeSession {
+  return {
+    ...session,
+    versions: session.versions.map((version) => ({ ...version })),
+  };
+}
+
+function sameStrings(one: readonly string[], two: readonly string[]): boolean {
+  return one.length === two.length && one.every((value, index) => value === two[index]);
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -218,16 +261,20 @@ function errorMessage(value: unknown, fallback: string): string {
 export class OpenCdeClient {
   private session: OpenCdeSession | null = null;
   private auth: OpenCdeAuth = { kind: "none" };
+  private connectionGeneration = 0;
+  private pendingEndpointTrust: { server: string; origins: string[] } | null = null;
 
   constructor(private readonly fetcher: OpenCdeFetch = globalThis.fetch.bind(globalThis)) {}
 
   getSession(): OpenCdeSession | null {
-    return this.session;
+    return this.session ? copySession(this.session) : null;
   }
 
   disconnect(): void {
+    this.connectionGeneration += 1;
     this.session = null;
     this.auth = { kind: "none" };
+    this.pendingEndpointTrust = null;
   }
 
   async connect(
@@ -235,9 +282,16 @@ export class OpenCdeClient {
     auth: OpenCdeAuth,
     options: { trustAdvertisedOrigins?: boolean; signal?: AbortSignal } = {},
   ): Promise<OpenCdeSession> {
+    const generation = ++this.connectionGeneration;
+    const nextAuth = copyAuth(auth);
     const root = serverUrl(input);
-    const versionsUrl = new URL(`${root.pathname}/foundation/versions`, `${root.origin}/`);
+    // URL.pathname is always at least "/". Normalize it before joining so a
+    // bare host cannot turn "//foundation/versions" into a new hostname.
+    const rootPath = root.pathname.replace(/\/+$/, "");
+    const server = `${root.origin}${rootPath}`;
+    const versionsUrl = new URL(`${rootPath}/foundation/versions`, `${root.origin}/`);
     const raw = await this.json(versionsUrl, { signal: options.signal }, { kind: "none" });
+    this.assertCurrentConnection(generation);
     const versions = list<OpenCdeVersion>(raw, "versions").filter((item) => (
       item && typeof item.api_id === "string" && typeof item.version_id === "string"
     ));
@@ -249,31 +303,38 @@ export class OpenCdeClient {
     const foundation = foundations[0];
     if (!foundation) throw new OpenCdeError("This server does not advertise the OpenCDE Foundation API.", 0, "foundation_unavailable");
     const documents = versions.find((item) => item.api_id.toLowerCase() === "documents" && item.version_id === "1.0");
-    const bcfUrl = endpoint(bcf.api_base_url, `${root.origin}${root.pathname}/bcf/3.0`, root);
+    const bcfUrl = endpoint(bcf.api_base_url, `${root.origin}${rootPath}/bcf/3.0`, root);
     const foundationUrl = endpoint(
       foundation.api_base_url,
-      `${root.origin}${root.pathname}/foundation/${foundation.version_id}`,
+      `${root.origin}${rootPath}/foundation/${foundation.version_id}`,
       root,
     );
     const documentsUrl = documents
-      ? endpoint(documents.api_base_url, `${root.origin}${root.pathname}/documents/1.0`, root)
+      ? endpoint(documents.api_base_url, `${root.origin}${rootPath}/documents/1.0`, root)
       : null;
     const advertisedOrigins = [...new Set([bcfUrl, foundationUrl, documentsUrl]
       .filter((url): url is URL => Boolean(url))
       .map((url) => url.origin)
       .filter((origin) => origin !== root.origin))];
-    if (advertisedOrigins.length && !options.trustAdvertisedOrigins) {
-      throw new OpenCdeEndpointTrustError(advertisedOrigins);
+    if (advertisedOrigins.length) {
+      const pending = this.pendingEndpointTrust;
+      const matchesPending = pending?.server === server && sameStrings(pending.origins, advertisedOrigins);
+      if (!options.trustAdvertisedOrigins || (pending !== null && !matchesPending)) {
+        this.pendingEndpointTrust = { server, origins: [...advertisedOrigins] };
+        throw new OpenCdeEndpointTrustError(advertisedOrigins);
+      }
     }
-    this.auth = auth;
+    this.assertCurrentConnection(generation);
+    this.auth = nextAuth;
     this.session = {
-      serverUrl: `${root.origin}${root.pathname}`,
+      serverUrl: server,
       foundationBaseUrl: foundationUrl.href,
       bcfBaseUrl: bcfUrl.href,
       ...(documentsUrl ? { documentsBaseUrl: documentsUrl.href } : {}),
       versions,
     };
-    return this.session;
+    this.pendingEndpointTrust = null;
+    return copySession(this.session);
   }
 
   async authenticationInfo(signal?: AbortSignal): Promise<OpenCdeAuthInfo> {
@@ -329,10 +390,89 @@ export class OpenCdeClient {
     const session = this.requireSession();
     const path = `projects/${encodeURIComponent(projectId)}/topics/${encodeURIComponent(topicGuid)}` +
       `/viewpoints/${encodeURIComponent(viewpointGuid)}/snapshot`;
-    const response = await this.request(`${session.bcfBaseUrl}/${path}`, { signal, headers: { Accept: "image/*" } });
-    if (response.status === 404) return null;
-    if (!response.ok) throw await this.httpError(response);
-    return response.blob();
+    return this.withResponse(`${session.bcfBaseUrl}/${path}`, { signal, headers: { Accept: "image/*" } }, async (response) => {
+      if (response.status === 404) return null;
+      if (!response.ok) throw await this.httpError(response);
+      const bytes = await responseBytes(response, SNAPSHOT_LIMIT, "viewpoint snapshot");
+      return new Blob([bytes as BlobPart], { type: response.headers.get("content-type") ?? "application/octet-stream" });
+    });
+  }
+
+  // -- documents -------------------------------------------------------------
+
+  /** True when the server advertised the Documents API at all. */
+  hasDocuments(): boolean {
+    return Boolean(this.session?.documentsBaseUrl);
+  }
+
+  /**
+   * Documents the server is willing to list. The Documents API's own flow is
+   * an interactive picker the server renders; a plain listing is an optional
+   * convenience, so a server without one answers 404 and this returns nothing
+   * rather than failing the panel.
+   */
+  async documents(signal?: AbortSignal): Promise<OpenCdeDocument[]> {
+    const base = this.requireDocuments();
+    const url = `${base}/documents`;
+    try {
+      const raw = await this.json(url, { signal });
+      return list<Record<string, unknown>>(raw, "documents").map((entry) => readDocument(entry, url));
+    } catch (error) {
+      if (error instanceof OpenCdeError && (error.status === 404 || error.status === 501)) return [];
+      throw error;
+    }
+  }
+
+  /** Every version of one document, newest first where the server orders. */
+  async documentVersions(documentGuid: string, signal?: AbortSignal): Promise<OpenCdeDocument[]> {
+    const base = this.requireDocuments();
+    const url = `${base}/documents/${encodeURIComponent(documentGuid)}/versions`;
+    const raw = await this.json(url, { signal });
+    return list<Record<string, unknown>>(raw, "versions").map((entry) => readDocument(entry, url));
+  }
+
+  /**
+   * Resolve a document reference URL. This is what a BCF topic carries and
+   * what the server's picker hands back: a URL that answers with metadata,
+   * including where the bytes are.
+   */
+  async documentReference(url: string, signal?: AbortSignal): Promise<OpenCdeDocument> {
+    const referenceUrl = documentUrl(url, this.requireDocuments());
+    const raw = await this.json(referenceUrl, { signal });
+    const document_ = readDocument((raw ?? {}) as Record<string, unknown>, referenceUrl.href);
+    if (!document_.downloadUrl) {
+      // Some servers answer metadata at the reference and serve the bytes at
+      // the same URL with a different Accept; that is the documented fallback.
+      document_.downloadUrl = referenceUrl.href;
+    }
+    return document_;
+  }
+
+  /** The bytes. Nothing here caches: the caller decides what to keep. */
+  async documentContent(
+    document_: OpenCdeDocument,
+    signal?: AbortSignal,
+  ): Promise<{ name: string; bytes: Uint8Array }> {
+    const url = document_.downloadUrl;
+    if (!url) throw new OpenCdeError("That document does not say where its content is.", 0, "no_download_url");
+    const contentUrl = documentUrl(url, this.requireDocuments());
+    return this.withResponse(contentUrl, { signal, headers: { Accept: "application/octet-stream" } }, async (response) => {
+      if (!response.ok) throw await this.httpError(response);
+      const disposition = response.headers.get("content-disposition") ?? "";
+      const named = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)?.[1];
+      return {
+        name: safeDocumentName(decodeName(named) || document_.name || "document"),
+        bytes: await responseBytes(response, DOCUMENT_LIMIT, "document"),
+      };
+    }, this.auth, 5 * 60_000);
+  }
+
+  private requireDocuments(): string {
+    const session = this.requireSession();
+    if (!session.documentsBaseUrl) {
+      throw new OpenCdeError("This server does not advertise the OpenCDE Documents API.", 0, "documents_unavailable");
+    }
+    return session.documentsBaseUrl;
   }
 
   async createTopic(projectId: string, topic: BcfTopicWrite, signal?: AbortSignal): Promise<BcfTopic> {
@@ -380,6 +520,12 @@ export class OpenCdeClient {
     return this.session;
   }
 
+  private assertCurrentConnection(generation: number): void {
+    if (generation !== this.connectionGeneration) {
+      throw new OpenCdeError("A newer OpenCDE connection replaced this request.", 0, "connection_superseded");
+    }
+  }
+
   private async bcf(path: string, init: RequestInit = {}): Promise<unknown> {
     const session = this.requireSession();
     return this.json(`${session.bcfBaseUrl}/${path}`, init);
@@ -389,27 +535,52 @@ export class OpenCdeClient {
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
     if (init.body) headers.set("Content-Type", "application/json");
-    const response = await this.request(input, { ...init, headers }, auth);
-    if (!response.ok) throw await this.httpError(response);
-    if (response.status === 204) return null;
-    try {
-      return await response.json();
-    } catch {
-      throw new OpenCdeError("The OpenCDE server returned invalid JSON.", response.status, "invalid_json");
-    }
+    return this.withResponse(input, { ...init, headers }, async (response) => {
+      if (!response.ok) throw await this.httpError(response);
+      if (response.status === 204) return null;
+      try {
+        return JSON.parse(new TextDecoder().decode(await responseBytes(response, JSON_LIMIT, "JSON response"))) as unknown;
+      } catch (error) {
+        if (error instanceof OpenCdeError) throw error;
+        throw new OpenCdeError("The OpenCDE server returned invalid JSON.", response.status, "invalid_json");
+      }
+    }, auth);
   }
 
-  private async request(input: RequestInfo | URL, init: RequestInit, auth = this.auth): Promise<Response> {
+  /** Keep cancellation and the timeout alive until the response body is consumed. */
+  private async withResponse<T>(
+    input: RequestInfo | URL,
+    init: RequestInit,
+    consume: (response: Response) => Promise<T>,
+    auth = this.auth,
+    timeoutMs = 20_000,
+  ): Promise<T> {
     const headers = new Headers(init.headers);
-    const value = authorization(auth);
+    // Reference and download URLs are server-controlled and may legitimately
+    // point at a public object store. Never forward CDE credentials to such an
+    // origin: only the endpoints confirmed while connecting are trusted.
+    const target = requestUrl(input, this.session?.serverUrl);
+    const trusted = target ? this.trustedOrigins().has(target.origin) : false;
+    const value = trusted ? authorization(auth) : null;
     if (value) headers.set("Authorization", value);
+    else headers.delete("Authorization");
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(new Error("OpenCDE request timed out")), 20_000);
+    const timeout = setTimeout(() => controller.abort(new Error("OpenCDE request timed out")), timeoutMs);
     const abort = (): void => controller.abort(init.signal?.reason);
-    init.signal?.addEventListener("abort", abort, { once: true });
+    if (init.signal?.aborted) abort();
+    else init.signal?.addEventListener("abort", abort, { once: true });
     try {
-      return await this.fetcher(input, { ...init, headers, signal: controller.signal });
+      if (controller.signal.aborted) throw controller.signal.reason;
+      const response = await this.fetcher(input, {
+        ...init,
+        headers,
+        signal: controller.signal,
+        ...(value ? { redirect: "error" as const } : {}),
+      });
+      await this.validateResponseTarget(response, target, Boolean(value));
+      return await consume(response);
     } catch (error) {
+      if (error instanceof OpenCdeError) throw error;
       if (controller.signal.aborted) {
         const message = init.signal?.aborted ? "OpenCDE request cancelled." : "The OpenCDE server did not respond in time.";
         throw new OpenCdeError(message, 0, init.signal?.aborted ? "cancelled" : "timeout");
@@ -425,6 +596,33 @@ export class OpenCdeClient {
     }
   }
 
+  private async validateResponseTarget(response: Response, requested: URL | null, authenticated: boolean): Promise<void> {
+    if (!response.url) return;
+    const final = requestUrl(response.url);
+    if (!final || (final.protocol !== "https:" && !(final.protocol === "http:" && localHost(final.hostname)))) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new OpenCdeError("The OpenCDE request redirected to an insecure URL.", 0, "insecure_redirect");
+    }
+    if (final.username || final.password) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new OpenCdeError("The OpenCDE request redirected to a URL containing credentials.", 0, "redirect_credentials");
+    }
+    if (authenticated && requested && final.origin !== requested.origin) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new OpenCdeError("The authenticated OpenCDE request redirected to an untrusted origin.", 0, "untrusted_redirect");
+    }
+  }
+
+  private trustedOrigins(): Set<string> {
+    if (!this.session) return new Set();
+    return new Set([
+      this.session.serverUrl,
+      this.session.foundationBaseUrl,
+      this.session.bcfBaseUrl,
+      this.session.documentsBaseUrl,
+    ].filter((value): value is string => Boolean(value)).map((value) => new URL(value).origin));
+  }
+
   private async httpError(response: Response): Promise<OpenCdeError> {
     const fallback = response.status === 401
       ? "The server rejected these credentials."
@@ -433,10 +631,112 @@ export class OpenCdeClient {
         : `OpenCDE request failed with HTTP ${response.status}.`;
     let detail: unknown = null;
     try {
-      detail = await response.clone().json();
+      const bytes = await responseBytes(response, 64 * 1024, "error response");
+      detail = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
     } catch {
       detail = null;
     }
     return new OpenCdeError(errorMessage(detail, fallback), response.status, `http_${response.status}`);
   }
+}
+
+/** Read whichever spelling of a document the server used. */
+function readDocument(entry: Record<string, unknown>, baseUrl?: string): OpenCdeDocument {
+  const links = (entry._links ?? {}) as Record<string, { href?: string } | undefined>;
+  const download =
+    text(entry.download_url) ??
+    text(entry.content_url) ??
+    links.download?.href ??
+    links.content?.href ??
+    undefined;
+  return {
+    guid: text(entry.guid) ?? text(entry.document_guid) ?? text(entry.id) ?? "",
+    name: text(entry.file_name) ?? text(entry.name) ?? text(entry.title) ?? "document",
+    version: text(entry.version) ?? text(entry.version_id) ?? undefined,
+    size: typeof entry.file_size === "number" ? entry.file_size : typeof entry.size === "number" ? entry.size : undefined,
+    created_at: text(entry.creation_date) ?? text(entry.created_at) ?? undefined,
+    content_type: text(entry.content_type) ?? undefined,
+    ...(download ? { downloadUrl: documentUrl(download, baseUrl).href } : {}),
+  };
+}
+
+function requestUrl(input: RequestInfo | URL, baseUrl?: string): URL | null {
+  try {
+    const value = input instanceof Request ? input.url : String(input);
+    return new URL(value, baseUrl);
+  } catch {
+    return null;
+  }
+}
+
+function documentUrl(value: string, baseUrl?: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value, baseUrl);
+  } catch {
+    throw new OpenCdeError("The CDE supplied an invalid document URL.", 0, "invalid_document_url");
+  }
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && localHost(url.hostname))) {
+    throw new OpenCdeError("The CDE supplied an insecure document URL.", 0, "insecure_document_url");
+  }
+  if (url.username || url.password) {
+    throw new OpenCdeError("The CDE supplied a document URL containing credentials.", 0, "document_url_credentials");
+  }
+  return url;
+}
+
+const text = (value: unknown): string | undefined =>
+  typeof value === "string" && value.trim() ? value : undefined;
+
+function decodeName(value: string | undefined): string {
+  if (!value) return "";
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function safeDocumentName(value: string): string {
+  const leaf = value.replace(/\\/g, "/").split("/").pop() ?? "";
+  return leaf.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 255) || "document";
+}
+
+async function responseBytes(response: Response, limit: number, label: string): Promise<Uint8Array> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new OpenCdeError(`The OpenCDE ${label} exceeds the ${Math.round(limit / 1024 / 1024)} MB limit.`, 0, "response_too_large");
+  }
+  if (!response.body) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > limit) {
+      throw new OpenCdeError(`The OpenCDE ${label} exceeds its size limit.`, 0, "response_too_large");
+    }
+    return bytes;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel();
+        throw new OpenCdeError(`The OpenCDE ${label} exceeds its size limit.`, 0, "response_too_large");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }

@@ -110,6 +110,33 @@ Select a tool to see its purpose and main features.
 
     <small>Category: Quality</small>
 
+??? info "Point Cloud: As-built scan over the model, coloured by deviation"
+
+    Reads an uncompressed LAS or a plain XYZ export in the tab, places it on the model, and asks the same BVHs the clash engine uses how far every point is from the nearest surface. That is the as-built comparison people currently buy a separate platform for, and nothing leaves the machine to do it.
+
+    **Highlights**
+
+    - Read LAS 1.2 to 1.4 and plain X Y Z exports, subsampled to what a viewport can draw
+    - Place the scan by the model's own georeferencing, or centre it and nudge
+    - Colour every point by its distance to the nearest model surface
+    - Report the deviation distribution and export every measured point as CSV
+
+    <small>Category: Analysis</small>
+
+??? info "Presentation: Saved views as an ordered walkthrough, played or recorded"
+
+    Once views exist, a design review is mostly sequencing. Order them into slides, give each a dwell time, and the camera flies between them on an eased path. Play it in the meeting, or record it as a video and send that instead of the screen recording somebody makes by hand at the end of every review.
+
+    **Highlights**
+
+    - Build slides from saved views, in any order
+    - Eased camera flight between slides, with per-slide dwell and travel time
+    - Play full screen, or step through with the keyboard
+    - Record the walkthrough to a WebM video
+    - Save the deck as a file the project keeps
+
+    <small>Category: Review</small>
+
 ??? info "Python Console: Write IfcOpenShell against the open model"
 
     A console for real IfcOpenShell code: queries return a value, edits run on a disposable copy and come back staged for approval. This is the only place Python runs, and only when you press Run. The assistant can write code for you and hand it here, but it can never execute it, on any tier. First Run in this tab downloads the runtime once (~30 MB); in Local Studio the same console runs natively instead, and says which before you press Run.
@@ -136,6 +163,20 @@ Select a tool to see its purpose and main features.
 
     <small>Category: Data</small>
 
+??? info "Report Builder: Free-form schedules: your columns, your grouping, saved as a template"
+
+    Pick the elements, pick the columns from attributes, property sets, quantities and computed properties, then group and total them. The definition is saved as a template, so the same table reproduces on the next revision and issues identically to CSV, XLSX or a print-ready page.
+
+    **Highlights**
+
+    - Columns from attributes, property sets, quantities and computed properties
+    - Group by any column, with count, sum, average, min and max
+    - Scope by class, storey, property, the current selection or what is visible
+    - Save as a template and reproduce the same table on the next revision
+    - Export to CSV, XLSX and a self-contained printable page
+
+    <small>Category: Data</small>
+
 ??? info "Room Book: Every space with its area, volume and occupancy"
 
     Lists every IfcSpace with the areas and volumes the file authored, rolled up by storey. Where a space carries no quantities the footprint of its bounding box fills the gap, and each row says which it is, so a schedule is never quoted from an estimate by accident. Spaces are excluded from the default geometry stream, so the panel loads them on demand when you ask to see one.
@@ -148,6 +189,19 @@ Select a tool to see its purpose and main features.
     - Click a room to isolate it; CSV export of the whole book
 
     <small>Category: Data</small>
+
+??? info "Rule Studio: The checks IDS cannot express: geometry, hosting, placement and quantities"
+
+    IDS answers whether the information is there. This answers whether the model is right. Twelve rules ship, each parameterized, severity-graded and scoped by a saved query; a ruleset is one file a project can standardize on and re-run at every milestone. Everything runs against the same triangle-level engine the clash tool uses, in this tab, with nothing uploaded.
+
+    **Highlights**
+
+    - Twelve shipped rules: duplicates, overlaps, hosting, storeys, spaces, clearance, naming, placement and quantities
+    - Every rule parameterized, severity-graded and scoped by class, storey or property
+    - Save the whole set as a ruleset file a project shares and re-runs
+    - One docket of findings: isolate, frame, raise as BCF, export as CSV
+
+    <small>Category: Review</small>
 
 ??? info "Section Workspace: Turn the live 3D cut into a readable drawing"
 
@@ -165,6 +219,20 @@ Select a tool to see its purpose and main features.
     - Browser-generated SVG export with explicit mesh fidelity
 
     <small>Category: Coordination</small>
+
+??? info "Sheets: The issued drawings, calibrated and linked to the model"
+
+    Every coordination platform pairs 2D with 3D, because 2D is what gets issued and what site actually holds. Import the PDF, calibrate it from two points, and the sheet measures in real units, overlays the model's own plan cut, selects elements in 3D when you click it, and raises BCF topics from a markup.
+
+    **Highlights**
+
+    - Import PDF pages or images as sheets, one per storey
+    - Calibrate from two points and a known distance, then measure in real units
+    - Overlay the model's plan cut on the sheet, and the sheet under the model
+    - Click the sheet to select the element in 3D
+    - Mark up and raise a BCF topic from the drawing
+
+    <small>Category: Review</small>
 
 ??? info "Smart Measure: Put object gaps and room axes on the model"
 
@@ -193,6 +261,19 @@ Select a tool to see its purpose and main features.
     - Step up and down through the building
 
     <small>Category: Navigation</small>
+
+??? info "Sun and Shadow: Sun position by date and place, and sunlight hours on a surface"
+
+    The NOAA solar position algorithm drives the model's light from an explicit site time offset. The accumulation ray-casts a documented grid against the real mesh rather than sampling a shadow map, making it useful for repeatable early-stage sunlight comparisons.
+
+    **Highlights**
+
+    - Light the model from the real sun for any date, time and place
+    - Read the site's latitude and longitude from the IFC where they were written
+    - Accumulate sunlight hours over a whole day on a site grid or the selection
+    - Colour the model by the hours each element receives, and export the grid
+
+    <small>Category: Analysis</small>
 
 ## Local Studio
 

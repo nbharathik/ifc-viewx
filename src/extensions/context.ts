@@ -15,6 +15,7 @@ import type { HostContext } from "../plugins/runtime/context.js";
 import type { ExtensionScope } from "./contributions.js";
 import type { ExtensionResultStore } from "./results.js";
 import type { ResultHandle } from "../capabilities/results.js";
+import { normalizeView, viewNeedsIndex } from "../views/definition.js";
 
 const EXTENSION_STORAGE_VALUE_BYTES = 64 * 1024;
 const EXTENSION_STORAGE_TOTAL_BYTES = 256 * 1024;
@@ -43,6 +44,16 @@ const capabilityPermissions: Readonly<Record<string, readonly ExtensionPermissio
   distance: ["geometry.query", "view.control"],
   laser: ["geometry.query", "view.control"],
   sectionContours: ["geometry.query", "view.control"],
+  volumes: ["geometry.mesh.read"],
+  sun: ["geometry.mesh.read"],
+  deviation: ["geometry.mesh.read"],
+  setPointCloud: ["view.overlay"],
+  modelBox: ["geometry.query"],
+  georeferencedToScene: ["view.read"],
+  setSun: ["view.control"],
+  capture: ["viewport.capture"],
+  recordStart: ["viewport.capture"],
+  recordStop: ["viewport.capture"],
   search: ["model.structure.read", "model.properties.read"],
   selection: ["view.read"],
   visibility: ["view.read"],
@@ -222,6 +233,33 @@ export function createExtensionContext(
           linked.dispose();
         }
       },
+      volumes: async (ids, options = {}) => {
+        requirePermission("geometry.mesh.read");
+        const linked = linkedSignal(scope.signal, options.signal);
+        try {
+          return await host.volumes(ids, { ...options, signal: linked.signal });
+        } finally {
+          linked.dispose();
+        }
+      },
+      deviation: async (points, options = {}) => {
+        requirePermission("geometry.mesh.read");
+        const linked = linkedSignal(scope.signal, options.signal);
+        try {
+          return await host.deviation(points, { ...options, signal: linked.signal });
+        } finally {
+          linked.dispose();
+        }
+      },
+      sun: async (samples, directions, stepMinutes, options = {}) => {
+        requirePermission("geometry.mesh.read");
+        const linked = linkedSignal(scope.signal, options.signal);
+        try {
+          return await host.sun(samples, directions, stepMinutes, { ...options, signal: linked.signal });
+        } finally {
+          linked.dispose();
+        }
+      },
     },
     view: {
       select: (ids) => {
@@ -271,6 +309,20 @@ export function createExtensionContext(
       setCategoryVisible: async (category, visible) => {
         requirePermission("view.control");
         await host.viewer.setCategoryVisible(category, visible);
+      },
+      applySavedView: async (view, options = {}) => {
+        const normalized = normalizeView(view);
+        if (!normalized) throw new TypeError("Invalid saved-view definition");
+        requirePermission("view.read");
+        requirePermission("view.control");
+        requirePermission("model.structure.read");
+        if (viewNeedsIndex(normalized)) requirePermission("model.index.build");
+        const linked = linkedSignal(scope.signal, options.signal);
+        try {
+          return await host.applySavedView(normalized, { ...options, signal: linked.signal });
+        } finally {
+          linked.dispose();
+        }
       },
       isolate: (ids, label) => {
         requirePermission("view.control");
@@ -323,6 +375,42 @@ export function createExtensionContext(
       boxAround: (ids, pad) => {
         requirePermission("geometry.query");
         return host.boxAround(ids, pad);
+      },
+      modelBox: () => {
+        requirePermission("geometry.query");
+        return host.modelBox();
+      },
+      georeferencedToScene: (point) => {
+        requirePermission("view.read");
+        return host.georeferencedToScene(point);
+      },
+      setSun: (direction) => {
+        requirePermission("view.control");
+        host.setSun(direction);
+      },
+      setPointCloud: (positions, colors, size) => {
+        requirePermission("view.overlay");
+        host.setPointCloud(positions, colors, size);
+      },
+      setPointCloudSize: (size) => {
+        requirePermission("view.overlay");
+        host.setPointCloudSize(size);
+      },
+      setPointCloudVisible: (visible) => {
+        requirePermission("view.overlay");
+        host.setPointCloudVisible(visible);
+      },
+      capture: (maxWidth, type, quality) => {
+        requirePermission("viewport.capture");
+        return host.capture(maxWidth, type, quality);
+      },
+      recordStart: (fps) => {
+        requirePermission("viewport.capture");
+        return host.recordStart(fps);
+      },
+      recordStop: () => {
+        requirePermission("viewport.capture");
+        return host.recordStop();
       },
       colorBy: (assignment, colors) => {
         requirePermission("view.control");
@@ -382,6 +470,7 @@ export function createExtensionContext(
     },
     feedback: {
       publishFindings: (summary, findings) => host.publishFindings(summary, findings),
+      publishResults: (set) => host.publishResults(set),
       log: (text, kind) => host.log(text, kind),
       toast: (text, kind) => host.toast(text, kind),
     },

@@ -3,7 +3,8 @@ import { ExtensionContributionRegistry, ExtensionScope } from "../src/extensions
 import { createExtensionContext } from "../src/extensions/context.js";
 import { ExtensionResultStore } from "../src/extensions/results.js";
 import type { ExtensionManifest } from "../src/sdk/contributions.js";
-import type { HostContext } from "../src/plugins/runtime/context.js";
+import { createHostContext, type ContextDeps, type HostContext } from "../src/plugins/runtime/context.js";
+import type { ViewDefinition } from "../src/views/definition.js";
 
 const summary = (id: string, effect: "read" | "view" | "propose") => ({
   id,
@@ -57,6 +58,7 @@ function hostContext() {
   const isMeasuring = vi.fn(() => true);
   const isCategoryVisible = vi.fn(() => true);
   const setCategoryVisible = vi.fn(async () => undefined);
+  const applySavedView = vi.fn(async () => ({ empty: [], matched: 1 }));
   const query = vi.fn(async () => "query result");
   const propose = vi.fn(async () => "proposal result");
   const value = {
@@ -79,6 +81,7 @@ function hostContext() {
     isVisible: vi.fn(() => true),
     camera: vi.fn(() => ({ position: [2, 2, 2], target: [0, 0, 0] })),
     setCamera: vi.fn(),
+    applySavedView,
     measurements: vi.fn(() => []),
     addMeasurement: vi.fn(() => ({ id: 7 })),
     removeMeasurement: vi.fn(),
@@ -90,9 +93,31 @@ function hostContext() {
   } as unknown as HostContext;
   return {
     value, off, clash, laser, sectionContours, geometrySignatures, setPickGuide,
-    isMeasuring, isCategoryVisible, setCategoryVisible, query, propose, execute,
+    isMeasuring, isCategoryVisible, setCategoryVisible, applySavedView, query, propose, execute,
   };
 }
+
+const savedView = (selector: ViewDefinition["filters"][number]["selector"]): ViewDefinition => ({
+  id: "view-1",
+  name: "Safe",
+  folder: "",
+  description: "",
+  filters: [{ label: "Filter", mode: "keep", selector }],
+  color: null,
+  camera: null,
+  projection: null,
+  sections: [],
+  box: null,
+  xray: null,
+  hidden: null,
+  offsets: [],
+  annotations: [],
+  measurements: [],
+  categories: { spaces: false, openings: false },
+  ghostHidden: false,
+  thumbnail: "",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+});
 
 describe("extension SDK context", () => {
   it("exposes no raw host escape hatch and enforces domain permissions", async () => {
@@ -110,6 +135,63 @@ describe("extension SDK context", () => {
     expect(ctx.capabilities.list().map((entry) => entry.id)).toEqual(["counts"]);
     await expect(ctx.capabilities.execute("clash")).rejects.toThrow(/not allowed/);
     await expect(ctx.capabilities.execute("counts")).resolves.toBe("ok");
+  });
+
+  it("keeps full saved-view application and property indexing behind their permissions", async () => {
+    const deniedHost = hostContext();
+    const deniedScope = new ExtensionScope("sample", new ExtensionContributionRegistry());
+    const deniedDefinition = manifest(["view.read", "view.control", "model.structure.read"]);
+    deniedScope.registerManifest(deniedDefinition.contributes);
+    const denied = createExtensionContext(deniedDefinition, deniedHost.value, deniedScope);
+    const propertyView = savedView({ kind: "property", set: "Pset", name: "Code", op: "is", value: "A" });
+
+    await expect(denied.view.applySavedView(propertyView)).rejects.toThrow(/requires permission model\.index\.build/);
+    expect(deniedHost.applySavedView).not.toHaveBeenCalled();
+
+    const allowedHost = hostContext();
+    const allowedScope = new ExtensionScope("sample", new ExtensionContributionRegistry());
+    const allowedDefinition = manifest(["view.read", "view.control", "model.structure.read", "model.index.build"]);
+    allowedScope.registerManifest(allowedDefinition.contributes);
+    const allowed = createExtensionContext(allowedDefinition, allowedHost.value, allowedScope);
+    await expect(allowed.view.applySavedView(propertyView, { camera: false })).resolves.toEqual({ empty: [], matched: 1 });
+    expect(allowedHost.applySavedView).toHaveBeenCalledWith(
+      propertyView,
+      expect.objectContaining({ camera: false, signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("rejects malformed saved views at both extension host boundaries", async () => {
+    const malformed = {
+      ...savedView({ kind: "all" }),
+      camera: { position: [Number.NaN, 0, 0], target: [0, 0, 0] },
+    } as ViewDefinition;
+
+    const installedHost = hostContext();
+    const scope = new ExtensionScope("sample", new ExtensionContributionRegistry());
+    const definition = manifest(["view.read", "view.control", "model.structure.read", "model.index.build"]);
+    scope.registerManifest(definition.contributes);
+    const installed = createExtensionContext(definition, installedHost.value, scope);
+    await expect(installed.view.applySavedView(malformed)).rejects.toThrow(/Invalid saved-view definition/);
+    expect(installedHost.applySavedView).not.toHaveBeenCalled();
+
+    const index = vi.fn();
+    const builtIn = createHostContext({ id: "sample", name: "Sample" }, {
+      viewer: {},
+      service: {},
+      python: {},
+      capabilities: {},
+      index,
+      setColorRule: vi.fn(),
+      modelKey: () => "",
+      modelName: () => "",
+      log: vi.fn(),
+      runCommand: vi.fn(),
+      close: vi.fn(),
+      hostEvent: vi.fn(() => vi.fn()),
+    } as unknown as ContextDeps);
+    await expect(builtIn.ctx.applySavedView(malformed)).rejects.toThrow(/Invalid saved-view definition/);
+    expect(index).not.toHaveBeenCalled();
+    builtIn.release();
   });
 
   it("scopes lazy categories and reviewed Python automation", async () => {

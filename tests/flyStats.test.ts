@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { bearing, compassPoint, heading, metres, speedLabel, storeyAt } from "../src/viewer-core/flyStats.js";
+import { updateFlyReadout } from "../src/viewer-core/viewer.js";
 
 describe("flight bearing", () => {
   it("calls scene -Z north, which is plan screen-up", () => {
@@ -91,5 +92,15 @@ describe("readout formatting", () => {
   it("shows fine detail at walking pace and rounds when moving fast", () => {
     expect(speedLabel(1.25)).toBe("1.3 m/s");
     expect(speedLabel(48.6)).toBe("49 m/s");
+  });
+
+  it("renders model-owned storey names as text rather than markup", () => {
+    const readout = document.createElement("div");
+    const storey = '<img src=x onerror="globalThis.flyHudInjected=true"><script>bad()</script>';
+
+    updateFlyReadout(readout, [["Level", storey]]);
+
+    expect(readout.querySelector("img, script")).toBeNull();
+    expect(readout.querySelector("b")?.textContent).toBe(storey);
   });
 });

@@ -5,7 +5,7 @@
 // get back or a third to open it. Local Studio plugins are listed with
 // everything else so the catalog is honest about what exists, and what the app
 // already carries as a panel is a shortcut group rather than a second copy.
-import { confirmAction, copyText, h, icon, iconButton, lightDismiss, toast } from "../../ui/kit.js";
+import { confirmAction, copyText, h, icon, iconButton, lightDismiss, promptForm, toast } from "../../ui/kit.js";
 import { INSTALL_CMD } from "../../ui/connection.js";
 import { CATALOG, isBuiltIn, isLive } from "../registry.js";
 import type { CatalogPlugin } from "../registry.js";
@@ -14,6 +14,16 @@ import type { ServiceClient } from "../../bridge/serviceClient.js";
 import { InstalledExtensionManager, activeInstalledVersion } from "../../extensions/installed/manager.js";
 import { permissionPresentation, reviewExtensionInstall, shortHash, showExtensionAudit } from "../../extensions/installed/ui.js";
 import type { ExtensionInstallCandidate } from "../../extensions/installed/types.js";
+import {
+  fetchPackage,
+  fetchRegistry,
+  permissionDiff,
+  registryUrl,
+  setRegistryUrl,
+  TRUSTED_KEY,
+  type RegistryEntry,
+  type RegistryResult,
+} from "../../extensions/registry.js";
 
 export interface BrowserActions {
   runCommand(id: string): void;
@@ -28,6 +38,8 @@ export class PluginBrowser {
   private readonly installInput: HTMLInputElement;
   private filter = "All";
   private expanded = new Set<string>();
+  private registryLoad: AbortController | null = null;
+  private registryGeneration = 0;
 
   constructor(
     private readonly host: PluginHost,
@@ -57,12 +69,18 @@ export class PluginBrowser {
     });
     const install = h("button", { class: "btn sm ext-install", type: "button" }, [icon("upload", 12), h("span", { text: "Install file" })]);
     install.addEventListener("click", () => this.installInput.click());
+    const registry = h("button", { class: "btn sm ext-install", type: "button", title: "Browse a signed plugin registry" }, [
+      icon("globe", 12),
+      h("span", { text: "Registry" }),
+    ]);
+    registry.addEventListener("click", () => void this.openRegistry());
 
     this.dialog = h("dialog", { id: "plugin-dialog" }, [
       h("div", { class: "dlg-head" }, [
         icon("blocks", 15),
         h("span", { text: "Plugins" }),
         h("span", { class: "plug-search" }, [icon("search", 13), this.search]),
+        ...(TRUSTED_KEY ? [registry] : []),
         install,
         iconButton("x", "Close", () => this.dialog.close(), "icon-btn dlg-x"),
       ]),
@@ -76,6 +94,134 @@ export class PluginBrowser {
 
   refresh(): void {
     if (this.dialog.open) this.render();
+  }
+
+  /**
+   * The registry: one signed JSON index on static hosting. Nothing is
+   * installed from it without the same permission review a file install gets,
+   * and nothing is downloaded that does not match the hash the index pinned.
+   */
+  private async openRegistry(): Promise<void> {
+    if (!TRUSTED_KEY) {
+      toast("This build has no trusted plugin-registry key. Install a reviewed extension file instead.", "info");
+      return;
+    }
+    this.registryLoad?.abort();
+    const generation = ++this.registryGeneration;
+    const url = registryUrl();
+    if (!url) {
+      promptForm(
+        "Plugin registry",
+        [{
+          key: "url",
+          label: "Registry index URL",
+          placeholder: "https://example.org/plugins/index.json",
+          hint: "A static, signed JSON index. Nothing is sent to it: it is fetched, checked and read.",
+        }],
+        "Connect",
+        (values) => {
+          const next = values.url.trim();
+          if (!next) return;
+          setRegistryUrl(next);
+          void this.openRegistry();
+        },
+      );
+      return;
+    }
+    const controller = new AbortController();
+    this.registryLoad = controller;
+    let result: RegistryResult;
+    try {
+      result = await fetchRegistry(url, controller.signal);
+    } catch (error) {
+      if (controller.signal.aborted || generation !== this.registryGeneration) return;
+      if (registryUrl() === url) setRegistryUrl("");
+      toast(error instanceof Error ? error.message : String(error), "error");
+      return;
+    } finally {
+      if (this.registryLoad === controller) this.registryLoad = null;
+    }
+    if (generation !== this.registryGeneration) return;
+    this.showRegistry(result);
+  }
+
+  private showRegistry(result: RegistryResult): void {
+    const list = h("div", { class: "reg-list" });
+    const downloads = new AbortController();
+    for (const entry of result.index.packages) {
+      list.appendChild(this.registryRow(entry, result, downloads.signal));
+    }
+    const change = h("button", { class: "btn", type: "button", text: "Change registry" });
+    change.addEventListener("click", () => {
+      dialog.close();
+      setRegistryUrl("");
+      void this.openRegistry();
+    });
+    const close = h("button", { class: "btn primary", type: "button", text: "Close" });
+    const dialog = h("dialog", { class: "form-dialog wide", "aria-label": "Plugin registry" }, [
+      h("div", { class: "dlg-head" }, [
+        h("span", { text: result.index.name }),
+        h("span", { class: `reg-trust ${result.trust}`, text: trustLabel(result.trust) }),
+      ]),
+      h("div", { class: "dlg-body" }, [
+        h("div", { class: "note", text: result.source }),
+        h("div", {
+          class: "note",
+          text: "The index is signed by the key this build trusts. Every download is checked against the hash and size it names.",
+        }),
+        result.index.packages.length ? list : h("div", { class: "note", text: "This registry lists no packages." }),
+      ]),
+      h("div", { class: "dlg-foot" }, [change, close]),
+    ]) as HTMLDialogElement;
+    close.addEventListener("click", () => dialog.close());
+    dialog.addEventListener("close", () => {
+      downloads.abort();
+      dialog.remove();
+    });
+    document.body.appendChild(dialog);
+    dialog.showModal();
+  }
+
+  private registryRow(entry: RegistryEntry, result: RegistryResult, signal: AbortSignal): HTMLElement {
+    const installed = this.installed.get(entry.id);
+    const current = installed ? activeInstalledVersion(installed) : null;
+    const diff = permissionDiff(entry, current?.grantedPermissions ?? []);
+    const action = h("button", { class: "btn sm accent", type: "button" }, [
+      h("span", {
+        text: !current ? "Install"
+          : current.version === entry.version ? "Reinstall"
+          : "Update",
+      }),
+    ]);
+    action.addEventListener("click", () => {
+      action.disabled = true;
+      void fetchPackage(entry, result.source, signal)
+        .then((bytes) => this.installed.prepare(bytes))
+        .then((candidate) => {
+          if (candidate.prepared.manifest.id !== entry.id || candidate.prepared.manifest.version !== entry.version) {
+            throw new Error(`${entry.name} does not identify itself as ${entry.id} ${entry.version}. It was not installed.`);
+          }
+          return candidate;
+        })
+        .then((candidate) => this.reviewInstall(candidate))
+        .catch((error: unknown) => {
+          if (!signal.aborted) toast(error instanceof Error ? error.message : String(error), "error");
+        })
+        .finally(() => {
+          action.disabled = false;
+        });
+    });
+    return h("div", { class: "reg-row" }, [
+      h("div", { class: "grow" }, [
+        h("b", { text: `${entry.name} ${entry.version}` }),
+        h("small", { text: entry.description || entry.publisher }),
+        h("small", { class: "mono", text: `sha256 ${shortHash(entry.sha256)} · ${(entry.size / 1024).toFixed(0)} kB` }),
+        ...(diff.added.length
+          ? [h("small", { class: "reg-perm", text: `New permissions: ${diff.added.map((permission) => permissionPresentation(permission).title).join(", ")}` })]
+          : []),
+      ]),
+      action,
+    ]);
   }
 
   async reviewInstall(candidate: ExtensionInstallCandidate): Promise<void> {
@@ -440,4 +586,11 @@ export class PluginBrowser {
     if (plugin.load) return void this.host.open(plugin.id);
     if (plugin.command) this.actions.runCommand(plugin.command);
   }
+}
+
+/** What the trust chip says, in the words the user needs. */
+function trustLabel(trust: RegistryResult["trust"]): string {
+  if (trust === "signed") return "signed";
+  if (trust === "invalid") return "signature failed";
+  return "unsigned";
 }

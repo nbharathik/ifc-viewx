@@ -1,6 +1,9 @@
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
+import { readFile, readdir, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import { viteStaticCopy } from "vite-plugin-static-copy";
 
 // GitHub Pages serves the site from /<repo-name>/, so the base must match.
@@ -11,6 +14,55 @@ const base = process.env.VITE_BASE ?? "/ifc-viewx/";
 // produced it. Read here rather than imported, to keep package.json out of the
 // bundle.
 const { version } = createRequire(import.meta.url)("./package.json") as { version: string };
+
+/** Stamp every emitted chunk into the service worker's atomic offline cache. */
+async function listOutputFiles(directory: string, relative = ""): Promise<string[]> {
+  const entries = await readdir(resolve(directory, relative), { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const path = relative ? `${relative}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) files.push(...await listOutputFiles(directory, path));
+    else files.push(path);
+  }
+  return files;
+}
+
+/** Write a complete, content-versioned worker after every build artifact exists. */
+export async function writeOfflineWorker(directory: string): Promise<void> {
+  const template = await readFile(new URL("./public/sw.js", import.meta.url), "utf8");
+  const files = (await listOutputFiles(directory))
+    .filter((file) => file !== "sw.js" && !file.endsWith(".map"))
+    .sort();
+  const hash = createHash("sha256");
+  hash.update(version);
+  hash.update(template);
+  for (const file of files) {
+    hash.update(file);
+    hash.update(await readFile(resolve(directory, file)));
+  }
+  const digest = hash.digest("hex").slice(0, 12);
+  const precache = files.map((file) => `./${file}`);
+  const worker = template
+    .replace('"__IFCVIEWX_VERSION__"', JSON.stringify(`${version}-${digest}`))
+    .replace("__IFCVIEWX_PRECACHE__", JSON.stringify(precache, null, 2));
+  await writeFile(resolve(directory, "sw.js"), worker, "utf8");
+}
+
+function offlineWorker(): Plugin {
+  let outputDirectory = "dist";
+  let root = process.cwd();
+  return {
+    name: "ifcviewx-offline-worker",
+    apply: "build",
+    configResolved(config) {
+      root = config.root;
+      outputDirectory = config.build.outDir;
+    },
+    async closeBundle() {
+      await writeOfflineWorker(resolve(root, outputDirectory));
+    },
+  };
+}
 
 export default defineConfig({
   base,
@@ -35,6 +87,7 @@ export default defineConfig({
         { src: "node_modules/web-ifc/web-ifc.wasm", dest: "wasm" },
       ],
     }),
+    offlineWorker(),
   ],
   worker: {
     format: "es",

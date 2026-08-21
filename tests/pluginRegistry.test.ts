@@ -5,8 +5,9 @@ import { CATALOG, findPlugin } from "../src/plugins/registry.js";
 describe("extension registry", () => {
   it("discovers every bundled tool through the current extension manifest", () => {
     const ids = [
-      "clash", "compare", "explorer", "finder", "ids-studio", "model-health", "python",
-      "schedule-4d", "section-workspace", "smart-measure", "spaces", "storeys", "takeoff",
+      "clash", "compare", "explorer", "finder", "ids-studio", "model-health", "point-cloud",
+      "presentation", "python", "report-builder", "rule-studio", "schedule-4d",
+      "section-workspace", "sheets", "smart-measure", "spaces", "storeys", "sun-study", "takeoff",
     ];
     expect(CATALOG.filter((plugin) => plugin.extension).map((plugin) => plugin.id).sort()).toEqual(ids);
     for (const id of ids) {

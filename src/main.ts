@@ -27,6 +27,14 @@ import { AssistantPanel, type PendingEditView } from "./ui/sidePanel.js";
 import { TypesPane } from "./ui/typesPane.js";
 import { OrganizePane } from "./ui/organizePane.js";
 import { FilterChip, FilterPanel, FilterStore } from "./ui/filters.js";
+import { clearDocket, docketChip, publishDocket, ResultsDock, type DocketRow } from "./ui/resultsDock.js";
+import { clearFindings } from "./ui/findings.js";
+import { FieldMode } from "./ui/fieldMode.js";
+import { DrivePanel } from "./ui/drivePanel.js";
+import { buildPackage, carriesState, isPackageName, readPackage, PACKAGE_EXTENSION } from "./share/package.js";
+import type { ViewsPane } from "./ui/viewsPane.js";
+import { ViewStore, type ViewDefinition } from "./views/definition.js";
+import { ComputedStore, type ComputedProperty } from "./data/computed.js";
 import type { BcfPanel } from "./ui/bcf.js";
 import type { GeoContextPanel } from "./ui/geo.js";
 import { Shell, emptyState, type PaneId, type TabId } from "./ui/shell.js";
@@ -38,7 +46,8 @@ import type { SchedulePanel } from "./ui/schedules.js";
 import { buildMenu, busyRow, CommandPalette, confirmAction, copyText, h, icon, lightDismiss, menuKeys, openLayer, promptForm, safeStorageGet, safeStorageSet, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
 import { ageLabel, clearChats, readChats, saveChat, type Conversation } from "./llm/chatStore.js";
 import { sampleModel, SAMPLE_NAME } from "./ui/sample.js";
-import { download } from "./sdk/data.js";
+import { download, elementsOf } from "./sdk/data.js";
+import { buildIndex } from "./llm/retrieval.js";
 import { saveMesh, type MeshFormat } from "./export/mesh.js";
 import type { ExtensionIssueInput, ExtensionIssueResult } from "./sdk/types.js";
 import type { PythonRunner } from "./plugins/runtime/context.js";
@@ -202,6 +211,30 @@ dock.onAddModel = () => attachInput.click();
 const filters = new FilterStore(viewer);
 new FilterChip(shell.viewerHost, filters);
 
+// One dock for every producer of results. Panels keep their setup; the list,
+// the grouping, the assignment and the BCF handoff are shared.
+const results = new ResultsDock(shell.viewerHost, {
+  isolate: (ids, label) => viewer.isolate(ids, label),
+  select: (ids) => viewer.selectMany(ids, "replace"),
+  frameAt: (point) => viewer.fitToPoint(point, 2),
+  frame: (id) => viewer.fitToElement(id),
+  showAll: () => viewer.showAll(),
+  raiseIssue: (title, ids, detail, point) =>
+    void raiseIssue(title, ids, { description: detail, point }).catch(reportError),
+  log: (message, kind) => shell.log(message, kind),
+});
+shell.statusSlot.appendChild(docketChip(() => results.setOpen(true)));
+
+// Roads and rail: the alignment, driven, with the file's own chainage.
+const drive = new DrivePanel(shell.viewerHost, viewer, { log: (message, kind) => shell.log(message, kind) });
+
+// Field mode: installed, touch-sized and working with the radio off. The
+// worker is registered only for a built site; a cached shell in development
+// would hide the change that was just made.
+const field = new FieldMode((message, kind) => shell.log(message, kind));
+field.register(import.meta.env.BASE_URL, import.meta.env.PROD);
+shell.statusSlot.appendChild(field.chip());
+
 // Web Studio or Local Studio: a badge in the top bar saying which app this is,
 // and one dialog explaining the difference. There is nothing to connect.
 const connection = new Connection(service, { refresh: () => probeService() });
@@ -226,6 +259,7 @@ const ifc = new IfcEngine(`${import.meta.env.BASE_URL}wasm/`);
 let assistantUi: AssistantPanel | null = null;
 let scheduleUi: SchedulePanel | null = null;
 let filterUi: FilterPanel | null = null;
+let viewsUi: ViewsPane | null = null;
 let bcfUi: BcfPanel | null = null;
 let geoUi: GeoContextPanel | null = null;
 let idsUi: unknown = null;
@@ -249,6 +283,7 @@ function assistant(): AssistantPanel {
       onViewAttachmentChange: () => syncAttachment(),
       onEvidence: (reference) => openEvidence(reference),
       onIssueProposal: (payload) => void acceptIssueProposal(payload),
+      onDefinitionProposal: (payload) => void acceptDefinitionProposal(payload).catch(reportError),
       extensionTools: () => plugins.assistantToolContributions().map(({ owner, contribution }) => ({
         owner,
         id: contribution.id,
@@ -347,6 +382,26 @@ function filterPanel(): FilterPanel {
   return filterUi;
 }
 
+/**
+ * The definitions layer: saved views and computed properties. Built lazily
+ * like every other panel, but the store behind it is read at startup so a
+ * command can apply a view without the pane ever being opened.
+ */
+async function viewsPane(): Promise<ViewsPane> {
+  if (!viewsUi) {
+    const { ViewsPane } = await import("./ui/viewsPane.js");
+    viewsUi = new ViewsPane($("tab-views"), viewer, plugins.index(), {
+      colorRule: () => dock.getColorRule(),
+      setColorRule: (rule) => dock.setColorRule(rule),
+      selectors: () => filters.selectors(),
+      log: (message, kind) => shell.log(message, kind),
+      applied: (name) => setActiveViewName(name),
+      raiseIssue: (title, ids) => void raiseIssue(title, ids).catch(reportError),
+    });
+  }
+  return viewsUi;
+}
+
 async function bcfPanel(): Promise<BcfPanel> {
   if (!bcfUi) {
     const { BcfPanel } = await import("./ui/bcf.js");
@@ -354,6 +409,20 @@ async function bcfPanel(): Promise<BcfPanel> {
       viewer,
       modelName: () => fileName,
       log: (message, kind) => shell.log(message, kind),
+      // A revision pulled from the CDE lands in the viewer, not in a folder.
+      openDocument: async (name, bytes, intent) => {
+        if (intent === "compare") {
+          const added = await viewer.addModel(bytes, { name });
+          shell.log(`Added ${name} from the CDE as model ${added.index + 1}`, "success", true);
+          summaryDirty = true;
+          updateModelChrome();
+          void plugins.open("compare");
+          return;
+        }
+        if (!(await loadBytes(bytes, name, false, { attempt: beginLoadAttempt() }))) return;
+        void storeSourceBytes(bytes, name).then(renderRecents);
+        shell.log(`Opened ${name} from the CDE`, "success", true);
+      },
     });
   }
   return bcfUi;
@@ -445,6 +514,7 @@ function mountLazy(tab: TabId, build: () => Promise<unknown>): void {
 function mountTab(tab: TabId): void {
   if (tab === "assistant") assistant();
   else if (tab === "filters") filterPanel();
+  else if (tab === "views") mountLazy(tab, viewsPane);
   else if (tab === "geo") mountLazy(tab, geoPanel);
   else if (tab === "ids") mountLazy(tab, idsPanel);
   else if (tab === "bcf") mountLazy(tab, bcfPanel);
@@ -589,6 +659,9 @@ function dropModelState(): void {
   if (pendingEdit) discardPending();
   service.forgetModel();
   assistantCapabilities.results.clear();
+  clearDocket();
+  clearFindings();
+  void import("./ui/ids.js").then(({ clearLastIdsReport }) => clearLastIdsReport());
   activeAssistantResult = "";
   focusedAssistantRow = undefined;
   showDropzone();
@@ -680,6 +753,13 @@ async function loadBytes(
   summaryDirty = true;
   lastReport = null;
   assistantCapabilities.results.clear();
+  // Every docket row points at element ids from one model revision. Keeping
+  // it after a load would let an old finding select an unrelated new element.
+  clearDocket();
+  clearFindings();
+  void import("./ui/ids.js").then(({ clearLastIdsReport }) => {
+    if (mine === loadSeq) clearLastIdsReport();
+  });
   activeAssistantResult = "";
   focusedAssistantRow = undefined;
   // .ifcx is our converted container, not STEP, so the semantic engine gets
@@ -807,6 +887,7 @@ async function attachFile(file: File): Promise<void> {
 }
 
 async function openFile(file: File): Promise<void> {
+  if (isPackageName(file.name)) return openSharePackage(file);
   const attempt = beginLoadAttempt();
   // A startup/cache read may own the pre-load overlay; this request supersedes it.
   loadingUi.hide();
@@ -926,6 +1007,75 @@ async function redo(): Promise<void> {
   shell.log("Redid the edit", "info", true);
 }
 
+/**
+ * Handover as one file: the model, the views authored on it, the properties
+ * those views read, the drawings they were checked against and the issues
+ * raised. Everything in it is readable without this application.
+ */
+async function exportSharePackage(): Promise<void> {
+  if (!activeBytes) return void toast("Open a model first", "info");
+  shell.setStatus("Building the share package", "busy");
+  try {
+    const { sheetStore } = await import("./sheets/sheet.js");
+    const state: Record<string, string> = {};
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (!key || !carriesState(key)) continue;
+      const value = localStorage.getItem(key);
+      if (value !== null) state[key] = value;
+    }
+    const preview = await viewer.captureImage(900, "image/png").catch(() => null);
+    const bytes = await buildPackage({
+      project: fileName || "model",
+      app: `IFCViewX ${__APP_VERSION__}`,
+      model: { name: fileName || "model.ifc", bytes: activeBytes },
+      views: new ViewStore().list(),
+      properties: new ComputedStore().list(),
+      sheets: await sheetStore.all(),
+      state,
+      preview: preview ? new Uint8Array(await preview.arrayBuffer()) : null,
+    });
+    download(`${(fileName || "model").replace(/\.[^.]+$/, "")}${PACKAGE_EXTENSION}`, bytes as BlobPart, "application/zip");
+    shell.log(`Share package written: ${(bytes.length / 1e6).toFixed(1)} MB`, "success", true);
+  } finally {
+    shell.setStatus(activeBytes ? "Ready" : "No model");
+  }
+}
+
+/** Restore a package only after its model has loaded successfully. */
+async function openSharePackage(file: File): Promise<void> {
+  const contents = readPackage(new Uint8Array(await file.arrayBuffer()));
+  const { sheetStore } = await import("./sheets/sheet.js");
+  if (contents.model) {
+    const loaded = await loadBytes(contents.model.bytes, contents.model.name, false, { attempt: beginLoadAttempt() });
+    if (!loaded) throw new Error("The packaged model load was cancelled; no package state was restored.");
+    void storeSourceBytes(contents.model.bytes, contents.model.name).then(renderRecents);
+  }
+  for (const [key, value] of Object.entries(contents.state)) {
+    if (!carriesState(key)) continue;
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      shell.log(`No room left to restore ${key}`, "error");
+    }
+  }
+  if (contents.views.length) {
+    new ViewStore().merge(contents.views);
+  }
+  if (contents.properties.length) {
+    new ComputedStore().merge(contents.properties);
+  }
+  for (const sheet of contents.sheets) {
+    await sheetStore.put({ ...sheet.record, image: new Blob([sheet.image as BlobPart], { type: "image/png" }) });
+  }
+  viewsUi?.refresh();
+  shell.log(
+    `Opened package: ${contents.views.length} view(s), ${contents.properties.length} propert(ies), ${contents.sheets.length} sheet(s)`,
+    "success",
+    true,
+  );
+}
+
 function exportModel(): void {
   if (!activeBytes) return;
   download(fileName || "model.ifc", activeBytes as BlobPart, "application/x-step");
@@ -973,6 +1123,130 @@ function exportMeshFile(): void {
         .catch(reportError);
     },
   );
+}
+
+/** The name of the last saved view applied, shown until something clears it. */
+let activeViewName = "";
+
+function setActiveViewName(name: string): void {
+  activeViewName = name;
+  syncViewState();
+}
+
+/**
+ * The view-state bar. Everything currently modifying what is on screen, each
+ * chip clearing exactly its own modifier: the permanent answer to "why can't
+ * I see anything?".
+ */
+function syncViewState(): void {
+  if (!viewer.getStats()) return shell.setViewState([]);
+  const entries: Array<{ label: string; detail?: string; icon?: string; clear?: () => void }> = [];
+  if (activeViewName) {
+    entries.push({
+      label: activeViewName,
+      detail: "saved view applied",
+      icon: "bookmark",
+      clear: () => {
+        activeViewName = "";
+        syncViewState();
+      },
+    });
+  }
+  const rules = filters.list();
+  if (rules.length) {
+    entries.push({
+      label: `${rules.length} filter${rules.length === 1 ? "" : "s"}`,
+      detail: rules.map((rule) => `${rule.mode === "hide" ? "hides" : "shows"} ${rule.label}`).join(", "),
+      icon: "funnel",
+      clear: () => viewer.clearRules(),
+    });
+  }
+  const hidden = viewer.getHiddenCount();
+  if (hidden > 0) {
+    entries.push({
+      label: `${hidden.toLocaleString()} hidden`,
+      detail: "hidden one at a time",
+      icon: "eye-off",
+      clear: () => viewer.setHidden(viewer.getHiddenIds(), false),
+    });
+  }
+  const sections = viewer.getSections();
+  if (sections.length) {
+    entries.push({
+      label: "Section",
+      detail: sections.map((section) => (section.axis ? section.axis.toUpperCase() : section.name)).join(", "),
+      icon: "section",
+      clear: () => viewer.clearSection(),
+    });
+  }
+  if (viewer.getSectionBox()) {
+    entries.push({ label: "Box", detail: "six section planes", icon: "cube", clear: () => viewer.setSectionBox(null) });
+  }
+  const color = dock.getColorRule();
+  if (color.kind !== "none") {
+    entries.push({
+      label: color.kind === "property" ? color.key : `Colour: ${color.kind}`,
+      detail: "colour override",
+      icon: "sparkle",
+      clear: () => void dock.setColorRule(null).catch(reportError),
+    });
+  }
+  const xray = viewer.getXrayCount();
+  if (xray > 0) {
+    entries.push({
+      label: `${xray.toLocaleString()} see-through`,
+      detail: "transparency override",
+      icon: "eye",
+      clear: () => {
+        viewer.clearXray();
+        ribbon.sync();
+      },
+    });
+  }
+  if (viewer.hasElementOffsets()) {
+    entries.push({
+      label: "Offsets",
+      detail: "storey slide, explode or moved elements",
+      icon: "layers",
+      clear: () => viewer.clearElementOffsets(),
+    });
+  }
+  const measures = viewer.getMeasureCount();
+  if (measures > 0) {
+    entries.push({
+      label: `${measures.toLocaleString()} measured`,
+      detail: "placed measurements",
+      icon: "ruler",
+      clear: () => viewer.resetMeasure(),
+    });
+  }
+  shell.setViewState(entries);
+}
+
+/**
+ * Enter or leave an immersive session. Raised from a command, which is a real
+ * user gesture; every browser refuses a session started any other way.
+ */
+async function enterXr(mode: "immersive-vr" | "immersive-ar"): Promise<void> {
+  if (viewer.xrMode() === mode) {
+    await viewer.exitXr();
+    return;
+  }
+  if (!(await viewer.xrSupported(mode))) {
+    toast(
+      mode === "immersive-vr"
+        ? "No VR headset is available to this browser"
+        : "This device cannot place the model in the room",
+      "info",
+    );
+    return;
+  }
+  try {
+    await viewer.startXr(mode);
+    shell.log(mode === "immersive-vr" ? "VR session started" : "AR session started", "success");
+  } catch (error) {
+    reportError(error);
+  }
 }
 
 function frameSelection(): void {
@@ -1686,6 +1960,49 @@ async function acceptIssueProposal(payload: Record<string, unknown>): Promise<vo
   await raiseIssue(String(payload.title ?? "Assistant issue"), ids);
 }
 
+/**
+ * Keep a definition the assistant wrote. Saving it is the whole point: the
+ * answer stops being a message in a transcript and becomes a file the team
+ * can open, edit and re-run on the next revision.
+ */
+async function acceptDefinitionProposal(payload: Record<string, unknown>): Promise<void> {
+  const kind = String(payload.staged ?? "");
+  if (kind === "view") {
+    const body = payload.view as Record<string, unknown>;
+    const store = new ViewStore();
+    store.save({
+      ...(body as unknown as ViewDefinition),
+      id: `view-${Date.now().toString(36)}`,
+      updatedAt: new Date().toISOString(),
+      thumbnail: "",
+    });
+    viewsUi?.refresh();
+    shell.selectTab("views");
+    shell.log(`Saved the view "${String(body.name)}" the assistant wrote`, "success", true);
+    return;
+  }
+  if (kind === "property") {
+    const body = payload.property as ComputedProperty;
+    if (!new ComputedStore().save({ ...body, id: `cp-${Date.now().toString(36)}` })) {
+      throw new Error("The assistant returned an invalid computed-property definition");
+    }
+    viewsUi?.refresh();
+    shell.selectTab("views");
+    shell.log(`Saved the computed property "${String(body.name)}"`, "success", true);
+    return;
+  }
+  if (kind === "ruleset") {
+    const ruleset = payload.ruleset as { name?: unknown };
+    // Rule Studio reads its ruleset from its own extension storage, so the
+    // ruleset is handed over the way the panel itself stores one.
+    localStorage.setItem("ifcviewx.plug.rule-studio.ruleset", JSON.stringify(payload.ruleset));
+    await plugins.open("rule-studio");
+    shell.log(`Loaded the ruleset "${String(ruleset.name ?? "")}" into Rule Studio`, "success", true);
+    return;
+  }
+  toast("That proposal is not something this build can save", "error");
+}
+
 function reportError(err: unknown): void {
   if (err instanceof Error && err.name === "CancelledError") return shell.log("Load cancelled");
   shell.log(err instanceof Error ? err.message : String(err), "error", true);
@@ -1847,6 +2164,7 @@ async function validateModel(): Promise<void> {
     const report = await ifc.validate();
     if (activeBytes !== sourceBytes || loadSeq !== sourceLoad) return;
     lastReport = report;
+    publishChecksDocket(report);
     const { error, warning } = report.counts;
     shell.log(
       `Model checks: ${error} error${error === 1 ? "" : "s"}, ${warning} warning${warning === 1 ? "" : "s"}`,
@@ -1891,6 +2209,95 @@ async function buildReport(): Promise<void> {
   } finally {
     updateModelChrome();
   }
+}
+
+/** Read the alignments this file carries and open drive mode on them. */
+async function openDriveMode(): Promise<void> {
+  if (!activeBytes) return void toast("Open a model first", "info");
+  if (drive.isOpen()) return drive.hide();
+  shell.setStatus("Reading alignments", "busy");
+  try {
+    await handOverModel();
+    const report = await ifc.alignments();
+    // The schema is what tells a user their file simply cannot carry an
+    // alignment, so pass the one the loader sniffed rather than a blank.
+    drive.present(report.alignments, schemaName ?? "");
+    if (report.alignments.length) {
+      shell.log(
+        `${report.alignments.length} alignment(s), ${report.alignments.reduce((total, entry) => total + entry.length, 0).toFixed(0)} m in total`,
+        "success",
+      );
+    }
+  } finally {
+    shell.setStatus(activeBytes ? "Ready" : "No model");
+  }
+}
+
+/**
+ * The conformance pass buildingSMART's own service runs, run here instead.
+ * Their service is free and online only; this one never sees the file, which
+ * is the only claim in the app that no other product can make.
+ */
+let conformanceRunning = false;
+async function runConformance(): Promise<void> {
+  if (!activeBytes) return void toast("Open a model first", "info");
+  if (conformanceRunning) return;
+  conformanceRunning = true;
+  shell.setStatus("Checking conformance", "busy");
+  try {
+    await handOverModel();
+    const report = await ifc.conformance();
+    const { FAMILY_LABEL } = await import("./ifc/conformance.js");
+    publishDocket({
+      id: "conformance",
+      producer: "Conformance",
+      title: "IFC conformance",
+      summary: `${report.passed} passed, ${report.failed} failed, ${report.notRun} need Local Studio. Schema ${report.schema}`,
+      rows: report.checks.map((check) => ({
+        id: check.id,
+        severity: check.outcome === "fail" ? "error" : check.outcome === "not_run" ? "info" : "info",
+        title: `${check.id}  ${check.title}`,
+        detail: check.outcome === "pass" ? "passes" : check.outcome === "fail" ? `${check.count} failing` : check.detail,
+        group: FAMILY_LABEL[check.family],
+        ids: check.sample.map((entry) => entry.expressID).filter((id) => viewer.hasGeometry(id)),
+      })),
+    });
+    results.setOpen(true);
+    shell.log(
+      `Conformance: ${report.failed} rule(s) failed, ${report.passed} passed, nothing uploaded`,
+      report.failed ? "error" : "success",
+      true,
+    );
+  } finally {
+    conformanceRunning = false;
+    shell.setStatus(activeBytes ? "Ready" : "No model");
+  }
+}
+
+/**
+ * The built-in checks, as rows on the shared dock. A check names a sample of
+ * the entities it failed on, so the rows carry those ids and nothing more:
+ * claiming an id the check never looked at would send a reviewer somewhere
+ * the finding does not apply.
+ */
+function publishChecksDocket(report: ValidationReport): void {
+  const rows: DocketRow[] = report.checks.map((check) => ({
+    id: check.id,
+    severity: check.severity,
+    title: `${check.title} (${check.count.toLocaleString()})`,
+    detail: check.hint,
+    group: check.severity === "error" ? "Errors" : check.severity === "warning" ? "Warnings" : "Notes",
+    ids: (check.sample ?? [])
+      .map((entry) => Number(entry.expressID ?? entry.id))
+      .filter((id) => Number.isFinite(id) && viewer.hasGeometry(id)),
+  }));
+  publishDocket({
+    id: "checks",
+    producer: "Model checks",
+    title: "Model checks",
+    summary: `${report.counts.error} error(s), ${report.counts.warning} warning(s), schema ${report.schema}`,
+    rows,
+  });
 }
 
 function renderChecks(page: HTMLElement): void {
@@ -2081,10 +2488,14 @@ registry.add([
   { id: "file.export", label: "Export", icon: "download", section: "File", hint: "Download the active IFC", enabled: hasModel, run: exportModel },
   { id: "file.mesh", label: "Export mesh", icon: "cube", section: "File", hint: "glTF, GLB, STL or OBJ of what is on screen, or of the selection", enabled: hasModel, run: exportMeshFile },
   { id: "file.plan", label: "Export plan", icon: "section", section: "File", hint: "The 2D plan as a PNG, cut where the section is", enabled: hasModel, run: () => void savePlanImage() },
+  { id: "file.package", label: "Share package", icon: "download", section: "File", hint: "Model, views, properties, drawings and issues as one file that opens with no account and no network", enabled: hasModel, run: () => void exportSharePackage().catch(reportError) },
   { id: "file.close", label: "Close", icon: "x", section: "File", enabled: hasModel, run: closeOrConfirm },
   { id: "file.screenshot", label: "Screenshot", icon: "camera", section: "File", shortcut: "S", enabled: hasModel, run: () => { viewer.screenshot(); shell.log("Screenshot saved", "success", true); } },
   { id: "file.viewpoint", label: "Viewpoint", icon: "bookmark", section: "File", shortcut: "V", enabled: hasModel, run: saveViewpoint },
+  { id: "view.save", label: "Save view", icon: "bookmark", section: "Views", shortcut: "Shift+V", hint: "Store filters, colour, cuts, notes and camera as a definition that re-runs on any revision", enabled: hasModel, run: () => void viewsPane().then((pane) => pane.saveCurrent()).catch(reportError) },
+  { id: "view.open", label: "Views", icon: "bookmark", section: "Views", shortcut: "W", hint: "Saved views and computed properties", run: () => shell.selectTab("views") },
   { id: "file.convert", label: "Convert", icon: "refresh", section: "Local Studio", tier: "local", available: () => canLocal("convert"), hint: "IfcOpenShell → .ifcx, then reopens are instant", enabled: hasModel, run: () => void convertWithService() },
+  { id: "file.conformance", label: "Conformance", icon: "shield", section: "Review", hint: "Schema, implementer agreements and informal propositions, checked on this machine with nothing uploaded", enabled: () => hasModel() && !conformanceRunning, run: () => void runConformance().catch(reportError) },
   { id: "file.check", label: "Checks", icon: "shield", section: "Review", hint: "Structural QA in this tab, no generated code", enabled: () => hasModel() && !checking, run: () => void validateModel().catch(reportError) },
   { id: "file.schedule", label: "Schedule", icon: "table", section: "Review", hint: "Tabular export of a class, with pset columns resolved through the type", enabled: hasModel, run: () => shell.selectTab("schedule") },
   { id: "file.report", label: "Report", icon: "clipboard", section: "Review", hint: "One offline HTML page: checks, IDS, findings and issues. Print it for PDF", enabled: hasModel, run: () => void buildReport().catch(reportError) },
@@ -2129,6 +2540,9 @@ registry.add([
   { id: "cam.rotl", label: "Rotate left", icon: "undo", section: "Camera", shortcut: "[", hint: "Quarter turn about the up axis", run: () => viewer.rotateView(90) },
   { id: "cam.rotr", label: "Rotate right", icon: "redo", section: "Camera", shortcut: "]", run: () => viewer.rotateView(-90) },
   { id: "cam.perp", label: "Perpendicular", icon: "focus", section: "Camera", shortcut: "N", hint: "Face the last-picked surface head on", enabled: hasModel, run: () => { if (!viewer.viewPerpendicular()) toast("No picked face; snapped to the nearest axis", "info"); } },
+  { id: "analysis.alignment", label: "Drive alignment", icon: "walk", section: "Analyze", hint: "Follow an IFC 4.3 alignment with the file's own chainage, height and grade", enabled: hasModel, pressed: () => drive.isOpen(), run: () => void openDriveMode().catch(reportError) },
+  { id: "cam.vr", label: "VR review", icon: "walk", section: "Camera", hint: "Walk the model in a headset. The same tab, no second application", enabled: hasModel, pressed: () => viewer.xrMode() === "immersive-vr", run: () => void enterXr("immersive-vr") },
+  { id: "cam.ar", label: "AR on site", icon: "globe", section: "Camera", hint: "Place the model in the room through a passthrough headset or an Android phone", enabled: hasModel, pressed: () => viewer.xrMode() === "immersive-ar", run: () => void enterXr("immersive-ar") },
   { id: "cam.fly", label: "Fly mode", icon: "walk", section: "Camera", shortcut: "6", hint: "First person: WASD moves, Q/E down and up, Shift is faster, wheel zooms, Shift+wheel sets speed, Esc exits", enabled: hasModel, pressed: () => viewer.isFlyMode(), run: () => viewer.setFlyMode(!viewer.isFlyMode()) },
 
   { id: "tool.measure", label: "Measure", icon: "ruler", section: "Tools", shortcut: "M", pressed: () => viewer.isMeasuring(), run: toggleMeasure },
@@ -2139,18 +2553,25 @@ registry.add([
 
   { id: "analysis.smart-measure", label: "Smart measure", icon: "ruler", section: "Analyze", hint: "Shortest clearance between two elements or a six-axis surface scan", enabled: hasModel, run: openSmartMeasure },
   { id: "analysis.section-workspace", label: "Section drawing", icon: "section", section: "Analyze", hint: "Synchronized plans and sections from the active cut", enabled: hasModel, run: () => void plugins.open("section-workspace") },
+  { id: "sheets.open", label: "Sheets", icon: "layers", section: "Sheets", hint: "The issued drawing set: import, calibrate, overlay, mark up and raise BCF from 2D", run: () => void plugins.open("sheets") },
   { id: "analysis.clash", label: "Clash detection", icon: "alert", section: "Analyze", hint: "Find mesh intersections and clearance failures", enabled: hasModel, run: () => void plugins.open("clash") },
   { id: "analysis.health", label: "Model health", icon: "shield", section: "Analyze", hint: "Check identity, geometry and model quality", enabled: hasModel, run: () => void plugins.open("model-health") },
+  { id: "analysis.rules", label: "Rule Studio", icon: "shield", section: "Analyze", hint: "Geometric, topological and relational rules, saved as one ruleset the project shares", enabled: hasModel, run: () => void plugins.open("rule-studio") },
   { id: "analysis.compare", label: "Compare models", icon: "compare", section: "Analyze", hint: "Classify geometry and property changes", enabled: hasModel, run: () => void plugins.open("compare") },
   { id: "analysis.ids", label: "IDS", icon: "clipboard", section: "Analyze", hint: "Open an IDS file and check the model against it", run: () => shell.selectTab("ids") },
   { id: "analysis.ids-studio", label: "IDS authoring", icon: "clipboard", section: "Analyze", hint: "Write IDS 1.0 requirements, bind bSDD concepts and compare compliance", run: () => void plugins.open("ids-studio") },
   { id: "analysis.schedule-4d", label: "4D Schedule", icon: "clock", section: "Analyze", hint: "IFC task graph, schedule CSV overlay, Gantt and construction timeline", enabled: hasModel, run: () => void plugins.open("schedule-4d") },
   { id: "analysis.takeoff", label: "Takeoff", icon: "calculator", section: "Analyze", hint: "Extract quantities from the model", enabled: hasModel, run: () => void plugins.open("takeoff") },
+  { id: "analysis.report-builder", label: "Report builder", icon: "clipboard", section: "Review", hint: "Your columns, your grouping, saved as a template that reproduces on the next revision", enabled: hasModel, run: () => void plugins.open("report-builder") },
+  { id: "analysis.point-cloud", label: "Point cloud", icon: "cube", section: "Analyze", hint: "Overlay a laser scan and colour it by its deviation from the model", enabled: hasModel, run: () => void plugins.open("point-cloud") },
+  { id: "analysis.sun", label: "Sun and shadow", icon: "globe", section: "Analyze", hint: "Real sun position by date and place, and sunlight hours accumulated on a surface", enabled: hasModel, run: () => void plugins.open("sun-study") },
+  { id: "analysis.presentation", label: "Presentation", icon: "walk", section: "Review", hint: "Saved views as an ordered walkthrough, played or recorded", enabled: hasModel, run: () => void plugins.open("presentation") },
   { id: "analysis.geo", label: "Geo Context", icon: "globe", section: "Analyze", hint: "Inspect CRS metadata, align models and exchange GeoJSON", enabled: hasModel, run: () => shell.selectTab("geo") },
 
   { id: "panel.tree", label: "Structure", icon: "panel-left-close", section: "Panels", shortcut: "Ctrl+B", pressed: () => shell.isPanelOpen("outliner"), run: () => { shell.togglePanel("outliner"); ribbon.sync(); } },
   { id: "panel.insp", label: "Inspector", icon: "panel-right-close", section: "Panels", shortcut: "\\", pressed: () => shell.isPanelOpen("inspector"), run: () => { shell.togglePanel("inspector"); ribbon.sync(); } },
   { id: "panel.props", label: "Properties", icon: "info", section: "Panels", shortcut: "P", run: () => shell.selectTab("properties") },
+  { id: "panel.views", label: "Views", icon: "bookmark", section: "Panels", hint: "The definitions layer: saved views and computed properties", run: () => shell.selectTab("views") },
   { id: "panel.filters", label: "Filters", icon: "funnel", section: "Panels", shortcut: "R", run: () => shell.selectTab("filters") },
   { id: "panel.geo", label: "Geo Context", icon: "globe", section: "Panels", hint: "CRS diagnostics, federation alignment and GeoJSON", run: () => shell.selectTab("geo") },
   { id: "panel.ids", label: "IDS", icon: "clipboard", section: "Panels", hint: "Check the model against a buildingSMART IDS file", run: () => shell.selectTab("ids") },
@@ -2159,6 +2580,7 @@ registry.add([
   { id: "panel.ai", label: "Assistant", icon: "sparkle", section: "Panels", shortcut: "C", run: () => shell.selectTab("assistant") },
   { id: "panel.py", label: "Python console", icon: "terminal", section: "Panels", shortcut: "Y", hint: "Write IfcOpenShell yourself; opens as a plugin", run: () => void plugins.open("python") },
   { id: "panel.log", label: "Activity", icon: "activity", section: "Panels", shortcut: "L", run: () => shell.selectTab("activity") },
+  { id: "panel.results", label: "Results dock", icon: "list", section: "Panels", shortcut: "D", hint: "One dock for clash, rules, IDS and checks, with the same grouping and BCF handoff", pressed: () => results.isOpen(), run: () => { results.toggle(); ribbon.sync(); } },
   { id: "panel.summary", label: "Summary", icon: "list", section: "Panels", run: () => showPane("summary") },
   { id: "panel.types", label: "Types", icon: "layers", section: "Panels", hint: "Browse the model by IFC class", run: () => showPane("types") },
   { id: "panel.organize", label: "Organize", icon: "layers", section: "Panels", hint: "Groups, layers, classifications and materials", run: () => showPane("organize") },
@@ -2171,6 +2593,8 @@ registry.add([
 
   { id: "app.plugins", label: "Plugins", icon: "blocks", section: "Application", hint: "Python console, clash detection, takeoff, explorer, compare and the Local Studio add-ons", run: () => pluginBrowser.open() },
   { id: "app.connection", label: "Studio", icon: "plug", section: "Application", hint: "Web Studio or Local Studio", run: () => connection.open() },
+  { id: "app.install", label: "Install app", icon: "walk", section: "Application", hint: "Install IFCViewX so it opens from the home screen and works with no connection", run: () => void field.install() },
+  { id: "app.touch", label: "Touch mode", icon: "walk", section: "Application", hint: "Bigger hit targets for a tablet on site", pressed: () => field.isTouch(), run: () => { field.setTouch(!field.isTouch()); ribbon.sync(); shell.log(field.isTouch() ? "Touch mode on" : "Touch mode off"); } },
   { id: "app.theme", label: "Theme", icon: "moon", section: "Application", run: toggleTheme },
   { id: "app.settings", label: "Settings", icon: "settings", section: "Application", shortcut: "Ctrl+,", run: () => showSettings() },
   { id: "app.help", label: "Shortcuts", icon: "help", section: "Application", shortcut: "?", run: () => openDialog(helpDialog) },
@@ -2197,10 +2621,16 @@ const RIBBON: RibbonTab[] = [
         { kind: "cmd", id: "file.screenshot", size: "sm", label: "Image" },
         { kind: "cmd", id: "file.plan", size: "sm", label: "Plan" },
         { kind: "cmd", id: "file.viewpoint", size: "sm", label: "View" },
+        { kind: "cmd", id: "file.package", size: "sm", label: "Package" },
       ] },
       { label: "App", items: [
+        { kind: "cmd", id: "app.plugins" },
         { kind: "cmd", id: "app.settings", size: "sm" },
         { kind: "cmd", id: "app.help", size: "sm" },
+      ] },
+      { label: "Field", items: [
+        { kind: "cmd", id: "app.install", label: "Install" },
+        { kind: "cmd", id: "app.touch", size: "sm", label: "Touch" },
       ] },
     ],
   },
@@ -2228,6 +2658,17 @@ const RIBBON: RibbonTab[] = [
       { label: "Find", items: [
         { kind: "cmd", id: "vis.filters" },
         { kind: "cmd", id: "vis.clear", size: "sm", label: "Clear" },
+      ] },
+      { label: "Views", items: [
+        { kind: "cmd", id: "view.open", label: "Views" },
+        { kind: "cmd", id: "view.save", size: "sm", label: "Save" },
+        { kind: "cmd", id: "file.viewpoint", size: "sm", label: "Viewpoint" },
+      ] },
+      { label: "Inspect", items: [
+        { kind: "cmd", id: "panel.structure", label: "Structure" },
+        { kind: "cmd", id: "panel.types", size: "sm" },
+        { kind: "cmd", id: "panel.summary", size: "sm" },
+        { kind: "cmd", id: "panel.props", size: "sm", label: "Props" },
       ] },
       { label: "Edit", items: [
         { kind: "cmd", id: "edit.undo", size: "sm" },
@@ -2258,7 +2699,9 @@ const RIBBON: RibbonTab[] = [
       // palette and tooltips show, so a tab fits without a scroll.
       { label: "Navigate", items: [
         { kind: "cmd", id: "cam.fly", label: "Fly" },
-        { kind: "cmd", id: "cam.ortho", label: "Ortho" },
+        { kind: "cmd", id: "cam.vr", label: "VR" },
+        { kind: "cmd", id: "cam.ar", size: "sm", label: "AR" },
+        { kind: "cmd", id: "cam.ortho", size: "sm", label: "Ortho" },
         { kind: "cmd", id: "cam.perp", size: "sm", label: "Perp." },
         { kind: "cmd", id: "cam.rotl", size: "sm", label: "Rot. left" },
         { kind: "cmd", id: "cam.rotr", size: "sm", label: "Rot. right" },
@@ -2305,6 +2748,9 @@ const RIBBON: RibbonTab[] = [
       ] },
       { label: "Geometry", items: [
         { kind: "cmd", id: "analysis.clash", label: "Clash" },
+        { kind: "cmd", id: "analysis.sun", size: "sm", label: "Sun" },
+        { kind: "cmd", id: "analysis.alignment", size: "sm", label: "Drive" },
+        { kind: "cmd", id: "analysis.point-cloud", size: "sm", label: "Scan" },
         { kind: "cmd", id: "analysis.geo", size: "sm", label: "Geo" },
         { kind: "cmd", id: "analysis.health", size: "sm", label: "Health" },
         { kind: "cmd", id: "analysis.compare", size: "sm", label: "Compare" },
@@ -2312,28 +2758,28 @@ const RIBBON: RibbonTab[] = [
       ] },
       { label: "Requirements", items: [
         { kind: "cmd", id: "analysis.ids", label: "IDS" },
+        { kind: "cmd", id: "analysis.rules", label: "Rules" },
         { kind: "cmd", id: "analysis.ids-studio", size: "sm", label: "Author" },
         { kind: "cmd", id: "analysis.schedule-4d", size: "sm", label: "4D" },
       ] },
     ],
   },
   {
-    id: "model",
-    label: "Model",
+    id: "sheets",
+    label: "Sheets",
     groups: [
-      { label: "Inspect", items: [
-        { kind: "cmd", id: "panel.structure" },
-        { kind: "cmd", id: "panel.types", size: "sm" },
-        { kind: "cmd", id: "panel.summary", size: "sm" },
-        { kind: "cmd", id: "panel.props", size: "sm" },
+      { label: "Drawing set", items: [
+        { kind: "cmd", id: "sheets.open", label: "Sheets" },
+        { kind: "cmd", id: "analysis.section-workspace", size: "sm", label: "Section" },
+        { kind: "cmd", id: "tool.plan", size: "sm" },
       ] },
-      { label: "Convert", items: [
-        { kind: "cmd", id: "file.convert" },
+      { label: "Output", items: [
+        { kind: "cmd", id: "file.plan", label: "Plan PNG" },
+        { kind: "cmd", id: "file.screenshot", size: "sm", label: "Image" },
       ] },
-      // The Python console is a plugin like any other, so it is opened from
-      // the catalog rather than from a tile of its own up here.
-      { label: "Plugins", items: [
-        { kind: "cmd", id: "app.plugins" },
+      { label: "Issues", items: [
+        { kind: "cmd", id: "bcf.new" },
+        { kind: "cmd", id: "panel.bcf", size: "sm" },
       ] },
     ],
   },
@@ -2343,15 +2789,26 @@ const RIBBON: RibbonTab[] = [
     groups: [
       { label: "Quality", items: [
         { kind: "cmd", id: "file.check" },
-        { kind: "cmd", id: "file.schedule" },
+        { kind: "cmd", id: "analysis.rules", label: "Rules" },
+        { kind: "cmd", id: "file.conformance", size: "sm", label: "Conformance" },
+        { kind: "cmd", id: "file.schedule", size: "sm" },
         { kind: "cmd", id: "panel.ids", size: "sm" },
       ] },
       { label: "Issues", items: [
         { kind: "cmd", id: "bcf.new" },
         { kind: "cmd", id: "panel.bcf", size: "sm" },
+        { kind: "cmd", id: "analysis.presentation", size: "sm", label: "Present" },
+      ] },
+      { label: "Findings", items: [
+        { kind: "cmd", id: "panel.results", label: "Results" },
+      ] },
+      { label: "Convert", items: [
+        { kind: "cmd", id: "file.convert" },
       ] },
       { label: "Report", items: [
-        { kind: "cmd", id: "file.report" },
+        { kind: "cmd", id: "analysis.report-builder", label: "Builder" },
+        { kind: "cmd", id: "file.report", size: "sm", label: "Session" },
+        { kind: "cmd", id: "file.schedule", size: "sm", label: "Schedule" },
       ] },
     ],
   },
@@ -2381,6 +2838,16 @@ function buildScaleControl(): RibbonControl {
 }
 
 const ribbon = new Ribbon($("ribbon-tabs"), $("ribbon"), registry, RIBBON);
+// The status bar mirrors the same state the ribbon reads, so it repaints with it.
+ribbon.onSync = syncViewState;
+filters.onChange(() => syncViewState());
+viewer.onModelLoaded(() => setActiveViewName(""));
+syncViewState();
+
+viewer.onXrChange((mode) => {
+  ribbon.sync();
+  if (mode) shell.log("Immersive session running. Take the headset off or press the browser's exit control to come back.", "info", true);
+});
 
 viewer.onFlyChange((on) => {
   ribbon.sync();
@@ -2401,7 +2868,97 @@ const palette = new CommandPalette(() => [
       section: "Model",
       run: () => isolateByType(name),
     })),
-]);
+], (query) => universalSearch(query));
+
+/**
+ * Everything in the session, reachable from one keystroke: saved views,
+ * element names and GlobalIds, property values, and the sheets that have been
+ * imported. The property index answers the last two only once it exists, so
+ * the palette never triggers a several-thousand-element read of its own.
+ */
+function universalSearch(query: string): Array<{ id: string; label: string; icon: string; sub?: string; section: string; run: () => void }> {
+  const lower = query.toLowerCase();
+  const out: Array<{ id: string; label: string; icon: string; sub?: string; section: string; run: () => void }> = [];
+
+  for (const view of readSavedViews()) {
+    if (!`${view.name} ${view.folder}`.toLowerCase().includes(lower)) continue;
+    out.push({
+      id: `view.${view.id}`,
+      label: view.name,
+      icon: "bookmark",
+      sub: view.folder || "Saved view",
+      section: "Views",
+      run: () => void viewsPane().then((pane) => pane.run(view)).catch(reportError),
+    });
+    if (out.length > 6) break;
+  }
+
+  if (!viewer.getStats()) return out;
+
+  const index = plugins.index();
+  if (index.ready()) {
+    let seen = 0;
+    for (const row of index.all()) {
+      if (seen >= 12) break;
+      const hit =
+        row.globalId.toLowerCase() === lower ? `GlobalId ${row.globalId}`
+        : row.name.toLowerCase().includes(lower) ? row.storey || row.type
+        : matchingProperty(row, lower);
+      if (!hit) continue;
+      seen++;
+      out.push({
+        id: `element.${row.id}`,
+        label: row.name || `${row.type.replace(/^Ifc/, "")} #${row.id}`,
+        icon: "cube",
+        sub: hit,
+        section: "Elements",
+        run: () => {
+          viewer.select(row.id);
+          viewer.fitToElement(row.id);
+          shell.selectTab("properties");
+        },
+      });
+    }
+    return out;
+  }
+
+  // Before the index exists, names from the spatial tree are the honest answer.
+  const search = buildIndex(elementsOf(viewer.getSpatialTree()));
+  for (const hit of search.search(query, 10)) {
+    out.push({
+      id: `element.${hit.id}`,
+      label: hit.name || `${hit.type.replace(/^Ifc/, "")} #${hit.id}`,
+      icon: "cube",
+      sub: hit.storey || hit.type,
+      section: "Elements",
+      run: () => {
+        viewer.select(hit.id);
+        viewer.fitToElement(hit.id);
+        shell.selectTab("properties");
+      },
+    });
+  }
+  return out;
+}
+
+/** The first property whose value contains the query, for the result subtitle. */
+function matchingProperty(row: { props: Record<string, unknown> }, lower: string): string {
+  for (const [key, value] of Object.entries(row.props)) {
+    if (value === null || value === undefined || value === "") continue;
+    const text = String(value);
+    if (text.toLowerCase().includes(lower)) return `${key} = ${text}`;
+  }
+  return "";
+}
+
+/** Saved views without building the pane, so the palette works before it opens. */
+function readSavedViews(): ViewDefinition[] {
+  try {
+    return new ViewStore().list();
+  } catch {
+    return [];
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Plugins. The panel is the catalog until something is running, and the status
@@ -2458,6 +3015,7 @@ const plugins = new PluginHost(
     modelKey: () => viewer.isReady() ? modelRevision(viewer) : "",
     modelName: () => fileName,
     python: pythonFacet,
+    setColorRule: (rule) => dock.setColorRule(rule),
     changed: () => {
       syncPluginToggle();
       refreshAssistantEngine();
@@ -2774,6 +3332,23 @@ fileInput.addEventListener("change", () => {
   if (file) replaceOrConfirm(() => void openFile(file).catch(reportError));
   fileInput.value = "";
 });
+
+interface FileLaunchQueue {
+  setConsumer(consumer: (params: { files: FileSystemFileHandle[] }) => void | Promise<void>): void;
+}
+
+const launchQueue = (globalThis as typeof globalThis & { launchQueue?: FileLaunchQueue }).launchQueue;
+launchQueue?.setConsumer(async ({ files }) => {
+  const handle = files[0];
+  if (!handle) return;
+  try {
+    const file = await handle.getFile();
+    if (!/\.(ifc|ifcx|ifcpkg)$/i.test(file.name)) throw new Error(`${file.name} is not a supported IFC file`);
+    replaceOrConfirm(() => void openFile(file).catch(reportError));
+  } catch (error) {
+    reportError(error);
+  }
+});
 attachInput.addEventListener("change", () => {
   const file = attachInput.files?.[0];
   if (file) void attachFile(file).catch(reportError);
@@ -2781,6 +3356,70 @@ attachInput.addEventListener("change", () => {
 });
 $("btn-open-first").addEventListener("click", () => fileInput.click());
 $("btn-sample").addEventListener("click", () => replaceOrConfirm(() => void openSample().catch(reportError)));
+
+/**
+ * The task launcher. Twenty-odd tools is a discovery problem, and the empty
+ * state is the one moment the app has the user's full attention. Each route
+ * opens a file and lands in the tool that job starts in, rather than in the
+ * default panel with the tools still to be found.
+ */
+const TASKS: Array<{ label: string; detail: string; icon: string; open: () => void }> = [
+  {
+    label: "Review a model",
+    detail: "Structure, properties and saved views",
+    icon: "info",
+    open: () => {
+      shell.selectTab("views");
+      showPane("tree");
+    },
+  },
+  {
+    label: "Check requirements",
+    detail: "IDS specifications and the rule set",
+    icon: "clipboard",
+    open: () => shell.selectTab("ids"),
+  },
+  {
+    label: "Coordinate clashes",
+    detail: "Clash detection and the results dock",
+    icon: "alert",
+    open: () => {
+      void plugins.open("clash");
+      results.setOpen(true);
+    },
+  },
+  {
+    label: "Take off quantities",
+    detail: "Quantities, schedules and the report builder",
+    icon: "calculator",
+    open: () => void plugins.open("takeoff"),
+  },
+];
+
+const taskLauncher = h("div", { class: "dz-tasks" }, TASKS.map((task) => {
+  const button = h("button", { class: "dz-task", type: "button", title: task.detail }, [
+    icon(task.icon, 15),
+    h("span", { class: "grow" }, [
+      h("b", { text: task.label }),
+      h("small", { text: task.detail }),
+    ]),
+  ]);
+  // Nothing to review without a model, so the route opens one first and runs
+  // when the load lands.
+  button.addEventListener("click", () => {
+    if (hasModel()) return task.open();
+    pendingTask = task.open;
+    fileInput.click();
+  });
+  return button;
+}));
+let pendingTask: (() => void) | null = null;
+document.querySelector(".dz-card")?.insertBefore(taskLauncher, document.getElementById("recent"));
+viewer.onModelLoaded(() => {
+  const run = pendingTask;
+  pendingTask = null;
+  if (run) setTimeout(run, 0);
+});
 
 let dragDepth = 0;
 window.addEventListener("dragenter", (e) => {
@@ -2803,9 +3442,9 @@ window.addEventListener("drop", (e) => {
   dropzone.classList.remove("dragging");
   if (activeBytes) dropzone.classList.add("hidden");
   const file = e.dataTransfer?.files?.[0];
-  if (!file) return void toast("Drop an .ifc or .ifcx file", "info");
-  if (!/\.(ifc|ifcx)$/i.test(file.name)) {
-    return void toast(`${file.name} is not an IFC file`, "error");
+  if (!file) return void toast("Drop an .ifc, .ifcx or .ifcpkg file", "info");
+  if (!/\.(ifc|ifcx|ifcpkg)$/i.test(file.name)) {
+    return void toast(`${file.name} is not a supported IFC file`, "error");
   }
   replaceOrConfirm(() => void openFile(file).catch(reportError));
 });

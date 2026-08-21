@@ -255,6 +255,8 @@ export class Dock {
   private slideSpacing = 0;
   private explodeFactor = 0;
   private colorRule: ColorRule = { kind: "none" };
+  /** Set while the colour popover is open, so outside changes repaint it. */
+  private colorPaint: (() => void) | null = null;
   private readonly customColors = new CustomColors();
   private colorResult: ColorResult | null = null;
   /** Set once the plugin host exists; property rules read its shared index. */
@@ -1421,6 +1423,48 @@ export class Dock {
     this.syncColorButton();
   }
 
+  /** The colour rule in force, so a saved view can carry it. */
+  getColorRule(): ColorRule {
+    return this.colorRule;
+  }
+
+  /**
+   * Put a rule on the model from outside the popover: a saved view applying,
+   * or a plugin colouring its own result. Property and material rules need an
+   * async read, so the promise settles once the colours are actually on.
+   */
+  async setColorRule(rule: ColorRule | null): Promise<void> {
+    const next = rule ?? { kind: "none" as const };
+    this.colorRule = next;
+    this.syncColorButton();
+    if (next.kind === "none") {
+      this.colorResult = null;
+      this.applyMergedColors();
+      this.repaintColorPopover();
+      return;
+    }
+    if (next.kind === "material") {
+      const index = await this.viewer.getOrganizeIndex();
+      if (this.colorRule !== next) return;
+      this.colorResult = computeColorsFromEntries(materialColorEntries(index), (id) => this.viewer.hasGeometry(id));
+    } else if (next.kind === "property") {
+      const provider = this.indexProvider?.();
+      if (!provider) throw new Error("Properties are not ready yet");
+      const rows = await provider.build();
+      if (this.colorRule !== next) return;
+      this.colorResult = computeColors(this.viewer, next, rows);
+    } else {
+      this.colorResult = computeColors(this.viewer, next, []);
+    }
+    this.applyMergedColors();
+    this.repaintColorPopover();
+  }
+
+  /** Rebuild the legend when the popover happens to be open. */
+  private repaintColorPopover(): void {
+    this.colorPaint?.();
+  }
+
   /** Apply the active rule with the user's custom colours stacked on top. */
   private applyMergedColors(): ColorResult {
     const base = this.colorResult ?? { groups: [], assignment: new Map<number, number>(), unset: 0 };
@@ -1571,6 +1615,7 @@ export class Dock {
     const customRow = h("div", { class: "pop-row" }, [swatch, applySwatch, clearSwatch]);
 
     pop.append(keys, customRow, status, legend);
+    this.colorPaint = () => paint();
     paint();
   }
 

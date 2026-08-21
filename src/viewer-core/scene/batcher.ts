@@ -247,6 +247,13 @@ export class ModelBatcher {
   private activeModel = 0;
 
   private readonly elements = new Map<number, ElementRecord>();
+  /** Elements dropped by the distance cull; they are visible, just too small. */
+  private readonly lodHidden = new Set<number>();
+  private lastLodCamera: THREE.Vector3 | null = null;
+  private lastLodThreshold = -1;
+  private lastLodZoom = 1;
+  private lastLodHeight = 0;
+  private lodMoveEpsilon = 0.25;
   private readonly elementsByIndex: number[] = [];
   /** Snappable edges per element, scene space, 6 floats per segment. */
   private readonly segmentsByElement = new Map<number, Float32Array>();
@@ -1259,6 +1266,9 @@ export class ModelBatcher {
    */
   private stateFor(record: ElementRecord, expressID: number): number {
     if (this.isVisible(record, expressID)) {
+      // Too small to read is not the same as hidden: it never ghosts, because
+      // a ghost of something a pixel across is still a pixel of noise.
+      if (this.lodHidden.has(expressID)) return STATE_HIDDEN;
       return this.xraySet.has(expressID) ? STATE_XRAY : STATE_VISIBLE;
     }
     const categoryOff =
@@ -1712,11 +1722,108 @@ export class ModelBatcher {
     return culled;
   }
 
+  /**
+   * The same decision for merged-chunk elements, which have no mesh of their
+   * own to hide. An instanced entry is one draw call, so hiding it saves the
+   * call; a merged element shares its chunk, so the saving is fill rate and
+   * vertex work through the state texture's own discard. On a large
+   * federation most elements are merged, which is exactly the case where
+   * nothing was being culled at all.
+   *
+   * The pass is O(elements), so it only re-runs when the camera has actually
+   * moved far enough for the answer to change.
+   */
+  applyElementLod(camera: THREE.Camera, viewportHeight: number, thresholdPx: number): number {
+    const perspective = (camera as THREE.PerspectiveCamera).isPerspectiveCamera
+      ? (camera as THREE.PerspectiveCamera)
+      : null;
+    const ortho = (camera as THREE.OrthographicCamera).isOrthographicCamera
+      ? (camera as THREE.OrthographicCamera)
+      : null;
+    const scale = perspective
+      ? viewportHeight / (2 * Math.tan((perspective.fov * Math.PI) / 360))
+      : 0;
+    const orthoScale = ortho ? viewportHeight / Math.max(1e-6, (ortho.top - ortho.bottom) / ortho.zoom) : 0;
+    if (!perspective && !ortho) return this.lodHidden.size;
+
+    // Re-deciding on every frame of an orbit costs more than it saves; the
+    // answer only changes once the camera has moved a meaningful fraction of
+    // the way toward the elements it is judging.
+    const moved = this.lastLodCamera === null
+      ? Infinity
+      : camera.position.distanceTo(this.lastLodCamera);
+    const zoom = ortho ? ortho.zoom : 1;
+    if (
+      moved < this.lodMoveEpsilon &&
+      thresholdPx === this.lastLodThreshold &&
+      zoom === this.lastLodZoom &&
+      viewportHeight === this.lastLodHeight
+    ) {
+      return this.lodHidden.size;
+    }
+    this.lastLodCamera = camera.position.clone();
+    this.lastLodThreshold = thresholdPx;
+    this.lastLodZoom = zoom;
+    this.lastLodHeight = viewportHeight;
+
+    const changed: ElementRecord[] = [];
+    for (const [expressID, record] of this.elements) {
+      const radius = 0.5 * Math.hypot(
+        record.max[0] - record.min[0],
+        record.max[1] - record.min[1],
+        record.max[2] - record.min[2],
+      );
+      let pixels: number;
+      if (perspective) {
+        const cx = (record.min[0] + record.max[0]) / 2;
+        const cy = (record.min[1] + record.max[1]) / 2;
+        const cz = (record.min[2] + record.max[2]) / 2;
+        const distance = Math.hypot(
+          camera.position.x - cx,
+          camera.position.y - cy,
+          camera.position.z - cz,
+        );
+        pixels = distance <= radius ? Infinity : (radius * 2 * scale) / distance;
+      } else {
+        pixels = radius * 2 * orthoScale;
+      }
+      const cull = pixels < thresholdPx;
+      if (cull === this.lodHidden.has(expressID)) continue;
+      if (cull) this.lodHidden.add(expressID);
+      else this.lodHidden.delete(expressID);
+      changed.push(record);
+    }
+    for (const record of changed) this.writeState(record);
+    if (changed.length > 0) this.syncHideDefine();
+    // The move epsilon scales with how far away the camera is: at 200 m out,
+    // a metre of travel cannot change any of these answers.
+    this.lodMoveEpsilon = Math.max(0.25, this.modelRadius() * 0.01);
+    return this.lodHidden.size;
+  }
+
+  private modelRadius(): number {
+    const bounds = this.getBounds();
+    return 0.5 * Math.hypot(
+      bounds.max.x - bounds.min.x,
+      bounds.max.y - bounds.min.y,
+      bounds.max.z - bounds.min.z,
+    );
+  }
+
   /** Put every instanced entry back on screen, for the pick and plan passes. */
   clearLod(): void {
     for (const entry of this.geometrySeen.values()) {
       if ('mesh' in entry && entry.mesh && !entry.mesh.visible) entry.mesh.visible = true;
     }
+    if (this.lodHidden.size === 0) return;
+    const restored = [...this.lodHidden];
+    this.lodHidden.clear();
+    for (const expressID of restored) {
+      const record = this.elements.get(expressID);
+      if (record) this.writeState(record);
+    }
+    this.lastLodCamera = null;
+    this.syncHideDefine();
   }
 
   isElementVisible(expressID: number): boolean {

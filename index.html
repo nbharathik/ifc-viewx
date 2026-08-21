@@ -5,6 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark light" />
     <title>IFCViewX</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <meta name="theme-color" content="#0b0c0e" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="apple-touch-icon" href="./icon.svg" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64' width='64' height='64' role='img' aria-label='IFCViewX'><rect x='0.00' y='0.00' width='64.00' height='64.00' rx='14.40' fill='%230f1115'/><polygon points='9.28%2C45.12 32.00%2C58.24 32.00%2C32.00 9.28%2C18.88' fill='%233b82f6'/><polygon points='54.72%2C45.12 32.00%2C58.24 32.00%2C32.00 54.72%2C18.88' fill='%231e5bd0'/><polygon points='32.00%2C5.76 54.72%2C18.88 32.00%2C32.00 9.28%2C18.88' fill='%2393b9fb'/><polyline points='54.72%2C32.00 32.00%2C45.12' stroke='%233b82f6' stroke-width='3.20' fill='none'/><polyline points='9.28%2C32.00 32.00%2C45.12' stroke='%2393b9fb' stroke-width='3.20' fill='none'/></svg>" />
     <script>
       // Storage can be unavailable in privacy-restricted or sandboxed tabs. A
@@ -235,7 +241,7 @@
       <div class="dlg-foot"><button class="btn primary" id="help-done" type="button">Close</button></div>
     </dialog>
 
-    <input id="file-input" type="file" accept=".ifc,.ifcx" hidden />
+    <input id="file-input" type="file" accept=".ifc,.ifcx,.ifcpkg" hidden />
     <!-- Separate from file-input so opening and adding cannot share a change
          handler and one path silently replace the model the other added. -->
     <input id="attach-input" type="file" accept=".ifc,.ifcx" hidden />

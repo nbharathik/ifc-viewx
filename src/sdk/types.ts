@@ -4,8 +4,14 @@ import type { DistanceOptions, DistanceResult } from "../geometry/distance.js";
 import type { LaserOptions, LaserResult } from "../geometry/laser.js";
 import type { SectionAxis, SectionContourOptions, SectionContourResult } from "../geometry/section.js";
 import type { GeometrySignatureOptions, GeometrySignatureResult } from "../geometry/signatures.js";
+import type { VolumeOptions, VolumesResult } from "../geometry/volumes.js";
+import type { SunOptions } from "../geometry/sun.js";
+import type { SunResult, SunSample } from "../geometry/types.js";
+import type { DeviationOptions } from "../geometry/deviation.js";
+import type { DeviationResult } from "../geometry/types.js";
 import type { ResultHandle, ResultOptions, ResultPage } from "../capabilities/results.js";
 import type { ReportFinding } from "../ui/report.js";
+import type { DocketRow } from "../ui/resultsDock.js";
 import type {
   CameraPose,
   FederatedModel,
@@ -26,6 +32,11 @@ import type {
   ContributionKind,
   ExtensionManifest,
 } from "./contributions.js";
+import type {
+  ApplyReport,
+  SavedViewApplyOptions,
+  ViewDefinition,
+} from "../views/definition.js";
 
 export type ExtensionEvent =
   | "model"
@@ -85,6 +96,17 @@ export interface ExtensionGeometryService {
   laser(origin: [number, number, number], options?: LaserOptions): Promise<LaserResult>;
   sectionContours(axis: SectionAxis, offset: number, options?: SectionContourOptions): Promise<SectionContourResult>;
   signatures(ids: number[], options?: GeometrySignatureOptions): Promise<GeometrySignatureResult>;
+  /** Watertight mesh volume per element, and whether the mesh actually closed. */
+  volumes(ids: number[], options?: VolumeOptions): Promise<VolumesResult>;
+  /** Distance from each scanned point to the nearest model surface. */
+  deviation(points: Float64Array, options?: DeviationOptions): Promise<DeviationResult>;
+  /** Sunlit hours per sample point, by ray casting against the real mesh. */
+  sun(
+    samples: SunSample[],
+    directions: Array<[number, number, number]>,
+    stepMinutes: number,
+    options?: SunOptions,
+  ): Promise<SunResult>;
 }
 
 export interface ExtensionViewService {
@@ -99,6 +121,8 @@ export interface ExtensionViewService {
   setModelVisible(index: number, visible: boolean): void;
   categoryVisible(category: LazyCategory): boolean;
   setCategoryVisible(category: LazyCategory, visible: boolean): Promise<void>;
+  /** Apply one complete saved view through the host's shared view pipeline. */
+  applySavedView(view: ViewDefinition, options?: SavedViewApplyOptions): Promise<ApplyReport>;
   isolate(ids: number[], label?: string): void;
   hide(ids: number[]): void;
   showAll(): void;
@@ -112,10 +136,26 @@ export interface ExtensionViewService {
   sectionBox(): SectionBox | null;
   setSectionBox(box: SectionBox | null): void;
   boxAround(ids: number[], pad?: number): SectionBox | null;
+  /** The model's full extent, before anything narrowed it. */
+  modelBox(): SectionBox | null;
+  /** Projected coordinates into the scene, when a model is georeferenced. */
+  georeferencedToScene(point: [number, number, number]): [number, number, number] | null;
   colorBy(assignment: Map<number, number>, colors: Array<[number, number, number]>): void;
   measurements(): Measurement[];
   addMeasurement(a: [number, number, number], b: [number, number, number]): Measurement;
   removeMeasurement(id: number): void;
+  /** Light the model from a real sun direction; null restores the neutral rig. */
+  setSun(direction: [number, number, number] | null): void;
+  /** Draw a scan as points in scene coordinates; null clears it. */
+  setPointCloud(positions: Float32Array | null, colors?: Float32Array | null, size?: number): void;
+  setPointCloudSize(size: number): void;
+  setPointCloudVisible(visible: boolean): void;
+  /** The viewport as an image; needs the viewport.capture permission. */
+  capture(maxWidth?: number, type?: string, quality?: number): Promise<Blob | null>;
+  /** Start recording the viewport. False when the browser cannot. */
+  recordStart(fps?: number): boolean;
+  /** Stop and hand back the recording, or null when none was running. */
+  recordStop(): Promise<Blob | null>;
 }
 
 export interface ExtensionEventService {
@@ -129,6 +169,12 @@ export interface ExtensionStorageService {
 
 export interface ExtensionFeedbackService {
   publishFindings(summary: string, findings: ReportFinding[]): void;
+  /**
+   * Publish a result set into the shared results dock, where clash, rules,
+   * IDS and compare all land with the same grouping, severity, assignment
+   * and BCF handoff. Publishing again with the same panel replaces the run.
+   */
+  publishResults(set: { title: string; summary: string; rows: DocketRow[] }): void;
   log(text: string, kind?: "info" | "success" | "error"): void;
   toast(text: string, kind?: "info" | "success" | "error"): void;
 }

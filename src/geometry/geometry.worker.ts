@@ -4,6 +4,8 @@ import { runLaser } from "./laserQuery.js";
 import { runSectionContours } from "./sectionQuery.js";
 import { runGeometrySignatures } from "./signatureQuery.js";
 import { runVolumes } from "./volumeQuery.js";
+import { runSun } from "./sunQuery.js";
+import { runDeviation } from "./deviationQuery.js";
 import { runClassifyPlane } from "./planeQuery.js";
 import { meshTransfers, runMeshes } from "./meshQuery.js";
 import { GeometryIndex } from "./geometryIndex.js";
@@ -171,6 +173,64 @@ self.onmessage = (event: MessageEvent<GeometryRequest>): void => {
           yieldTurn: turn,
         }).then((result) => {
           if (!cancelled.has(id)) post({ type: "volumesResult", id, result });
+        });
+      })
+        .catch((error: unknown) => post({
+          type: "fail",
+          id,
+          message: error instanceof Error ? error.message : String(error),
+        }))
+        .finally(() => {
+          known.delete(id);
+          active.delete(id);
+          cancelled.delete(id);
+        });
+      return;
+    }
+
+    case "sun": {
+      const { id, spec } = message;
+      known.add(id);
+      scheduler.schedule(message.priority, async () => {
+        active.add(id);
+        if (cancelled.has(id)) return;
+        await runSun(index, spec, {
+          cancelled: () => cancelled.has(id),
+          yieldTurn: turn,
+        }).then((result) => {
+          if (!cancelled.has(id)) post(
+            { type: "sunResult", id, result },
+            [result.exposure.buffer],
+          );
+        });
+      })
+        .catch((error: unknown) => post({
+          type: "fail",
+          id,
+          message: error instanceof Error ? error.message : String(error),
+        }))
+        .finally(() => {
+          known.delete(id);
+          active.delete(id);
+          cancelled.delete(id);
+        });
+      return;
+    }
+
+    case "deviation": {
+      const { id, spec } = message;
+      known.add(id);
+      scheduler.schedule(message.priority, async () => {
+        active.add(id);
+        if (cancelled.has(id)) return;
+        await runDeviation(index, spec, {
+          cancelled: () => cancelled.has(id),
+          yieldTurn: turn,
+        }).then((result) => {
+          if (!cancelled.has(id)) post(
+            { type: "deviationResult", id, result },
+            [result.distances.buffer, result.elements.buffer],
+          );
         });
       })
         .catch((error: unknown) => post({

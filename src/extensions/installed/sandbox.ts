@@ -71,7 +71,9 @@ const BOOTSTRAP = `(() => {
       clash: (a, b, options) => call("geometry.clash", { a, b, ...(options || {}) }),
       laser: (origin, options) => call("geometry.laser", { origin, ...(options || {}) }),
       sectionContours: (axis, offset, options) => call("geometry.sectionContours", { axis, offset, ...(options || {}) }),
-      signatures: (ids, options) => call("geometry.signatures", { ids, ...(options || {}) })
+      signatures: (ids, options) => call("geometry.signatures", { ids, ...(options || {}) }),
+      volumes: (ids, options) => call("geometry.volumes", { ids, ...(options || {}) }),
+      deviation: (points, options) => call("geometry.deviation", { points: Array.from(points), ...(options || {}) })
     },
     view: {
       selection: () => call("view.selection"),
@@ -87,6 +89,7 @@ const BOOTSTRAP = `(() => {
       showAll: () => call("view.showAll"),
       frame: (id) => call("view.frame", { id }),
       frameAt: (point, radius) => call("view.frameAt", { point, radius }),
+      modelBox: () => call("view.modelBox"),
       camera: () => call("view.camera"),
       setCamera: (pose) => call("view.setCamera", { pose }),
       sections: () => call("view.sections"),
@@ -423,6 +426,18 @@ export class SandboxRuntime implements ExtensionInstance {
         });
       }
       case "geometry.signatures": return this.context.geometry.signatures(ids(params.ids, "ids").slice(0, 500), { signal });
+      case "geometry.volumes": return this.context.geometry.volumes(ids(params.ids, "ids").slice(0, 500), { signal });
+      case "geometry.deviation": {
+        const points = Array.isArray(params.points) ? params.points.map(Number).filter(Number.isFinite) : [];
+        if (points.length < 3) throw new Error("deviation needs at least one point");
+        // A sandboxed extension pays a structured-clone per point, so the cap
+        // here is far below what the panel host may ask for directly.
+        return this.context.geometry.deviation(Float64Array.from(points.slice(0, 150_000)), {
+          maxDistance: optionalFinite(params.maxDistance, "maxDistance"),
+          signal,
+        });
+      }
+      case "view.modelBox": return this.context.view.modelBox();
       case "geometry.clash": return this.context.geometry.clash(ids(params.a, "a"), ids(params.b, "b"), {
         toleranceMm: optionalFinite(params.toleranceMm, "toleranceMm"),
         clearanceMm: optionalFinite(params.clearanceMm, "clearanceMm"),

@@ -653,7 +653,15 @@ export class CommandPalette {
   /** Where focus came from, so closing puts it back rather than on <body>. */
   private opener: HTMLElement | null = null;
 
-  constructor(private readonly source: () => Command[]) {}
+  /**
+   * `source` is snapshotted when the palette opens; `dynamic` is asked on
+   * every keystroke instead, which is what lets the palette reach a hundred
+   * thousand elements without building a list of them up front.
+   */
+  constructor(
+    private readonly source: () => Command[],
+    private readonly dynamic?: (query: string) => Command[],
+  ) {}
 
   isOpen(): boolean {
     return this.backdrop !== null;
@@ -679,7 +687,7 @@ export class CommandPalette {
     this.pool = this.source().filter((c) => !c.disabled);
     const input = h("input", {
       type: "text",
-      placeholder: "Search commands and element classes",
+      placeholder: "Search commands, views, elements and properties",
       spellcheck: "false",
       role: "combobox",
       "aria-label": "Search commands",
@@ -713,7 +721,12 @@ export class CommandPalette {
           if (points >= 0) ranked.push({ command, points });
         }
         ranked.sort((a, b) => b.points - a.points);
-        this.matches = ranked.slice(0, MAX_ROWS).map((r) => r.command);
+        const found = ranked.slice(0, MAX_ROWS).map((r) => r.command);
+        // Model results come after the commands: a keystroke that names a
+        // command should not be pushed down the list by an element that
+        // happens to share a word with it.
+        const extra = query.length >= 2 ? (this.dynamic?.(query) ?? []) : [];
+        this.matches = [...found, ...extra].slice(0, MAX_ROWS);
       } else {
         this.matches = this.pool.slice(0, MAX_ROWS);
       }
@@ -808,15 +821,20 @@ export class CommandPalette {
  * goes through app state, and at most once per frame. The viewport picks the
  * new size up through its own ResizeObserver. Width persists across sessions.
  */
+/**
+ * A drag handle on one edge of a panel. `left` and `right` resize the width;
+ * `top` resizes the height, for a panel docked across the bottom.
+ */
 export function makeResizer(options: {
   host: HTMLElement;
-  side: "left" | "right";
+  side: "left" | "right" | "top";
   cssVar: string;
   storageKey: string;
   min: number;
   max: number;
 }): void {
   const { host, side, cssVar, storageKey, min, max } = options;
+  const vertical = side === "top";
   const stored = Number(safeStorageGet(storageKey));
   const clamp = (n: number): number => Math.min(max, Math.max(min, n));
   if (Number.isFinite(stored) && stored > 0) {
@@ -824,11 +842,11 @@ export function makeResizer(options: {
   }
 
   const handle = h("div", {
-    class: `resizer ${side === "left" ? "right" : "left"}`,
+    class: `resizer ${vertical ? "top" : side === "left" ? "right" : "left"}`,
     role: "separator",
     tabindex: "0",
     "aria-label": "Resize panel",
-    "aria-orientation": "vertical",
+    "aria-orientation": vertical ? "horizontal" : "vertical",
     "aria-valuemin": String(min),
     "aria-valuemax": String(max),
   });
@@ -854,11 +872,13 @@ export function makeResizer(options: {
     e.preventDefault();
     handle.setPointerCapture(e.pointerId);
     document.body.classList.add("is-resizing");
-    const startX = e.clientX;
-    const startWidth = host.getBoundingClientRect().width;
+    const startX = vertical ? e.clientY : e.clientX;
+    const box = host.getBoundingClientRect();
+    const startWidth = vertical ? box.height : box.width;
     target = clamp(startWidth);
     const move = (ev: PointerEvent): void => {
-      apply(startWidth + (side === "left" ? ev.clientX - startX : startX - ev.clientX));
+      const at = vertical ? ev.clientY : ev.clientX;
+      apply(startWidth + (side === "left" ? at - startX : startX - at));
     };
     const up = (): void => {
       handle.removeEventListener("pointermove", move);
@@ -871,9 +891,12 @@ export function makeResizer(options: {
 
   handle.addEventListener("keydown", (e) => {
     const step = e.shiftKey ? 25 : 10;
-    const width = host.getBoundingClientRect().width;
-    if (e.key === "ArrowLeft") apply(width + (side === "left" ? -step : step));
-    else if (e.key === "ArrowRight") apply(width + (side === "left" ? step : -step));
+    const box = host.getBoundingClientRect();
+    const width = vertical ? box.height : box.width;
+    const less = vertical ? "ArrowDown" : "ArrowLeft";
+    const more = vertical ? "ArrowUp" : "ArrowRight";
+    if (e.key === less) apply(width + (side === "left" ? -step : step));
+    else if (e.key === more) apply(width + (side === "left" ? step : -step));
     else if (e.key === "Home") apply(min);
     else if (e.key === "End") apply(max);
     else return;

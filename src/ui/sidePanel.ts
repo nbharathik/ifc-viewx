@@ -80,6 +80,8 @@ export interface AssistantCallbacks extends EscalationActions {
   onEvidence?(reference: EvidenceReference): void;
   /** Accept a staged issue payload after inspecting its evidence. */
   onIssueProposal?(payload: Record<string, unknown>): void;
+  /** Save a view, computed property or ruleset the assistant authored. */
+  onDefinitionProposal?(payload: Record<string, unknown>): void;
   extensionTools?(): AssistantExtensionToolView[];
   onExtensionToolChange?(owner: string, id: string, enabled: boolean): void;
 }
@@ -500,6 +502,42 @@ export class AssistantPanel {
       button.replaceChildren(icon("check", 13), h("span", { text: "View restored" }));
     });
     this.push(h("div", { class: "view-transaction" }, [h("span", { text: label }), button]));
+  }
+
+  /**
+   * A definition the assistant wrote, shown as what it is: a named thing with
+   * its rules spelled out in words, and one button to keep it. Nothing has
+   * been applied and nothing has been saved when this appears.
+   */
+  addDefinitionProposal(payload: Record<string, unknown>): void {
+    const kind = String(payload.staged ?? "definition");
+    const label = kind === "view" ? "Saved view" : kind === "property" ? "Computed property" : "Ruleset";
+    const body = payload.view ?? payload.property ?? payload.ruleset;
+    const name = String((body as { name?: unknown } | undefined)?.name ?? "Untitled");
+    const explains = Array.isArray(payload.explains) ? payload.explains.map(String) : [];
+    const rules = kind === "ruleset" ? (payload.ruleset as { rules?: unknown[] } | undefined)?.rules?.length ?? 0 : 0;
+    const button = h("button", { class: "btn accent sm", type: "button" }, [
+      icon("bookmark", 13),
+      h("span", { text: `Save ${label.toLowerCase()}` }),
+    ]);
+    button.addEventListener("click", () => {
+      this.callbacks.onDefinitionProposal?.(payload);
+      button.disabled = true;
+      button.replaceChildren(icon("check", 13), h("span", { text: "Saved" }));
+    });
+    this.push(h("div", { class: "issue-proposal" }, [
+      h("div", { class: "issue-kicker", text: `Proposed ${label.toLowerCase()}` }),
+      h("div", { class: "grow" }, [
+        h("div", { class: "issue-title", text: name }),
+        ...explains.map((line) => h("div", { class: "note", text: line })),
+        ...(rules ? [h("div", { class: "note", text: `${rules} rule(s)` })] : []),
+        ...(payload.portable === false
+          ? [h("div", { class: "note error", text: "One of these rules names specific elements, so it will not follow a revision." })]
+          : []),
+        h("div", { class: "note", text: "Nothing has been applied or saved. Reading it is the point." }),
+      ]),
+      button,
+    ]));
   }
 
   addIssueProposal(payload: Record<string, unknown>, references: EvidenceReference[]): void {

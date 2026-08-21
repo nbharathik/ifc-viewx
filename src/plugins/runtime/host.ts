@@ -25,6 +25,7 @@ import { ExtensionResultStore } from "../../extensions/results.js";
 import type { ResultStore } from "../../capabilities/results.js";
 import type { Viewer } from "../../viewer-core/viewer.js";
 import type { ServiceClient } from "../../bridge/serviceClient.js";
+import type { ColorRule } from "../../ui/colorBy.js";
 
 /** About paragraph and does-list, shared by the panel entry and the browser card. */
 export function pluginDetails(plugin: CatalogPlugin): HTMLElement {
@@ -89,6 +90,8 @@ export interface HostActions {
   modelKey(): string;
   modelName(): string;
   python: PythonRunner;
+  /** Keep saved-view colour state synchronized with the core colour dock. */
+  setColorRule(rule: ColorRule | null): Promise<void>;
   /** Something opened or closed; repaint the status toggle. */
   changed(): void;
 }
@@ -409,6 +412,7 @@ export class PluginHost {
       python: this.actions.python,
       capabilities: this.capabilities,
       index: () => this.propertyIndex,
+      setColorRule: (rule) => this.actions.setColorRule(rule),
       modelKey: () => this.actions.modelKey(),
       modelName: () => this.actions.modelName(),
       log: (text, kind) => this.actions.log(text, kind),

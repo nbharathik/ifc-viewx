@@ -3,6 +3,8 @@ import { TOOLS, type ToolSpec } from "../llm/tools.js";
 import type { Viewer } from "../viewer-core/viewer.js";
 import type { ResultStore } from "./results.js";
 import { CapabilityRegistry } from "./registry.js";
+import { definitionCapabilities } from "./definitions.js";
+import { graphCapabilities } from "./graph.js";
 import type { CapabilityCost, CapabilityDefinition, CapabilityEffect, JsonSchema } from "./types.js";
 
 export interface ViewerCapabilityContext {
@@ -233,5 +235,8 @@ export function createViewerCapabilityRegistry(): CapabilityRegistry<ViewerCapab
   const registry = new CapabilityRegistry<ViewerCapabilityContext>();
   for (const capability of viewerCapabilityDefinitions()) registry.register(capability);
   for (const capability of resultDefinitions()) registry.register(capability);
+  // The definitions layer: what the assistant authors instead of code.
+  for (const capability of definitionCapabilities()) registry.register(capability);
+  for (const capability of graphCapabilities()) registry.register(capability);
   return registry;
 }

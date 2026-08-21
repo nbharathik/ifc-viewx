@@ -157,6 +157,16 @@ describe("plugin findings", () => {
     expect(publishedFindings().map((set) => set.id)).toEqual(["spaces"]);
   });
 
+  it("rejects malformed plugin finding payloads", () => {
+    expect(() => publishFindings({
+      id: "bad",
+      source: "Plugin",
+      summary: "",
+      findings: [{ severity: "error", title: "Bad", count: -1 }],
+    })).toThrow(/count/i);
+    expect(publishedFindings()).toHaveLength(0);
+  });
+
   it("renders a published set into the findings section", () => {
     const html = buildReport({
       ...base(),
