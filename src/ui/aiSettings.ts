@@ -5,6 +5,7 @@
 // standalone function: the panel shows the same ones inline before anything is
 // configured, so a first run never opens a dialog on its own.
 import { attachTip, h, icon, iconButton, infoIcon, lightDismiss, toast } from "./kit.js";
+import { LLM_SETTINGS_KEY } from "./privacy.js";
 import {
   PROVIDERS,
   findProvider,
@@ -417,7 +418,13 @@ export function connectionFields(onChange: () => void): HTMLElement[] {
     h("label", { class: "field" }, [
       h("span", { class: "field-label" }, [
         h("span", { text: "API key" }),
-        h("span", { class: "hint", text: "Kept in this browser only." }),
+        // Named exactly, not described vaguely: a user who wants to check or
+        // remove it can find it, and Settings has the button that does it.
+        h("span", { class: "hint" }, [
+          h("span", { text: "Stored in this browser under " }),
+          h("code", { text: LLM_SETTINGS_KEY }),
+          h("span", { text: ". Sent only to the provider above. Delete it under Settings, Your data." }),
+        ]),
       ]),
       apiKey,
     ]),

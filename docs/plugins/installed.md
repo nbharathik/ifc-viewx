@@ -73,7 +73,7 @@ self-contained HTML entry.
 ```
 
 Scripts and styles must be inline. Network resources, imports, forms, frames,
-popups, navigation, and symbolic links are not allowed.
+popups, non-fragment links, and symbolic links are rejected from the package.
 
 The package is limited to 5 MB compressed, 12 MB unpacked, 2 MB per file,
 1 MB for `panel.html`, and 128 files. Encrypted ZIP files, ZIP64, unsafe paths,
@@ -144,10 +144,20 @@ service credentials, model bytes, Three.js objects, or host globals. The host
 checks the iframe, protocol, nonce, method, parameters, and manifest permission
 for each call.
 
-Its content security policy blocks connections, workers, child frames, objects,
-and external resources. Host calls use a dedicated `MessagePort` after the
-initial window handshake. There is no general viewer, service, token, mesh, or
-network method.
+Its content security policy blocks connections (including WebRTC where the
+browser implements CSP Level 3), workers, child frames, objects, and external
+resources. Matching network constructors are also removed before extension
+code runs. Host calls use a dedicated `MessagePort` after the initial window
+handshake. There is no general viewer, service, token, mesh, or network method.
+
+The iframe sandbox prevents top-level navigation, and ordinary links and form
+submissions are intercepted. Browsers do not consistently implement a CSP
+directive that can stop an arbitrary script from navigating its *own* frame
+before the request begins. Such a navigation therefore unloads and disables
+the extension, but should not be treated as a perfect outbound-network
+guarantee. Install packages only from publishers you trust, and grant model
+permissions on that basis; signatures and hashes prove package identity, not
+publisher intent.
 
 Disabling or closing an extension aborts its work and removes its listeners,
 results, overlays, commands, and storage access for that session.

@@ -24,11 +24,47 @@ function active(record: InstalledExtensionRecord): InstalledVersionRecord {
   return version;
 }
 
+interface VersionPrecedence {
+  core: [string, string, string];
+  prerelease: string[];
+}
+
+function versionPrecedence(value: string): VersionPrecedence {
+  const withoutBuild = value.split("+", 1)[0];
+  const separator = withoutBuild.indexOf("-");
+  const core = (separator < 0 ? withoutBuild : withoutBuild.slice(0, separator)).split(".") as [string, string, string];
+  const prerelease = separator < 0 ? [] : withoutBuild.slice(separator + 1).split(".");
+  return { core, prerelease };
+}
+
+function compareNumericIdentifiers(a: string, b: string): number {
+  return a.length - b.length || (a < b ? -1 : a > b ? 1 : 0);
+}
+
+/** SemVer 2.0 precedence; build metadata deliberately has no ordering weight. */
 function compareVersions(a: string, b: string): number {
-  const parts = (value: string) => value.split(/[.-]/).slice(0, 3).map((part) => Number(part) || 0);
-  const left = parts(a);
-  const right = parts(b);
-  return left[0] - right[0] || left[1] - right[1] || left[2] - right[2];
+  const left = versionPrecedence(a);
+  const right = versionPrecedence(b);
+  for (let index = 0; index < left.core.length; index++) {
+    const relation = compareNumericIdentifiers(left.core[index], right.core[index]);
+    if (relation) return relation;
+  }
+  if (left.prerelease.length === 0 || right.prerelease.length === 0) {
+    return left.prerelease.length === right.prerelease.length ? 0 : left.prerelease.length === 0 ? 1 : -1;
+  }
+  const identifiers = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let index = 0; index < identifiers; index++) {
+    const l = left.prerelease[index];
+    const r = right.prerelease[index];
+    if (l === undefined || r === undefined) return l === r ? 0 : l === undefined ? -1 : 1;
+    if (l === r) continue;
+    const lNumeric = /^\d+$/.test(l);
+    const rNumeric = /^\d+$/.test(r);
+    if (lNumeric && rNumeric) return compareNumericIdentifiers(l, r);
+    if (lNumeric !== rNumeric) return lNumeric ? -1 : 1;
+    return l < r ? -1 : 1;
+  }
+  return 0;
 }
 
 function permissionDiff(

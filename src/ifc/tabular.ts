@@ -287,7 +287,7 @@ export function coerce(text: string): string | number | boolean {
 export function toEditOps(diff: TableDiff): EditOp[] {
   const groups = new Map<string, { column: string; value: string; ids: number[] }>();
   for (const change of diff.changes) {
-    const key = `${change.column} ${change.after}`;
+    const key = `${change.column}\u0000${change.after}`;
     const group = groups.get(key);
     if (group) group.ids.push(change.expressID);
     else groups.set(key, { column: change.column, value: change.after, ids: [change.expressID] });

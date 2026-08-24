@@ -4,6 +4,41 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ViewerControls } from "../src/viewer-core/scene/controls.js";
 import type { SceneController } from "../src/viewer-core/scene/scene.js";
 
+function flightHarness() {
+  const frames: FrameRequestCallback[] = [];
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    frames.push(callback);
+    return frames.length;
+  });
+  vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+  const launch = document.createElement("button");
+  const host = document.createElement("div");
+  const canvas = document.createElement("canvas");
+  canvas.tabIndex = 0;
+  host.appendChild(canvas);
+  document.body.append(launch, host);
+
+  const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+  camera.position.set(0, 0, 10);
+  const scene = {
+    renderer: { domElement: canvas },
+    camera,
+    getBounds: () => new THREE.Box3(new THREE.Vector3(-5, -5, -5), new THREE.Vector3(5, 5, 5)),
+    getProjectionMode: () => "perspective",
+    getFieldOfView: () => 50,
+    setFieldOfView: vi.fn(),
+    isPlanView: () => false,
+    setPlanView: vi.fn(),
+    getResolutionScale: () => 1,
+    setResolutionScale: vi.fn(),
+    getRenderTiming: () => ({ lastMs: 0 }),
+    resize: vi.fn(),
+  } as unknown as SceneController;
+  const controls = new ViewerControls(scene, host, vi.fn());
+  return { frames, launch, canvas, camera, controls };
+}
+
 describe("Viewer keyboard shortcut ownership", () => {
   beforeEach(() => {
     document.body.replaceChildren();
@@ -62,37 +97,7 @@ describe("Viewer keyboard shortcut ownership", () => {
   });
 
   it("hands keyboard focus from its launch button to the canvas while flying", () => {
-    const frames: FrameRequestCallback[] = [];
-    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
-      frames.push(callback);
-      return frames.length;
-    });
-    vi.stubGlobal("cancelAnimationFrame", vi.fn());
-
-    const launch = document.createElement("button");
-    const host = document.createElement("div");
-    const canvas = document.createElement("canvas");
-    canvas.tabIndex = 0;
-    host.appendChild(canvas);
-    document.body.append(launch, host);
-
-    const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
-    camera.position.set(0, 0, 10);
-    const scene = {
-      renderer: { domElement: canvas },
-      camera,
-      getBounds: () => new THREE.Box3(new THREE.Vector3(-5, -5, -5), new THREE.Vector3(5, 5, 5)),
-      getProjectionMode: () => "perspective",
-      getFieldOfView: () => 50,
-      setFieldOfView: vi.fn(),
-      isPlanView: () => false,
-      setPlanView: vi.fn(),
-      getResolutionScale: () => 1,
-      setResolutionScale: vi.fn(),
-      getRenderTiming: () => ({ lastMs: 0 }),
-      resize: vi.fn(),
-    } as unknown as SceneController;
-    const controls = new ViewerControls(scene, host, vi.fn());
+    const { frames, launch, canvas, camera, controls } = flightHarness();
 
     launch.focus();
     controls.startFly();
@@ -105,6 +110,38 @@ describe("Viewer keyboard shortcut ownership", () => {
     const before = camera.position.z;
     frames.shift()?.(performance.now() + 100);
     expect(camera.position.z).toBeLessThan(before);
+    controls.dispose();
+  });
+
+  it("keeps fly keys working when the browser leaves focus on the launch button", () => {
+    const { frames, launch, canvas, camera, controls } = flightHarness();
+
+    launch.focus();
+    vi.spyOn(canvas, "focus").mockImplementation(() => undefined);
+    controls.startFly();
+
+    expect(document.activeElement).toBe(launch);
+    const key = new KeyboardEvent("keydown", { key: "w", bubbles: true, cancelable: true });
+    launch.dispatchEvent(key);
+    expect(key.defaultPrevented).toBe(true);
+
+    const before = camera.position.z;
+    frames.shift()?.(performance.now() + 100);
+    expect(camera.position.z).toBeLessThan(before);
+
+    launch.dispatchEvent(new KeyboardEvent("keyup", { key: "w", bubbles: true }));
+    const dialog = document.createElement("dialog");
+    dialog.setAttribute("open", "");
+    document.body.appendChild(dialog);
+    const modalKey = new KeyboardEvent("keydown", { key: "w", bubbles: true, cancelable: true });
+    launch.dispatchEvent(modalKey);
+    expect(modalKey.defaultPrevented).toBe(false);
+
+    dialog.remove();
+    const escape = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    launch.dispatchEvent(escape);
+    expect(escape.defaultPrevented).toBe(true);
+    expect(controls.isFlying()).toBe(false);
     controls.dispose();
   });
 });

@@ -152,7 +152,9 @@ export interface ChatOptions {
   onUsage?: (usage: ChatUsage) => void;
 }
 
-const SETTINGS_KEY = "ifc-studio.llm-settings";
+/** Where the assistant record lives. Exported so the privacy panel can name
+ *  the exact key rather than restating it and drifting from it. */
+export const SETTINGS_KEY = "ifc-studio.llm-settings";
 
 /**
  * Generous, because a reasoning model spends this budget thinking before it

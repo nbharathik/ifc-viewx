@@ -189,11 +189,11 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): void {
       },
     }));
     table.replaceChildren(
-      grid(cols.map((column, at) => (at === sortBy ? `${column.label} ${descending ? "▾" : "▴"}` : column.label)), gridRows, (column) => {
+      grid(cols.map((column) => column.label), gridRows, (column) => {
         descending = column === sortBy ? !descending : false;
         sortBy = column;
         paint();
-      }),
+      }, { column: sortBy, direction: descending ? "descending" : "ascending" }),
       note(`${found.length.toLocaleString()} of ${rows.length.toLocaleString()} elements${found.length > PAGE ? `, showing the first ${PAGE}` : ""}`),
     );
   };

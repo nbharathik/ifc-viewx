@@ -44,7 +44,7 @@ export interface AgentRuntimeDependencies {
   captureContext(includeImage: boolean): Promise<{ snapshot: ViewerContextSnapshot; image: ViewImageAttachment | null }>;
   attachView(): boolean;
   approvals(): AssistantToolApproval[];
-  system(messages: ChatMessage[], native: boolean): ChatMessage[];
+  system(messages: ChatMessage[], native: boolean, mode: "query" | "edit"): ChatMessage[];
   onUsage(usage: ChatUsage): void;
   onPersist(messages: ChatMessage[]): void;
   onTrace?(event: AssistantTraceEvent): void;
@@ -114,6 +114,9 @@ export class AgentRuntime {
   async run(text: string): Promise<void> {
     const ui = this.deps.ui();
     if (this.controller) throw new Error("The assistant is still answering");
+    // A turn has one safety promise. Keep it stable even if another caller
+    // changes the preferred mode while the provider or a tool is still busy.
+    const mode = this.deps.mode();
     const mine = ++this.sequence;
     const controller = new AbortController();
     this.controller = controller;
@@ -146,13 +149,13 @@ export class AgentRuntime {
       });
       this.remember({ role: "user", content: text });
       ui.resetAttachment();
-      const native = this.deps.tools.tools(this.deps.mode(), {
+      const native = this.deps.tools.tools(mode, {
         imageAttached: Boolean(captured.image),
         approvals: this.deps.approvals(),
       });
       let repairs = 0;
       let rounds = 0;
-      let turn = await this.askTurn(transport, native, ui, controller.signal);
+      let turn = await this.askTurn(transport, native, mode, ui, controller.signal);
       for (;;) {
         if (mine !== this.sequence || controller.signal.aborted) return;
         if (turn.python) {
@@ -169,7 +172,7 @@ export class AgentRuntime {
           const capability = this.deps.tools.resolve(call.name);
           return capability?.parallelSafe === true && capability.effect === "read";
         });
-        const run = (wanted: WantedCall) => this.runCall(wanted, ui, controller.signal, () => {
+        const run = (wanted: WantedCall) => this.runCall(wanted, mode, ui, controller.signal, () => {
           const capability = this.deps.tools.resolve(wanted.name);
           if (capability?.effect === "view" && !viewTransaction) {
             viewTransaction = this.deps.viewTransactions.begin("Assistant view");
@@ -210,7 +213,7 @@ export class AgentRuntime {
         }
         if (failed && repairs > MAX_REPAIRS) break;
         ui.setStatus("Reading the evidence");
-        turn = await this.askTurn(transport, native, ui, controller.signal);
+        turn = await this.askTurn(transport, native, mode, ui, controller.signal);
       }
       if (allEvidence.length) ui.addEvidence(allEvidence);
       if (viewTransaction !== null) {
@@ -247,6 +250,7 @@ export class AgentRuntime {
 
   private async runCall(
     wanted: WantedCall,
+    mode: "query" | "edit",
     ui: AgentRuntimeUi,
     signal: AbortSignal,
     before: () => void,
@@ -258,7 +262,7 @@ export class AgentRuntime {
     this.deps.onTrace?.({ type: "tool_call", capabilityId });
     try {
       before();
-      const done = await this.deps.tools.execute(wanted.name, wanted.input, this.deps.mode(), signal, (message) => ui.setStatus(message));
+      const done = await this.deps.tools.execute(wanted.name, wanted.input, mode, signal, (message) => ui.setStatus(message));
       return { card, report: done.report, done };
     } catch (error) {
       const report = error instanceof Error ? error.message : String(error);
@@ -276,18 +280,22 @@ export class AgentRuntime {
   private async askTurn(
     transport: AssistantTransport,
     tools: NativeTool[],
+    mode: "query" | "edit",
     ui: AgentRuntimeUi,
     signal: AbortSignal,
   ): Promise<NormalizedTurn> {
     if (this.nativeTools !== false) {
       const stream = ui.startStream();
-      const result = await transport.converse({
-        messages: this.deps.system(this.history(), true),
+      // A turn that throws or is stopped still owns the bubble it opened.
+      // Left unsettled it stays in the transcript as an empty card with a
+      // caret blinking in it for the rest of the session.
+      const result = await this.settling(stream, transport.converse({
+        messages: this.deps.system(this.history(), true, mode),
         tools,
         signal,
         onDelta: (delta) => stream.push(delta),
         onUsage: this.deps.onUsage,
-      });
+      }));
       if (result.toolsUsed) {
         this.nativeTools = true;
         stream.settle(result.text);
@@ -302,12 +310,12 @@ export class AgentRuntime {
     }
 
     const stream = ui.startStream();
-    const reply = await transport.complete({
-      messages: this.deps.system(this.history(), false),
+    const reply = await this.settling(stream, transport.complete({
+      messages: this.deps.system(this.history(), false, mode),
       signal,
       onDelta: (delta) => stream.push(delta),
       onUsage: this.deps.onUsage,
-    });
+    }));
     this.remember({ role: "assistant", content: reply });
     const extracted = extractCode(reply);
     stream.settle(extracted ? stripBlock(reply, extracted.code) : reply);
@@ -325,6 +333,16 @@ export class AgentRuntime {
     delete input.action;
     delete input.op;
     return { calls: [{ id: "", name, input, code: extracted.code }], python: null };
+  }
+
+  /** Close the open bubble on the way out, whatever the reason for leaving. */
+  private async settling<T>(stream: StreamView, work: Promise<T>): Promise<T> {
+    try {
+      return await work;
+    } catch (error) {
+      stream.settle();
+      throw error;
+    }
   }
 
   private rememberToolResult(

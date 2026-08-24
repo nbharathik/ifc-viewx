@@ -45,6 +45,9 @@ cannot do: IfcOpenShell conversion, native Python, an MCP bridge for AI
 clients, and a vault that keeps your assistant key off the page.
 See [Local Studio](https://nbharathik.github.io/ifc-viewx/docs/local-studio/).
 
+Building the browser viewer from source requires Node.js 22.13 or newer. The
+hosted viewer and the Python CLI do not require Node.js.
+
 ## Check a model in CI
 
 ```
@@ -71,6 +74,6 @@ Want to build an extension? See [Writing an extension](https://nbharathik.github
 
 Apache License 2.0, see [LICENSE](LICENSE).
 
-Bundled: three.js (MIT), web-ifc (MPL-2.0). Loaded at runtime from their
-upstream hosts: Pyodide (MPL-2.0), IfcOpenShell (LGPL-3.0). Each keeps its own
-license.
+Browser dependencies: three.js and three-mesh-bvh (MIT), fflate (MIT), PDF.js /
+pdfjs-dist (Apache-2.0), and web-ifc (MPL-2.0). Loaded separately at runtime:
+Pyodide (MPL-2.0) and IfcOpenShell (LGPL-3.0). Each keeps its own license.

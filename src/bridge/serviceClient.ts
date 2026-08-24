@@ -33,6 +33,8 @@ export interface ServiceHealth {
   store?: StoreStats;
   llm?: { configured: boolean; provider: string; model: string; multimodal?: boolean };
   browserConnected?: boolean;
+  /** Where the service keeps things, so the viewer can name it exactly. */
+  paths?: { store: string; state: string; audit: string; keySource: string };
 }
 
 export interface PythonOutcome {
@@ -246,6 +248,22 @@ export class ServiceClient {
   /** True when the service holds a provider key, so no key is needed here. */
   proxiesLlm(): boolean {
     return this.mode() === "local" && this.can("llm") && Boolean(this.health?.llm?.configured);
+  }
+
+  /**
+   * Where Local Studio keeps its files, reported by the service itself rather
+   * than guessed from a convention, so the privacy panel can print a path the
+   * user can actually paste into a file manager. Null in the browser, which is
+   * the honest answer: there is no folder.
+   */
+  storagePaths(): { store?: string; state?: string; audit?: string; keySource?: string } | null {
+    const paths = this.health?.paths;
+    return paths ? { ...paths } : null;
+  }
+
+  /** Ask the service to show one of its own folders in the file manager. */
+  async revealFolder(which: "store" | "state"): Promise<void> {
+    await this.post<{ ok: boolean }>("/store/reveal", { which });
   }
 
   /**

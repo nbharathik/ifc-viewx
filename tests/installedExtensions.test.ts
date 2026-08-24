@@ -81,10 +81,35 @@ describe("installed extension package", () => {
     await expect(prepareExtensionPackage(archive(raw))).rejects.toThrow(/cannot read raw geometry/);
   });
 
+  it("rejects entry links that could navigate the sandbox frame", async () => {
+    await expect(prepareExtensionPackage(archive(
+      manifest(),
+      "<html><body><a href='https://example.com/leak'>Leave</a></body></html>",
+    ))).rejects.toMatchObject({ code: "navigation" });
+    await expect(prepareExtensionPackage(archive(
+      manifest(),
+      "<html><body><a href=''>Reload</a></body></html>",
+    ))).rejects.toMatchObject({ code: "navigation" });
+    await expect(prepareExtensionPackage(archive(
+      manifest(),
+      "<html><body><a href='#details' ping='https://example.com/leak'>Details</a></body></html>",
+    ))).rejects.toMatchObject({ code: "navigation" });
+    await expect(prepareExtensionPackage(archive(
+      manifest(),
+      "<html><body><a href='#details'>Details</a><section id='details'></section></body></html>",
+    ))).resolves.toMatchObject({ manifest: { id: "org.example.sandbox" } });
+  });
+
   it("rejects packages that omit the panel activation contract", async () => {
     const value = manifest();
     value.activationEvents = ["onModel"];
     await expect(prepareExtensionPackage(archive(value))).rejects.toMatchObject({ code: "activation" });
+  });
+
+  it("rejects malformed semantic versions", async () => {
+    await expect(prepareExtensionPackage(archive(manifest("01.0.0")))).rejects.toThrow(/semantic version/);
+    await expect(prepareExtensionPackage(archive(manifest("1.0.0-beta.01")))).rejects.toThrow(/semantic version/);
+    await expect(prepareExtensionPackage(archive(manifest("1.0.0-beta..1")))).rejects.toThrow(/semantic version/);
   });
 });
 
@@ -102,6 +127,20 @@ describe("installed extension manager", () => {
     expect(manager.current("org.example.sandbox")?.version).toBe("1.1.0");
     await manager.rollback("org.example.sandbox");
     expect(manager.current("org.example.sandbox")?.version).toBe("1.0.0");
+  });
+
+  it("orders prerelease updates by SemVer precedence", async () => {
+    const manager = new InstalledExtensionManager(new MemoryExtensionStore());
+    await manager.install(await manager.prepare(archive(manifest("1.0.0-beta.11"))));
+
+    await expect(manager.prepare(archive(manifest("1.0.0-beta.2"))))
+      .resolves.toMatchObject({ kind: "downgrade" });
+    await expect(manager.prepare(archive(manifest("1.0.0-alpha"))))
+      .resolves.toMatchObject({ kind: "downgrade" });
+    await expect(manager.prepare(archive(manifest("1.0.0-rc.1"))))
+      .resolves.toMatchObject({ kind: "update" });
+    await expect(manager.prepare(archive(manifest("1.0.0"))))
+      .resolves.toMatchObject({ kind: "update" });
   });
 
   it("does not read or execute package bytes while disabled", async () => {
@@ -134,6 +173,23 @@ describe("installed extension manager", () => {
     expect(manager.audit.list("org.example.sandbox").at(-1)?.outcome).toBe("failed");
   });
 
+  it("publishes initialization only after persisted extensions are available", async () => {
+    const store = new MemoryExtensionStore();
+    const first = new InstalledExtensionManager(store);
+    await first.install(await first.prepare(archive(manifest())));
+
+    const manager = new InstalledExtensionManager(store);
+    let restoredVersion: string | null = null;
+    manager.onChange((change) => {
+      if (change.kind === "initialized") {
+        restoredVersion = manager.current("org.example.sandbox")?.version ?? null;
+      }
+    });
+
+    await manager.initialize();
+    expect(restoredVersion).toBe("1.0.0");
+  });
+
   it("removes package state on uninstall and blocks bundled id collisions", async () => {
     const manager = new InstalledExtensionManager(new MemoryExtensionStore());
     manager.reserve(["org.example.sandbox"]);
@@ -142,5 +198,39 @@ describe("installed extension manager", () => {
     await manager.install(await manager.prepare(archive(manifest())));
     await manager.uninstall("org.example.sandbox");
     expect(manager.get("org.example.sandbox")).toBeNull();
+  });
+
+  it("finishes uninstall when extension localStorage cleanup is blocked", async () => {
+    const store = new MemoryExtensionStore();
+    const manager = new InstalledExtensionManager(store);
+    await manager.install(await manager.prepare(archive(manifest())));
+    const changed = vi.fn();
+    manager.onChange(changed);
+
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        get length(): number {
+          throw new DOMException("blocked", "SecurityError");
+        },
+        getItem: () => null,
+        setItem: () => undefined,
+      },
+    });
+    try {
+      await expect(manager.uninstall("org.example.sandbox")).resolves.toBeUndefined();
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "localStorage", descriptor);
+      else Reflect.deleteProperty(globalThis, "localStorage");
+    }
+
+    expect(manager.get("org.example.sandbox")).toBeNull();
+    await expect(store.list()).resolves.toEqual([]);
+    expect(changed).toHaveBeenCalledWith({ id: "org.example.sandbox", kind: "uninstalled" });
+    expect(manager.audit.list("org.example.sandbox")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "storage.remove", outcome: "failed" }),
+      expect.objectContaining({ action: "uninstall", outcome: "allowed" }),
+    ]));
   });
 });

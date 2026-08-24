@@ -19,6 +19,7 @@ const CSP = [
   "img-src data: blob:",
   "font-src data:",
   "connect-src 'none'",
+  "webrtc 'block'",
   "media-src data: blob:",
   "worker-src 'none'",
   "manifest-src 'none'",
@@ -27,12 +28,29 @@ const CSP = [
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'none'",
-  "navigate-to 'none'",
   "sandbox allow-scripts",
 ].join("; ");
 
 const BOOTSTRAP = `(() => {
   "use strict";
+  // CSP is the primary network boundary. Lock the matching constructors too,
+  // both as defence in depth and for engines that lag a newer CSP directive.
+  const denyGlobal = (name) => {
+    try { Object.defineProperty(globalThis, name, { value: undefined, writable: false, configurable: false }); } catch {}
+  };
+  ["fetch", "XMLHttpRequest", "WebSocket", "EventSource", "WebTransport", "RTCPeerConnection", "webkitRTCPeerConnection", "Worker", "SharedWorker", "open"].forEach(denyGlobal);
+  try { Object.defineProperty(navigator, "sendBeacon", { value: () => false, writable: false, configurable: false }); } catch {}
+  const blockLink = (event) => {
+    const target = event.target instanceof Element ? event.target.closest("a[href], area[href], form") : null;
+    if (!target) return;
+    const href = target.matches("a[href], area[href]") ? (target.getAttribute("href") || "").trim() : "";
+    if (href.startsWith("#") && !target.hasAttribute("ping")) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  document.addEventListener("click", blockLink, true);
+  document.addEventListener("auxclick", blockLink, true);
+  document.addEventListener("submit", blockLink, true);
   const protocol = 1;
   const pending = new Map();
   const listeners = new Map();
@@ -268,7 +286,7 @@ export class SandboxRuntime implements ExtensionInstance {
     this.iframe.setAttribute("credentialless", "");
     this.iframe.setAttribute(
       "allow",
-      "accelerometer 'none'; camera 'none'; clipboard-read 'none'; clipboard-write 'none'; geolocation 'none'; gyroscope 'none'; microphone 'none'; payment 'none'; serial 'none'; usb 'none'",
+      "accelerometer 'none'; autoplay 'none'; camera 'none'; clipboard-read 'none'; clipboard-write 'none'; display-capture 'none'; encrypted-media 'none'; fullscreen 'none'; geolocation 'none'; gyroscope 'none'; microphone 'none'; midi 'none'; payment 'none'; picture-in-picture 'none'; publickey-credentials-get 'none'; screen-wake-lock 'none'; serial 'none'; usb 'none'; web-share 'none'; xr-spatial-tracking 'none'",
     );
     this.iframe.setAttribute("referrerpolicy", "no-referrer");
     this.iframe.srcdoc = sandboxDocument(html, this.nonce);

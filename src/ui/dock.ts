@@ -11,6 +11,7 @@ import {
   iconButton,
   safeStorageGet,
   safeStorageSet,
+  slidingPill,
   toast,
 } from "./kit.js";
 import { applyColors, colorableKeys, computeColors, computeColorsFromEntries, cssColor, CustomColors, materialColorEntries, type ColorResult, type ColorRule } from "./colorBy.js";
@@ -1569,13 +1570,14 @@ export class Dock {
       const button = h("button", { type: "button", text: label });
       button.setAttribute("aria-pressed", String(this.colorRule.kind === rule.kind));
       button.addEventListener("click", () => {
-        for (const other of seg.children) other.setAttribute("aria-pressed", "false");
+        for (const other of seg.querySelectorAll("button")) other.setAttribute("aria-pressed", "false");
         button.setAttribute("aria-pressed", "true");
         keys.value = "";
         run(rule);
       });
       seg.appendChild(button);
     }
+    slidingPill(seg);
     pop.appendChild(seg);
 
     const index = this.indexProvider?.();
@@ -1666,13 +1668,14 @@ export class Dock {
       button.setAttribute("aria-pressed", String(axis === this.slideAxis));
       button.addEventListener("click", () => {
         this.slideAxis = axis;
-        for (const other of axisSeg.children) other.setAttribute("aria-pressed", "false");
+        for (const other of axisSeg.querySelectorAll("button")) other.setAttribute("aria-pressed", "false");
         button.setAttribute("aria-pressed", "true");
         this.viewer.setStoreySlide(this.slideAxis, this.slideSpacing);
         this.syncArrange();
       });
       axisSeg.appendChild(button);
     }
+    slidingPill(axisSeg);
     slide.addEventListener("input", () => {
       this.slideSpacing = Number(slide.value);
       this.viewer.setStoreySlide(this.slideAxis, this.slideSpacing);

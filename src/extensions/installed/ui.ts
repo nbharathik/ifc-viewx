@@ -100,7 +100,7 @@ export function reviewExtensionInstall(candidate: ExtensionInstallCandidate): Pr
 
     const isolation = h("div", { class: "ext-isolation" }, [
       icon("shield", 14),
-      h("span", { text: "Runs without parent-page access, host storage, service credentials, model bytes, direct downloads, or network access. Every viewer call is checked again while it runs." }),
+      h("span", { text: "Runs in an opaque-origin frame. External resources, connection APIs, workers, popups, downloads, and device access are blocked; a frame navigation unloads and disables it. Every viewer call is checked again. Trust the publisher with the access listed above." }),
     ]);
     const assistantDisclosure = manifest.permissions.includes("assistant.contribute")
       ? h("div", { class: "note", text: "This extension declares assistant tools. If you enable one in a future assistant integration, its arguments may reach your configured AI provider after a separate approval." })

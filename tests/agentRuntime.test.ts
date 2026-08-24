@@ -3,13 +3,19 @@ import { AgentRuntime, type AgentRuntimeUi } from "../src/assistant/agentRuntime
 import type { AssistantCapabilityAdapter } from "../src/assistant/capabilityAdapter.js";
 import type { AssistantTraceEvent, AssistantTransport, EvidenceReference, ViewerContextSnapshot } from "../src/assistant/types.js";
 import type { ViewTransactionManager } from "../src/assistant/viewTransactions.js";
+import type { ChatMessage } from "../src/llm/llmClient.js";
 
 function uiHarness() {
   const messages: Array<{ role: string; text: string }> = [];
   const evidence: EvidenceReference[][] = [];
+  const streams: Array<{ push: ReturnType<typeof vi.fn>; settle: ReturnType<typeof vi.fn>; text: () => string }> = [];
   const ui: AgentRuntimeUi = {
     addMessage: (role, text) => messages.push({ role, text }),
-    startStream: () => ({ push: vi.fn(), settle: vi.fn(), text: () => "" }),
+    startStream: () => {
+      const view = { push: vi.fn(), settle: vi.fn(), text: () => "" };
+      streams.push(view);
+      return view;
+    },
     addToolCall: () => ({ settle: vi.fn() }),
     addEscalation: vi.fn(),
     addEvidence: (references) => evidence.push(references),
@@ -19,7 +25,7 @@ function uiHarness() {
     setStatus: vi.fn(),
     resetAttachment: vi.fn(),
   };
-  return { ui, messages, evidence };
+  return { ui, messages, evidence, streams };
 }
 
 const snapshot: ViewerContextSnapshot = {
@@ -47,19 +53,21 @@ function runtime(
   ui: AgentRuntimeUi,
   captureContext = vi.fn(async () => ({ snapshot, image: null })),
   viewTransactions = { begin: vi.fn() } as unknown as ViewTransactionManager,
+  mode: () => "query" | "edit" = () => "query",
+  system: (messages: ChatMessage[], native: boolean, mode: "query" | "edit") => ChatMessage[] = (messages) => messages,
 ) {
   const trace: AssistantTraceEvent[] = [];
   return {
     agent: new AgentRuntime({
       ui: () => ui,
-      mode: () => "query",
+      mode,
       transport: () => transport,
       tools,
       viewTransactions,
       captureContext,
       attachView: () => false,
       approvals: () => [],
-      system: (messages) => messages,
+      system,
       onUsage: vi.fn(),
       onPersist: vi.fn(),
       onTrace: (event) => trace.push(event),
@@ -71,6 +79,45 @@ function runtime(
 }
 
 describe("assistant agent runtime", () => {
+  it("keeps the mode captured at turn start for every tool execution", async () => {
+    let currentMode: "query" | "edit" = "query";
+    let round = 0;
+    const transport: AssistantTransport = {
+      id: "mode-snapshot",
+      multimodal: false,
+      converse: async () => {
+        round += 1;
+        currentMode = "edit";
+        return round === 1
+          ? { text: "Checking", toolsUsed: true, calls: [{ id: "c1", name: "model__summary", input: {} }] }
+          : { text: "Done", toolsUsed: true, calls: [] };
+      },
+      complete: async () => "unused",
+    };
+    const adapter = {
+      tools: vi.fn(() => [{ name: "model__summary", description: "summary", schema: { type: "object", properties: {}, required: [] } }]),
+      resolve: () => ({ id: "model.summary", effect: "read", parallelSafe: true }),
+      execute: vi.fn(async () => ({
+        capabilityId: "model.summary",
+        title: "Model summary",
+        effect: "read",
+        report: "{}",
+        value: {},
+        result: null,
+        evidence: [],
+      })),
+    } as unknown as AssistantCapabilityAdapter;
+    const harness = uiHarness();
+    const system = vi.fn((messages: ChatMessage[]) => messages);
+    const built = runtime(transport, adapter, harness.ui, undefined, undefined, () => currentMode, system);
+
+    await built.agent.run("Summarise the model");
+
+    expect(adapter.tools).toHaveBeenCalledWith("query", expect.anything());
+    expect(adapter.execute).toHaveBeenCalledWith("model__summary", {}, "query", expect.any(AbortSignal), expect.any(Function));
+    expect(system).toHaveBeenCalledWith(expect.any(Array), expect.any(Boolean), "query");
+  });
+
   it("executes a native tool, returns evidence and sends no image unless attached", async () => {
     const requests: Array<{ messages: unknown[] }> = [];
     let round = 0;
@@ -156,6 +203,32 @@ describe("assistant agent runtime", () => {
     expect(harness.messages.at(-1)?.text).toMatch(/Geometry and Local Studio jobs/);
     expect(built.trace.at(-1)).toEqual({ type: "cancel", targets: ["provider", "geometry", "local"] });
     expect(built.agent.busy).toBe(false);
+  });
+
+  it("closes the reply bubble it opened when the provider refuses the turn", async () => {
+    const transport: AssistantTransport = {
+      id: "no-key",
+      multimodal: false,
+      converse: async () => {
+        throw new Error("Claude (Anthropic) needs an API key.");
+      },
+      complete: async () => "unused",
+    };
+    const adapter = {
+      tools: () => [],
+      resolve: () => null,
+      execute: vi.fn(),
+    } as unknown as AssistantCapabilityAdapter;
+    const harness = uiHarness();
+    const built = runtime(transport, adapter, harness.ui);
+
+    await built.agent.run("How many walls are there?");
+
+    // Unsettled, the bubble stays in the transcript as an empty card with a
+    // caret blinking in it, under the error that explains the failure.
+    expect(harness.streams).toHaveLength(1);
+    expect(harness.streams[0].settle).toHaveBeenCalledTimes(1);
+    expect(harness.messages.at(-1)?.text).toContain("needs an API key");
   });
 
   it("restores a partial view transaction when the turn is stopped", async () => {

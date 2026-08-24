@@ -27,7 +27,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import secrets
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -299,6 +302,19 @@ def create_app(hub: BrowserHub) -> FastAPI:
             body["store"] = store.stats()
             body["llm"] = llm.describe()
             body["browserConnected"] = hub.connected()
+            # The viewer prints these verbatim in its privacy panel, so they
+            # come from the running config rather than from a convention the
+            # page would have to guess at and could get wrong.
+            body["paths"] = {
+                "store": str(config.store_dir),
+                "state": str(config.state_dir),
+                "audit": str(config.audit_path),
+                "keySource": (
+                    "The assistant key is read from IFCVIEWX_LLM_API_KEY in this"
+                    " service's environment. It is never written to disk and"
+                    " never sent to the page."
+                ),
+            }
         return JSONResponse(body, headers={"Cache-Control": "no-store"})
 
     # -- native provider protocol ------------------------------------------
@@ -443,6 +459,35 @@ def create_app(hub: BrowserHub) -> FastAPI:
         result = store.sweep(keep=keep)
         audit.record("store.prune", **result)
         return JSONResponse(result)
+
+    @app.post("/store/reveal")
+    async def store_reveal(request: Request) -> JSONResponse:
+        """Show one of this service's own folders in the file manager.
+
+        Deliberately not a general "open this path" call: the body picks one of
+        two directories this service already owns, and nothing else is
+        reachable. The privacy panel is worth little if the user cannot go and
+        look at what it is describing.
+        """
+        body = await _json(request)
+        which = str(body.get("which") or "")
+        target = {"store": config.store_dir, "state": config.state_dir}.get(which)
+        if target is None:
+            return JSONResponse({"error": "bad_request", "message": "which must be store or state"}, status_code=400)
+        try:
+            if sys.platform == "win32":
+                os.startfile(target)  # noqa: S606 - a directory this service made
+            else:
+                opener = "open" if sys.platform == "darwin" else "xdg-open"
+                subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+                    [opener, str(target)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        except Exception as exc:  # noqa: BLE001 - a headless box has no file manager
+            return JSONResponse({"error": "no_opener", "message": str(exc)}, status_code=501)
+        audit.record("store.reveal", which=which)
+        return JSONResponse({"ok": True, "path": str(target)})
 
     @app.get("/models/{name}")
     async def serve_model(name: str) -> Response:

@@ -22,11 +22,19 @@ export interface ManifestValidationOptions {
 }
 
 const ID = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/;
-const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const SHA256 = /^[a-f0-9]{64}$/i;
 const ACTIVATION = /^(?:onPanel|onCommand|onAssistantTool|onFile|onLocalCapability):[A-Za-z0-9._-]+$|^onModel$|^onStartup$/;
 
 export const SDK_VERSION = "2.0.0";
+
+/** One source of truth for IDs shared by manifests and signed registries. */
+export const isExtensionId = (value: unknown, installed = false): value is string =>
+  typeof value === "string" && ID.test(value) && (!installed || value.includes("."));
+
+/** One SemVer 2.0 validator shared by package manifests and registry pins. */
+export const isExtensionVersion = (value: unknown): value is string =>
+  typeof value === "string" && VERSION.test(value);
 
 type Version = [number, number, number];
 
@@ -338,12 +346,12 @@ export function validateManifest(
     issues.push({ path: "manifest.manifestVersion", code: "version", message: "must equal 2" });
   }
   const id = requiredString(value, "id", "manifest", issues);
-  if (id && !ID.test(id)) {
+  if (id && !isExtensionId(id)) {
     issues.push({ path: "manifest.id", code: "format", message: "must use lowercase letters, digits, dots, or dashes" });
   }
   requiredString(value, "name", "manifest", issues);
   const version = requiredString(value, "version", "manifest", issues);
-  if (version && !VERSION.test(version)) {
+  if (version && !isExtensionVersion(version)) {
     issues.push({ path: "manifest.version", code: "format", message: "must be a semantic version such as 1.2.0" });
   }
   const sdk = requiredString(value, "sdk", "manifest", issues);
@@ -401,7 +409,7 @@ export function validateManifest(
   validateContributionLinks(value.contributes, events, permissions, issues);
 
   if (isRecord(value.runtime) && value.runtime.kind === "sandboxed") {
-    if (id && !id.includes(".")) {
+    if (id && isExtensionId(id) && !isExtensionId(id, true)) {
       issues.push({ path: "manifest.id", code: "format", message: "installed extension ids must use reverse-domain notation" });
     }
     if (!isRecord(value.publisher)) {

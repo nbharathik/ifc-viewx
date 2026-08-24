@@ -3,7 +3,7 @@
 // Two halves of one idea. Views are the model state a coordinator set up,
 // stored as rules so it re-runs on any revision. Properties are the derived
 // data those rules read. Both export as a file somebody else can open.
-import { confirmAction, h, icon, iconButton, promptForm, toast } from "./kit.js";
+import { confirmAction, h, icon, iconButton, promptForm, slidingPill, toast } from "./kit.js";
 import { emptyState } from "./shell.js";
 import type { ColorRule } from "./colorBy.js";
 import { download } from "../sdk/data.js";
@@ -90,6 +90,7 @@ export class ViewsPane {
     viewsTab.addEventListener("click", () => show("views"));
     propsTab.addEventListener("click", () => show("props"));
     tabs.append(viewsTab, propsTab);
+    slidingPill(tabs);
 
     const save = h("button", { class: "btn accent grow", type: "button" }, [
       icon("bookmark", 13),

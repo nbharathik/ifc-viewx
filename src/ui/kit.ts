@@ -240,6 +240,96 @@ export function iconLink(name: string, title: string, href: string, cls = "icon-
   return h("a", { class: cls, title, "aria-label": title, href, target: "_blank", rel: "noopener noreferrer" }, [icon(name)]);
 }
 
+// -- exit motion ------------------------------------------------------------
+/**
+ * Take a node away with its closing animation instead of yanking it out of the
+ * document. The class starts the animation, the node goes when it finishes.
+ * Where nothing animates, which is every headless test and any node the user
+ * has asked to hold still, the removal stays synchronous, so callers can rely
+ * on the node being gone as soon as this returns. A hidden document counts as
+ * nothing animating: the browser stops advancing animations in a background
+ * tab, and this is a viewer people leave open, so a toast dismissed behind
+ * another tab would otherwise wait there indefinitely.
+ */
+export function fadeOut(node: HTMLElement, cls = "closing"): void {
+  node.classList.add(cls);
+  const running =
+    typeof node.getAnimations === "function" && !node.ownerDocument.hidden ? node.getAnimations() : [];
+  if (!node.isConnected || running.length === 0) return node.remove();
+  void Promise.all(running.map((a) => a.finished.catch(() => undefined))).then(() => node.remove());
+}
+
+/**
+ * Write a live value and let it arrive rather than appear. Counts, selection
+ * sizes and tool states change while the user is looking straight at them, and
+ * a number that teleports is read as a glitch. Only the incoming value is
+ * animated: cross-fading the outgoing one as well means holding stale text on
+ * screen, and these update faster than that would survive. Writing the same
+ * value again does nothing, which is what makes this safe on a hot path.
+ * Opacity and transform only, so a status line updating twice a second never
+ * asks the compositor to re-rasterise the text it sits in.
+ */
+export function swapText(node: HTMLElement, next: string): void {
+  if ((node.textContent ?? "") === next) return;
+  node.textContent = next;
+  if (typeof node.animate !== "function" || !node.isConnected) return;
+  node.animate(
+    [
+      { opacity: 0, transform: "translateY(3px)" },
+      { opacity: 1, transform: "translateY(0)" },
+    ],
+    { duration: 180, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
+  );
+}
+
+/**
+ * Give a segmented control a pill that travels between its options instead of
+ * a background that blinks from one button to the next. The pill is measured
+ * here and tweened by CSS, so it follows the same curve as every other moving
+ * thing. It watches the pressed attribute rather than clicks, which keeps it
+ * correct when the selection is changed by the keyboard or by code.
+ */
+export function slidingPill(seg: HTMLElement): void {
+  if (seg.querySelector(":scope > .seg-pill")) return;
+  const pill = h("span", { class: "seg-pill", "aria-hidden": "true" });
+  seg.prepend(pill);
+  const move = (animate: boolean): void => {
+    const target = seg.querySelector<HTMLElement>(
+      'button[aria-pressed="true"], button[aria-selected="true"]',
+    );
+    // A control that is collapsed, hidden or not laid out yet measures zero.
+    // Parking the pill instead of drawing it at zero width keeps it from
+    // flashing in the corner on the frame before the panel opens.
+    if (!target?.offsetWidth) {
+      pill.style.opacity = "0";
+      return;
+    }
+    if (!animate) pill.style.transition = "none";
+    pill.style.opacity = "1";
+    pill.style.width = `${target.offsetWidth}px`;
+    pill.style.height = `${target.offsetHeight}px`;
+    // Measured against the pill's own resting position rather than the
+    // control's box, so the control's padding and border never have to be
+    // read back or kept in step with the stylesheet. Transforms do not move
+    // offsetLeft, so this stays the same number on every pass.
+    pill.style.transform =
+      `translate(${target.offsetLeft - pill.offsetLeft}px, ${target.offsetTop - pill.offsetTop}px)`;
+    if (!animate) {
+      void pill.offsetWidth;
+      pill.style.transition = "";
+    }
+  };
+  new MutationObserver(() => move(true)).observe(seg, {
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["aria-pressed", "aria-selected"],
+  });
+  // Resizing moves the buttons under the pill, and that is not a selection
+  // change, so it snaps rather than slides.
+  if (typeof ResizeObserver === "function") new ResizeObserver(() => move(false)).observe(seg);
+  requestAnimationFrame(() => move(false));
+}
+
 // -- transient layers -------------------------------------------------------
 /**
  * One dropdown, popover or context menu is open at a time and any of them
@@ -321,7 +411,7 @@ export function toast(message: string, kind: "info" | "success" | "error" = "inf
     role: kind === "error" ? "alert" : "status",
     "aria-atomic": "true",
   }, [icon(TOAST_ICON[kind], 14), h("span", { text: message })]);
-  const remove = (): void => node.remove();
+  const remove = (): void => fadeOut(node);
   node.addEventListener("click", remove);
   toastHost.appendChild(node);
   setTimeout(remove, kind === "error" ? 8000 : 3500);
@@ -569,16 +659,22 @@ export function attachPopover(
       if (vertical) pop.style.marginTop = `${vertical}px`;
     }
     const dismiss = (): void => {
-      pop.remove();
+      fadeOut(pop);
       button.setAttribute("aria-expanded", "false");
       onToggle?.(false);
     };
-    if (!isPinned) return openLayer([pop, button], dismiss);
-    // One pinned panel at a time, and it must not sit under a menu or a
-    // dropdown opened later, so any transient layer closes it first.
-    closePinned();
-    closeLayer();
-    pinned = { close: dismiss };
+    if (isPinned) {
+      // One pinned panel at a time, and it must not sit under a menu or a
+      // dropdown opened later, so any transient layer closes it first.
+      closePinned();
+      closeLayer();
+      pinned = { close: dismiss };
+    } else {
+      openLayer([pop, button], dismiss);
+    }
+    // Whatever was closed to make room for this one goes at once: a panel
+    // still playing its exit beside a fresh panel reads as two panels open.
+    for (const stale of document.querySelectorAll<HTMLElement>(".pop.closing")) stale.remove();
   });
 }
 

@@ -51,10 +51,14 @@ function context() {
 }
 
 describe("installed extension sandbox", () => {
-  it("injects a no-network CSP and keeps the iframe origin isolated", () => {
+  it("injects a restrictive CSP and keeps the iframe origin isolated", () => {
     const documentText = sandboxDocument("<html><head></head><body><script>window.test = true</script></body></html>", "nonce-1");
     expect(documentText).toContain("connect-src 'none'");
+    expect(documentText).toContain("webrtc 'block'");
     expect(documentText).toContain("sandbox allow-scripts");
+    expect(documentText).not.toContain("navigate-to");
+    expect(documentText).toContain("RTCPeerConnection");
+    expect(documentText).toContain('href.startsWith("#") && !target.hasAttribute("ping")');
     expect(documentText).toContain("nonce-1");
     expect(documentText).not.toContain("allow-same-origin");
     expect(documentText).toContain("geometry.laser");
@@ -90,6 +94,24 @@ describe("installed extension sandbox", () => {
     expect(frame.hasAttribute("credentialless")).toBe(true);
     expect(frame.getAttribute("allow")).toContain("camera 'none'");
     runtime.dispose();
+    state.scope.dispose();
+  });
+
+  it("session-disables a frame that navigates away from its packaged document", () => {
+    const state = context();
+    const host = document.createElement("div");
+    const crash = vi.fn();
+    new SandboxRuntime(host, "<html><head></head><body></body></html>", state.definition, state.value, {
+      audit: new ExtensionAuditLog(),
+      onCrash: crash,
+    });
+    const frame = host.querySelector("iframe")!;
+
+    frame.dispatchEvent(new Event("load"));
+    frame.dispatchEvent(new Event("load"));
+
+    expect(crash).toHaveBeenCalledWith("org.example.hostile", expect.stringMatching(/navigate/i));
+    expect(frame.isConnected).toBe(false);
     state.scope.dispose();
   });
 

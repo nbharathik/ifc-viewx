@@ -1,7 +1,7 @@
 // App chrome around the ribbon: the top bar, the status bar, panel switching
 // and the activity log. Pure presentation. Everything it can do is passed in
 // as actions, so this module never reaches into the viewer or the service.
-import { h, icon, iconButton, iconLink, makeResizer, toast } from "./kit.js";
+import { h, icon, iconButton, iconLink, makeResizer, slidingPill, swapText, toast } from "./kit.js";
 
 export interface ShellActions {
   toggleTheme(): void;
@@ -210,6 +210,7 @@ export class Shell {
       this.paneButtons.set(pane, button);
       target.appendChild(button);
     }
+    slidingPill(target);
   }
 
   /** Vertical rail on the outer edge: always visible, so it doubles as the
@@ -344,7 +345,7 @@ export class Shell {
   }
 
   setStatus(state: string, kind: "idle" | "live" | "busy" = "idle"): void {
-    this.status.state.textContent = state;
+    swapText(this.status.state, state);
     this.status.dot.className = `dot${kind === "live" ? " on" : kind === "busy" ? " busy" : ""}`;
     this.projectDot.className = this.status.dot.className;
   }
@@ -360,7 +361,7 @@ export class Shell {
   }
 
   setHint(text: string): void {
-    this.status.hint.textContent = text;
+    swapText(this.status.hint, text);
   }
 
   setFrameTime(text: string): void {

@@ -54,8 +54,10 @@
   --shadow: 0 10px 30px -8px rgba(0, 0, 0, 0.7), 0 2px 8px rgba(0, 0, 0, 0.45);
   --scrim: rgba(6, 7, 9, 0.6);
   /* A full-workspace overlay covers the model, not a corner of it, so it dims
-     harder than a dialog: nothing behind it should compete with the text. */
-  --scrim-strong: rgba(6, 7, 9, 0.86);
+     harder than a dialog: nothing behind it should compete with the text. It
+     is the whole veil, with no blur under it, so it has to hide the model on
+     opacity alone. */
+  --scrim-strong: rgba(6, 7, 9, 0.88);
 
   --r1: 4px;
   --r2: 6px;
@@ -74,6 +76,19 @@
   --fast: 120ms;
   --base: 200ms;
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Motion. Opening is slower than closing, because an entrance is followed
+     and a dismissal should already be over by the time the eye returns.
+     Transform and opacity only: a blur on the way in reads as the panel
+     losing resolution rather than as depth, and it pulls the whole subtree
+     into an offscreen buffer over a live WebGL canvas. A 6px lift against a
+     0.97 scale buys the same depth on the compositor alone. --ease-swap is
+     the only symmetric curve here; it belongs to values that replace each
+     other in place, where an overshoot would read as the number bouncing. */
+  --enter: 200ms;
+  --exit: 130ms;
+  --lift: 6px;
+  --ease-swap: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 :root[data-theme="light"] {
@@ -111,7 +126,7 @@
   --viewport: #eef0f3;
   --shadow: 0 10px 30px -10px rgba(16, 24, 40, 0.22), 0 2px 6px rgba(16, 24, 40, 0.1);
   --scrim: rgba(20, 23, 28, 0.35);
-  --scrim-strong: rgba(28, 33, 41, 0.72);
+  --scrim-strong: rgba(28, 33, 41, 0.86);
 }
 
 /* Size steps. A 32" panel is not a bigger window, it is a window further away:
@@ -594,6 +609,7 @@ a.icon-btn { text-decoration: none; }
 
 /* Segmented control */
 .seg {
+  position: relative;
   display: inline-flex;
   padding: 2px;
   gap: 2px;
@@ -601,6 +617,8 @@ a.icon-btn { text-decoration: none; }
   border-radius: var(--r2);
 }
 .seg button {
+  position: relative;
+  z-index: 1;
   height: calc(20px * var(--ui, 1));
   padding: 0 9px;
   background: transparent;
@@ -614,6 +632,28 @@ a.icon-btn { text-decoration: none; }
 /* Four panes have to fit next to the collapse button at the minimum width. */
 #outliner-switch button { padding: 0 5px; }
 .seg button[aria-pressed="true"] { background: var(--raised); color: var(--fg); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); }
+/* The travelling selection. Where slidingPill has installed one it carries the
+   whole indication, so the pressed button stops painting a second one; a
+   control without a pill keeps the plain swap above and is unaffected. */
+.seg-pill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  width: 0;
+  height: 0;
+  border-radius: var(--r1);
+  background: var(--raised);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform var(--base) var(--ease),
+    width var(--base) var(--ease),
+    height var(--base) var(--ease),
+    opacity var(--fast) ease;
+}
+.seg:has(> .seg-pill) button[aria-pressed="true"] { background: transparent; box-shadow: none; }
 
 input[type="text"], input[type="search"], input[type="password"], select, textarea {
   background: var(--sunken);
@@ -718,6 +758,10 @@ kbd {
   border: none;
   border-radius: var(--r2);
   color: var(--fg-2);
+  /* Colour only. The rail used to lean and swell towards an approaching
+     pointer, which meant ten targets moving before any of them was hovered:
+     it read as fidgeting and it made a 30px button harder to hit, not
+     easier. A control the pointer is travelling to holds still. */
   transition: background var(--fast) ease, color var(--fast) ease;
 }
 .rail-btn:hover { background: var(--hover); color: var(--fg); }
@@ -853,7 +897,10 @@ body.is-resizing .resizer { pointer-events: auto; }
   border-radius: var(--r3);
   box-shadow: var(--shadow);
   z-index: 70;
-  animation: pop-in var(--fast) var(--ease);
+  /* Grows from the edge it is anchored to, so it reads as coming out of its
+     button rather than appearing beside it. */
+  transform-origin: bottom center;
+  animation: pop-in var(--enter) var(--ease);
 }
 /* Ribbon anchors drop downward instead. */
 /* The rail opens its options sideways, so they never cover the next tool. */
@@ -862,7 +909,8 @@ body.is-resizing .resizer { pointer-events: auto; }
   top: 50%;
   left: calc(100% + 9px);
   transform: translateY(-50%);
-  animation: pop-right var(--fast) var(--ease);
+  transform-origin: left center;
+  animation: pop-right var(--enter) var(--ease);
 }
 /* The section panel carries the most controls of any rail panel, so it is
    tuned tighter than the shared popover metrics. */
@@ -909,8 +957,27 @@ body.is-resizing .resizer { pointer-events: auto; }
 .section-box-row input { grid-column: 1 / -1; min-width: 0; }
 .section-box-value { color: var(--fg-2); font: 500 calc(9px * var(--ui, 1)) var(--mono); font-variant-numeric: tabular-nums; }
 .section-workspace-open { width: 100%; justify-content: center; margin-top: 2px; }
-@keyframes pop-in { from { opacity: 0; transform: translate(-50%, 5px); } }
-@keyframes pop-right { from { opacity: 0; transform: translate(-5px, -50%); } }
+/* Translate and opacity only, and deliberately no scale. A layer that is
+   scaled during an entrance is rasterised once at the smaller size and
+   stretched by the GPU for the whole animation, so 10px mono text arrives
+   visibly soft and only sharpens when the transform lands on identity. Over
+   the model canvas that reads as the panel losing resolution. */
+@keyframes pop-in {
+  from { opacity: 0; transform: translate(-50%, var(--lift)); }
+}
+@keyframes pop-right {
+  from { opacity: 0; transform: translate(calc(var(--lift) * -1), -50%); }
+}
+/* Closing shrinks far less than opening grew: a panel that collapses as hard
+   as it expanded reads as being pulled away rather than dismissed. */
+.pop.closing { pointer-events: none; animation: pop-out var(--exit) var(--ease-swap) forwards; }
+.pop.right.closing { animation-name: pop-right-out; }
+@keyframes pop-out {
+  to { opacity: 0; transform: translate(-50%, 2px); }
+}
+@keyframes pop-right-out {
+  to { opacity: 0; transform: translate(-2px, -50%); }
+}
 
 /* ---- Measure card ---------------------------------------------------------- */
 /* Not a popover: a popover closes on the first click into the viewport, which
@@ -1241,7 +1308,7 @@ body.is-resizing .resizer { pointer-events: auto; }
   overflow: hidden;
   animation: pal-in var(--base) var(--ease);
 }
-@keyframes pal-in { from { opacity: 0; transform: translateY(-10px) scale(0.98); } }
+@keyframes pal-in { from { opacity: 0; transform: translateY(-10px); } }
 .pal-input { display: flex; align-items: center; gap: 10px; padding: 0 15px; border-bottom: 1px solid var(--line); color: var(--fg-4); }
 #palette input {
   flex: 1 1 auto;
@@ -1315,6 +1382,8 @@ body.is-resizing .resizer { pointer-events: auto; }
   animation: toast-in var(--base) var(--ease);
 }
 @keyframes toast-in { from { opacity: 0; transform: translateY(-8px); } }
+.toast.closing { pointer-events: none; animation: toast-out var(--exit) var(--ease-swap) forwards; }
+@keyframes toast-out { to { opacity: 0; transform: translateY(-6px); } }
 .toast svg { width: 14px; height: 14px; flex: 0 0 auto; }
 .toast.success svg { color: var(--ok); }
 .toast.error svg { color: var(--err); }
@@ -1746,7 +1815,53 @@ dialog::backdrop { background: var(--scrim); }
 .esc .md-code { max-height: 210px; overflow: auto; }
 
 /* Assistant chrome: what the next turn may do, said before it is typed. */
-.ai-bar { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.ai-page { gap: 8px; padding: 8px; }
+.ai-bar { display: flex; align-items: center; gap: 3px; min-width: 0; flex: 0 0 auto; }
+.ai-bar > .grow { min-width: 4px; }
+.ai-bar > .icon-btn { flex: 0 0 auto; }
+
+/* The control keeps its geometry fixed. Only the selected surface moves, so a
+   mode change never nudges the transcript or resizes the WebGL viewport. */
+.ai-modes {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0;
+}
+.ai-modes::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  top: 2px;
+  bottom: 2px;
+  left: 2px;
+  width: calc(50% - 3px);
+  border: 1px solid var(--line);
+  border-radius: var(--r1);
+  background: var(--raised);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform var(--base) var(--ease);
+}
+.ai-modes[data-mode="edit"]::before { transform: translateX(calc(100% + 2px)); }
+.ai-modes button { position: relative; z-index: 1; min-width: calc(52px * var(--ui, 1)); }
+.ai-modes button[aria-pressed="true"] { background: transparent; box-shadow: none; }
+.ai-modes button:disabled { cursor: default; opacity: 0.55; }
+
+.ai-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  min-height: 18px;
+  padding: 0 2px 5px;
+  border-bottom: 1px solid var(--line);
+}
+.ai-meta .tier { align-self: auto; }
+.ai-meta .tier:empty { display: none; }
+.ai-meta:not(:has(.tier:not(:empty))) { display: none; }
+.ai-welcome { display: flex; flex: 1 1 auto; min-height: 0; overflow-y: auto; flex-direction: column; gap: 12px; }
+.ai-welcome .empty { padding: 18px 16px 12px; }
 /* Setup in the panel, not in a dialog that opens itself: a first run is
    answered where the question was asked. The fields stack, because this panel
    is narrower than the dialog the same fields also appear in. */
@@ -1858,7 +1973,14 @@ dialog::backdrop { background: var(--scrim); }
 .verify.fail span { word-break: break-word; }
 .tier.ok { color: var(--ok); }
 
-.msgs { flex: 1 1 auto; overflow-y: auto; display: flex; flex-direction: column; gap: 9px; min-height: 0; padding-right: 2px; }
+.msgs { flex: 1 1 auto; overflow-y: auto; display: flex; flex-direction: column; gap: 9px; min-height: 0; padding: 2px 2px 2px 0; }
+/* Nothing in a scrolling transcript may be squeezed. A column flex container
+   shrinks its children once their total height passes its own, so as soon as
+   the conversation was longer than the panel every entry lost height: bubbles
+   spilled their text and anything with overflow:hidden, which is every tool
+   card and trace, had its own header sliced off instead. The list scrolls, so
+   each entry keeps the height it asked for. */
+.msgs > * { flex: 0 0 auto; }
 .msg {
   padding: 8px 11px;
   border-radius: var(--r3);
@@ -1868,6 +1990,12 @@ dialog::backdrop { background: var(--scrim); }
 }
 .msg.user { align-self: flex-end; white-space: pre-wrap; background: var(--accent); color: var(--on-accent); border-bottom-right-radius: var(--r1); }
 .msg.assistant { align-self: flex-start; max-width: 100%; background: var(--hover); border: 1px solid var(--line); border-bottom-left-radius: var(--r1); }
+.ai-enter { animation: ai-enter var(--enter) var(--ease) both; }
+@keyframes ai-enter {
+  from { opacity: 0; transform: translateY(var(--lift)); }
+  to { opacity: 1; transform: none; }
+}
+
 /* A short aside from the app itself: a mode switch, or a turn that gave up. */
 .notice {
   align-self: stretch;
@@ -1983,7 +2111,80 @@ dialog::backdrop { background: var(--scrim); }
 .tc-err { color: var(--err); font-size: calc(10.5px * var(--ui, 1)); line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 .tc.ok .tc-state { color: var(--ok); }
 .tc.bad .tc-state { color: var(--err); }
-.tc-body { padding: 2px 8px 4px; border-top: 1px solid var(--line); }
+.tc-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  border-top: 1px solid transparent;
+  transition: grid-template-rows var(--base) var(--ease), opacity var(--fast) ease, border-color var(--fast) ease;
+}
+.tc-body.open { grid-template-rows: 1fr; opacity: 1; border-top-color: var(--line); }
+.tc-body-inner { min-height: 0; overflow: hidden; padding: 0 8px; }
+.tc-body.open .tc-body-inner { padding-bottom: 4px; }
+/* One turn's tool calls, in one row. It shimmers while the work runs and folds
+   itself away as the reply lands, so a transcript reads question, what it did,
+   answer, instead of a stack of cards wedged between the two. A trace with a
+   failure in it stays open, because that is the one the reader has to see. */
+.tc-trace {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r2);
+  background: var(--surface-2);
+}
+.tc-trace.bad { border-color: color-mix(in srgb, var(--err) 40%, var(--line)); }
+.trace-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  background: none;
+  border: 0;
+  color: var(--fg-2);
+  font: inherit;
+  font-size: calc(11px * var(--ui, 1));
+  text-align: left;
+  cursor: pointer;
+}
+.trace-head:hover { background: var(--hover); }
+.trace-head > svg:first-child { flex: 0 0 auto; color: var(--accent-hi); }
+.trace-head > svg:last-child {
+  flex: 0 0 auto;
+  color: var(--fg-4);
+  transform: rotate(-90deg);
+  transition: transform var(--fast) var(--ease);
+}
+.tc-trace[data-open="true"] .trace-head > svg:last-child { transform: none; }
+.trace-title { color: var(--fg); white-space: nowrap; }
+.tc-trace.bad .trace-title { color: var(--err); }
+.trace-count {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--pill);
+  background: var(--panel);
+  color: var(--fg-4);
+  font: 500 calc(9.5px * var(--ui, 1)) var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.trace-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows var(--enter) var(--ease), opacity var(--fast) ease;
+}
+.trace-body.open { grid-template-rows: 1fr; opacity: 1; }
+.trace-list { display: flex; flex-direction: column; gap: 4px; min-height: 0; overflow: hidden; padding: 0 5px 5px; }
+/* A turn that reaches for a dozen tools would otherwise push the answer off
+   the screen behind it. Open, the steps get a bounded box of their own to
+   scroll in; closed, the fold still needs overflow hidden to clip at 0fr. */
+.trace-body.open .trace-list { max-height: calc(300px * var(--ui, 1)); overflow-y: auto; }
+.trace-list > * { flex: 0 0 auto; }
+
 .tc-block { padding-top: 5px; }
 .tc-label { color: var(--fg-4); font-size: calc(10px * var(--ui, 1)); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 3px; }
 .tc-body .md-code { max-height: 220px; overflow: auto; margin: 0; }
@@ -2004,7 +2205,7 @@ dialog::backdrop { background: var(--scrim); }
 @keyframes ifc-caret { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .msg.assistant.streaming .md::after { animation: none; } }
 .tier.usage { font-family: var(--mono); }
-.attach-row { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; padding-bottom: 4px; }
+.attach-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; flex: 0 0 auto; padding: 6px 6px 0; }
 .attach-chip[aria-pressed="false"] { opacity: 0.45; text-decoration: line-through; }
 .chat-row > .icon-btn[aria-pressed="true"] {
   color: var(--measure);
@@ -2015,53 +2216,121 @@ dialog::backdrop { background: var(--scrim); }
 
 /* Evidence reads like a model trace, not another chat bubble. The square ids
    are stable citation anchors; the labels remain secondary and truncate. */
+/* Evidence reads as a short index of what the answer was read off, not as a
+   strip of chips: the panel is 380px wide and a turn over a curtain wall
+   cites two dozen labels that differ only in their last segment. Rows are
+   full width, folded by their shared stem, and the count carries the weight. */
 .evidence-rail {
   align-self: stretch;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 7px;
-  padding: 7px 0 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 0 2px;
   border-top: 1px solid var(--line);
 }
+.evidence-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.evidence-head > svg { flex: 0 0 auto; color: var(--accent-hi); }
 .evidence-title {
-  display: flex;
-  align-items: center;
-  gap: 5px;
   color: var(--fg-3);
   font-size: calc(10px * var(--ui, 1));
   text-transform: uppercase;
   letter-spacing: 0.05em;
   white-space: nowrap;
 }
-.evidence-title svg { color: var(--accent-hi); }
-.evidence-list { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 3px; }
-.evidence-chip {
-  display: inline-flex;
+.evidence-total {
+  color: var(--fg-4);
+  font: 500 calc(9.5px * var(--ui, 1)) var(--mono);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.evidence-head .btn { flex: 0 0 auto; }
+.evidence-list { display: flex; flex-direction: column; gap: 2px; }
+.evidence-group { display: flex; flex-direction: column; }
+.evidence-row, .evidence-member, .evidence-more {
+  display: flex;
   align-items: center;
+  gap: 7px;
+  width: 100%;
   min-width: 0;
-  max-width: 210px;
-  height: calc(24px * var(--ui, 1));
-  padding: 0;
-  border: 1px solid var(--line-hi);
+  padding: 4px 7px;
+  border: 1px solid transparent;
   border-radius: var(--r1);
-  background: var(--sunken);
+  background: var(--hover);
   color: var(--fg-2);
   font: inherit;
+  font-size: calc(11px * var(--ui, 1));
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--fast) ease, border-color var(--fast) ease, color var(--fast) ease;
 }
-.evidence-chip:hover { border-color: var(--accent-line); color: var(--fg); }
-.evidence-id {
-  align-self: stretch;
-  display: grid;
-  place-items: center;
-  min-width: 30px;
+.evidence-row:hover, .evidence-member:hover, .evidence-more:hover {
+  background: var(--active);
+  border-color: var(--accent-line);
+  color: var(--fg);
+}
+.evidence-row > svg { flex: 0 0 auto; color: var(--fg-4); }
+.evidence-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.evidence-count {
+  flex: 0 0 auto;
+  min-width: 22px;
   padding: 0 5px;
-  border-right: 1px solid var(--accent-line);
+  border-radius: var(--pill);
   background: var(--accent-soft);
   color: var(--accent-hi);
+  font: 500 calc(9.5px * var(--ui, 1))/1.6 var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+/* The caret is the disclosure and the row is the selection, so the caret
+   needs a target big enough to aim at without widening the row. */
+.evidence-caret {
+  flex: 0 0 auto;
+  box-sizing: content-box;
+  padding: 4px;
+  margin: -4px -3px -4px 0;
+  color: var(--fg-4);
+  transform: rotate(-90deg);
+  transition: transform var(--fast) var(--ease);
+}
+.evidence-caret:hover { color: var(--fg); }
+.evidence-row[aria-expanded="true"] .evidence-caret { transform: none; }
+.evidence-fold {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--enter) var(--ease);
+}
+.evidence-fold.open { grid-template-rows: 1fr; }
+.evidence-members {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+  overflow: hidden;
+  padding-left: 17px;
+}
+.evidence-members > * { margin-top: 2px; }
+.evidence-member { background: transparent; border-color: var(--line); }
+.evidence-id {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: var(--r1);
+  background: var(--accent-soft);
+  color: var(--accent-hi);
+  font: 500 calc(9.5px * var(--ui, 1))/1.7 var(--mono);
+}
+.evidence-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-3);
   font-family: var(--mono);
   font-size: calc(10px * var(--ui, 1));
 }
-.evidence-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 7px; font-size: calc(10.5px * var(--ui, 1)); }
+.evidence-more { justify-content: center; background: transparent; color: var(--fg-4); }
+.evidence-more svg { transform: rotate(0deg); }
+
 .view-transaction, .issue-proposal {
   align-self: stretch;
   display: flex;
@@ -2079,13 +2348,60 @@ dialog::backdrop { background: var(--scrim); }
 .issue-kicker { color: var(--measure); font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.05em; }
 .issue-title { color: var(--fg); font-weight: 550; }
 @media (max-width: 720px) {
-  .evidence-rail { grid-template-columns: 1fr; }
+  /* The header wraps rather than squeezing the count out of the row. */
+  .evidence-head { flex-wrap: wrap; }
   .issue-proposal { align-items: flex-start; flex-wrap: wrap; }
 }
 
-.chat-row { display: flex; gap: 6px; flex: 0 0 auto; align-items: flex-end; }
-.chat-row textarea { flex: 1 1 auto; height: calc(34px * var(--ui, 1)); max-height: 120px; resize: none; line-height: 1.45; overflow-y: auto; }
+.ai-composer {
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--line-hi);
+  border-radius: var(--r3);
+  background: var(--sunken);
+  transition: border-color var(--fast) ease, box-shadow var(--fast) ease;
+}
+.ai-composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.chat-row { display: flex; gap: 4px; flex: 0 0 auto; align-items: flex-end; padding: 5px; }
+.chat-row textarea {
+  flex: 1 1 auto;
+  height: calc(34px * var(--ui, 1));
+  max-height: 120px;
+  resize: none;
+  overflow-y: auto;
+  padding: 7px 5px 5px;
+  border: 0;
+  background: transparent;
+  line-height: 1.45;
+}
+.chat-row textarea:focus { border-color: transparent; box-shadow: none; }
 .chat-row .send { width: calc(34px * var(--ui, 1)); height: calc(34px * var(--ui, 1)); padding: 0; flex: 0 0 auto; }
+.send-icons,
+.send-icon { display: grid; place-items: center; }
+.send-icon { grid-area: 1 / 1; transition: opacity var(--fast) ease, transform var(--fast) var(--ease); }
+.send-icon-stop { opacity: 0; transform: scale(0.8); }
+.send[data-state="stop"] .send-icon-send { opacity: 0; transform: scale(0.8); }
+.send[data-state="stop"] .send-icon-stop { opacity: 1; transform: none; }
+.ai-compose-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 20px;
+  padding: 0 8px 5px;
+}
+.ai-compose-foot .status-line { min-width: 0; min-height: 0; }
+/* The keys are worth saying once, while the composer has the caret, and not
+   for the rest of the session. Fading rather than hiding keeps the foot the
+   same height either way, so nothing under the transcript moves. */
+.ai-shortcut {
+  color: var(--fg-4);
+  font: calc(9px * var(--ui, 1))/1.25 var(--mono);
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity var(--fast) ease;
+}
+.ai-composer:focus-within .ai-shortcut { opacity: 1; }
 
 /* Inference indicator: three dots, no spinner, no layout shift. It says what
    the turn is doing and how long it has been at it, because a local model can
@@ -2102,7 +2418,11 @@ dialog::backdrop { background: var(--scrim); }
 
 .row.between { justify-content: space-between; align-items: center; }
 .icon-btn.ghost { opacity: 0; transition: opacity var(--fast) ease; }
-.msg:hover .icon-btn.ghost, .out-wrap:hover .icon-btn.ghost { opacity: 0.7; }
+.msg:hover .icon-btn.ghost,
+.msg:focus-within .icon-btn.ghost,
+.out-wrap:hover .icon-btn.ghost,
+.out-wrap:focus-within .icon-btn.ghost,
+.md-code:focus-within .icon-btn.ghost { opacity: 0.7; }
 .icon-btn.ghost:hover { opacity: 1; }
 .msg.assistant { position: relative; padding-right: 26px; }
 .msg.assistant .icon-btn { position: absolute; top: 3px; right: 3px; }
@@ -2150,6 +2470,37 @@ dialog::backdrop { background: var(--scrim); }
   font-size: calc(11px * var(--ui, 1));
 }
 .chip:hover { background: var(--hover); color: var(--fg); border-color: var(--fg-4); }
+.ai-prompts { display: grid; gap: 5px; }
+.ai-prompt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: auto;
+  min-height: calc(34px * var(--ui, 1));
+  padding: 6px 8px;
+  border-color: var(--line);
+  border-radius: var(--r2);
+  text-align: left;
+  line-height: 1.35;
+  white-space: normal;
+  /* No travel on hover either: these are wide rows, and a row that slides out
+     from under the cursor reads as the panel dodging the click. */
+  transition: color var(--fast) ease, background var(--fast) ease, border-color var(--fast) ease;
+}
+.ai-prompt > svg { flex: 0 0 auto; color: var(--accent-hi); }
+.ai-prompt .grow { min-width: 0; }
+@media (hover: none) {
+  .msg .icon-btn.ghost,
+  .out-wrap .icon-btn.ghost,
+  .md-code .icon-btn.ghost { opacity: 0.7; }
+}
+
+@container (max-width: 340px) {
+  .ai-shortcut { display: none; }
+  .ai-meta { gap: 3px 7px; }
+  .ai-modes button { min-width: calc(46px * var(--ui, 1)); padding-inline: 6px; }
+}
 
 /* Summary pane */
 .kv { display: grid; grid-template-columns: 1fr auto; gap: 1px 12px; align-items: baseline; }
@@ -2225,7 +2576,7 @@ table.grid td {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-table.grid tr:hover td { background: var(--hover); color: var(--fg); cursor: pointer; }
+table.grid tr:hover td { background: var(--hover); color: var(--fg); }
 table.grid tr.sel td { background: var(--accent-soft); color: var(--fg); }
 table.grid td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
@@ -2500,8 +2851,7 @@ table.grid td.num { font-family: var(--mono); font-variant-numeric: tabular-nums
   overflow-x: auto;
   flex: 0 0 auto;
 }
-.plug-tab-wrap { display: inline-flex; align-items: center; border-radius: var(--r2); }
-.plug-tab-wrap:hover { background: var(--hover); }
+.plug-tabs { display: flex; align-items: center; gap: 3px; min-width: 0; }
 .plug-tab {
   display: inline-flex;
   align-items: center;
@@ -2515,8 +2865,8 @@ table.grid td.num { font-family: var(--mono); font-variant-numeric: tabular-nums
   font-size: calc(11.5px * var(--ui, 1));
   white-space: nowrap;
 }
-.plug-tab.active { color: var(--accent-hi); }
-.plug-tab-wrap:has(.plug-tab.active) { background: var(--accent-soft); }
+.plug-tab:hover { background: var(--hover); color: var(--fg); }
+.plug-tab.active { background: var(--accent-soft); color: var(--accent-hi); }
 .plug-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
 .plug-host { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
 .plug-workspace { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
@@ -2526,12 +2876,20 @@ table.grid td.num { font-family: var(--mono); font-variant-numeric: tabular-nums
   position: fixed;
   inset: 0;
   z-index: 940;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  margin: 0;
+  border: 0;
   display: grid;
   place-items: center;
   padding: max(18px, 4vh) max(18px, 4vw);
+  /* No backdrop-filter: the scrim above already hides the model, and blurring
+     a full-screen WebGL canvas costs a GPU pass on every frame it draws. */
   background: var(--scrim-strong);
-  backdrop-filter: blur(10px);
 }
+.plug-expanded::backdrop { background: transparent; }
 .plug-expanded.hidden { display: none; }
 .plug-expanded-card {
   width: min(1760px, 96vw);
@@ -3124,8 +3482,26 @@ body.plugin-expanded-open { overflow: hidden; }
 .plug-change .was { text-decoration: line-through; opacity: 0.75; }
 .plug-change .now { color: var(--ok); }
 .plug-seg { align-self: flex-start; flex: 0 0 auto; }
-table.grid th.sortable { cursor: pointer; user-select: none; }
+table.grid th.sortable { padding: 0; user-select: none; }
 table.grid th.sortable:hover { color: var(--fg); }
+table.grid .grid-sort,
+table.grid .grid-row-action {
+  width: 100%;
+  padding: 5px 8px;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+table.grid .grid-sort::after { display: inline-block; width: 1em; margin-left: 4px; color: var(--accent-hi); }
+table.grid th[aria-sort="ascending"] .grid-sort::after { content: "↑"; }
+table.grid th[aria-sort="descending"] .grid-sort::after { content: "↓"; }
+table.grid .grid-row-action { margin: -3px -8px; padding: 3px 8px; }
 table.grid tr.pick td { cursor: pointer; }
 table.grid tr.err td { color: var(--err); }
 table.grid tr.warn td { color: var(--warn); }
@@ -3266,6 +3642,17 @@ table.grid tr.warn td { color: var(--warn); }
     animation-duration: 0.001ms !important;
     transition-duration: 0.001ms !important;
   }
+  .t-dots i { animation: none !important; opacity: 0.65; }
+  .ai-enter { animation: none !important; }
+  .ai-modes::before,
+  .seg-pill,
+  .send-icon,
+  .trace-body,
+  .tc-body { transition: none !important; }
+  /* The exit keyframes end at opacity 0 and hold there, so zeroing their
+     duration is not enough: the node has to stay visible until it is taken. */
+  .pop.closing,
+  .toast.closing { animation: none !important; }
 }
 
 /* Section Workspace uses the language of a compact drafting station. The
@@ -3405,10 +3792,11 @@ table.grid tr.warn td { color: var(--warn); }
   display: flex;
   gap: 2px;
   padding: 2px;
-  border: 1px solid color-mix(in srgb, var(--line-hi) 74%, transparent);
+  border: 1px solid var(--line-hi);
   border-radius: var(--r2);
-  background: color-mix(in srgb, var(--panel) 88%, transparent);
-  backdrop-filter: blur(8px);
+  /* Opaque, not frosted: a backdrop-filter over the drawing canvas pulls this
+     strip into its own buffer and softens its own glyphs with it. */
+  background: var(--panel);
 }
 .sw-drawing-tools .icon-btn { background: transparent; }
 .sw-drawing-tools .icon-btn:hover { background: var(--hover); }
@@ -3480,11 +3868,10 @@ table.grid tr.warn td { color: var(--warn); }
   bottom: 8px;
   overflow: hidden;
   padding: 5px 7px;
-  border: 1px solid color-mix(in srgb, var(--line-hi) 75%, transparent);
+  border: 1px solid var(--line-hi);
   border-radius: var(--r1);
   color: var(--fg-2);
-  background: color-mix(in srgb, var(--panel) 88%, transparent);
-  backdrop-filter: blur(8px);
+  background: var(--panel);
   font: 500 calc(10px * var(--ui))/1.2 var(--mono);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4700,7 +5087,7 @@ table.grid tr.warn td { color: var(--warn); }
 .sheet-markup-arrow { marker-end: none; stroke-dasharray: none; }
 .sheet-markup-rect { fill: none; stroke: #e0483c; stroke-width: 3; vector-effect: non-scaling-stroke; }
 .sheet-markup-cloud { fill: rgb(224 72 60 / 0.10); stroke: #e0483c; stroke-width: 3; stroke-dasharray: 12 7; vector-effect: non-scaling-stroke; }
-.sheet-markup-text { fill: #e0483c; font: 600 18px var(--sans); paint-order: stroke; stroke: #fff; stroke-width: 4px; }
+.sheet-markup-text { fill: #e0483c; font: 600 18px var(--font); paint-order: stroke; stroke: #fff; stroke-width: 4px; }
 
 /* ---- Field mode ----------------------------------------------------------- */
 /* Everything in the chrome is sized off --ui, so one variable makes every
@@ -4724,26 +5111,6 @@ table.grid tr.warn td { color: var(--warn); }
 :root.touch-mode .resizer.top { height: 16px; width: auto; }
 /* A hover-only reveal is unreachable without a pointer. */
 :root.touch-mode .view-cell > .icon-btn { opacity: 1; }
-
-/* ---- Task launcher on the empty state ------------------------------------- */
-.dz-tasks { display: grid; gap: 6px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 14px; width: 100%; }
-@media (max-width: 620px) { .dz-tasks { grid-template-columns: minmax(0, 1fr); } }
-.dz-task {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 9px 11px;
-  border: 1px solid var(--line);
-  border-radius: var(--r2);
-  background: var(--panel);
-  color: var(--fg-2);
-  text-align: left;
-}
-.dz-task:hover { border-color: var(--accent-line); background: var(--hover); color: var(--fg); }
-.dz-task svg { flex: 0 0 auto; color: var(--accent); }
-.dz-task .grow { display: grid; gap: 1px; min-width: 0; }
-.dz-task b { color: var(--fg); font-size: calc(11.5px * var(--ui, 1)); font-weight: 550; }
-.dz-task small { color: var(--fg-4); font-size: calc(9.5px * var(--ui, 1)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---- Presentation --------------------------------------------------------- */
 .slide-list { display: grid; gap: 3px; }
@@ -4831,3 +5198,53 @@ table.grid tr.warn td { color: var(--warn); }
 .cloud-band { display: flex; align-items: center; gap: 7px; font-size: calc(10.5px * var(--ui, 1)); color: var(--fg-3); }
 .cloud-band b { font-family: var(--mono); color: var(--fg); font-variant-numeric: tabular-nums; }
 .cloud-swatch { width: 12px; height: 12px; border-radius: 3px; flex: 0 0 auto; box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.2); }
+
+/* ---- Your data ------------------------------------------------------------ */
+/* Privacy is this viewer's first claim, and a claim nobody can check is a
+   slogan. Every row names a store by the name the browser or the operating
+   system uses for it, says how much is in it, and deletes exactly that. */
+.privacy { display: flex; flex-direction: column; gap: 10px; }
+.privacy-list { display: flex; flex-direction: column; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--r2); overflow: hidden; }
+.privacy-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--panel);
+}
+/* The one value here that would matter to somebody else reads differently. */
+.privacy-row.sensitive { border-left: 2px solid var(--measure); padding-left: 10px; }
+.privacy-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1 1 auto; }
+.privacy-label { display: flex; align-items: center; gap: 7px; color: var(--fg); font-weight: 550; }
+.privacy-tag {
+  padding: 0 6px;
+  border: 1px solid var(--measure-line, color-mix(in srgb, var(--measure) 45%, transparent));
+  border-radius: var(--pill);
+  background: color-mix(in srgb, var(--measure) 14%, transparent);
+  color: var(--measure);
+  font: 500 calc(9px * var(--ui, 1))/1.7 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.privacy-where, .privacy-path {
+  color: var(--fg-3);
+  font: 500 calc(10px * var(--ui, 1))/1.5 var(--mono);
+  word-break: break-all;
+}
+.privacy-path { padding: 2px 0; border: 0; background: none; color: var(--fg-2); }
+.privacy-main .note { margin: 0; }
+.privacy-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; }
+.privacy-size {
+  color: var(--fg-4);
+  font: 500 calc(10px * var(--ui, 1)) var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.privacy-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.privacy-foot .note { margin: 0; min-width: 200px; }
+.btn.danger { border-color: color-mix(in srgb, var(--err) 45%, var(--line)); color: var(--err); }
+.btn.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--err) 14%, transparent); border-color: var(--err); }
+@media (max-width: 720px) {
+  .privacy-row { flex-direction: column; gap: 6px; }
+  .privacy-actions { justify-content: flex-start; }
+}

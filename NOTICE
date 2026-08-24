@@ -8,6 +8,8 @@ licenses, none of which are bundled as source in this repository:
 
 - three (MIT), three-mesh-bvh (MIT), and fflate (MIT): npm
   dependencies.
+- PDF.js / pdfjs-dist (Apache-2.0): used as an unmodified npm dependency for
+  drawing-sheet import and rendering.
 - web-ifc (MPL-2.0): used as an unmodified npm dependency.
 - Pyodide (MPL-2.0): an optional runtime download loaded as a separate artifact
   when browser Python features are used; never bundled into the viewer build.

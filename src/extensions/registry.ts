@@ -10,14 +10,15 @@
 // download verified against the hash the index named. A package whose bytes
 // do not match its entry never reaches the installer.
 import { EXTENSION_PERMISSIONS, type ExtensionPermission } from "../sdk/contributions.js";
+import { isExtensionId, isExtensionVersion } from "./manifest.js";
 
 export const REGISTRY_URL_KEY = "ifcviewx.registry.url";
 export const REGISTRY_FORMAT = "ifcviewx.registry";
 const INDEX_LIMIT = 1024 * 1024;
 const PACKAGE_LIMIT = 5 * 1024 * 1024;
-const ENTRY_ID = /^[a-z][a-z0-9-]*$/;
 const ENTRY_HASH = /^[0-9a-f]{64}$/i;
-const ENTRY_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+
+const validEntryId = (value: unknown): value is string => isExtensionId(value, true);
 
 export interface RegistryEntry {
   id: string;
@@ -141,10 +142,10 @@ export function parseRegistry(text: string): RegistryIndex {
     const entry = raw as RegistryEntry;
     // An entry with no hash cannot be pinned, so it is dropped rather than
     // offered: an unpinned download is exactly what this format exists to stop.
-    if (typeof entry.id !== "string" || !ENTRY_ID.test(entry.id) ||
+    if (!validEntryId(entry.id) ||
       typeof entry.url !== "string" || !entry.url.trim()) continue;
     if (typeof entry.sha256 !== "string" || !ENTRY_HASH.test(entry.sha256)) continue;
-    if (typeof entry.version !== "string" || !ENTRY_VERSION.test(entry.version)) continue;
+    if (!isExtensionVersion(entry.version)) continue;
     if (!Number.isSafeInteger(entry.size) || entry.size <= 0 || entry.size > PACKAGE_LIMIT) continue;
     if (!Array.isArray(entry.permissions) ||
       !entry.permissions.every((permission) => EXTENSION_PERMISSIONS.includes(permission as ExtensionPermission))) continue;
@@ -231,8 +232,8 @@ export async function fetchPackage(
 }
 
 function assertPackagePin(entry: RegistryEntry): void {
-  if (typeof entry.id !== "string" || !ENTRY_ID.test(entry.id) ||
-    typeof entry.version !== "string" || !ENTRY_VERSION.test(entry.version)) {
+  if (!validEntryId(entry.id) ||
+    !isExtensionVersion(entry.version)) {
     throw new Error("The registry package has an invalid id or version binding");
   }
   if (typeof entry.url !== "string" || !entry.url.trim()) throw new Error("The registry package URL is missing");

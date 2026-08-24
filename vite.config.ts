@@ -15,7 +15,10 @@ const base = process.env.VITE_BASE ?? "/ifc-viewx/";
 // bundle.
 const { version } = createRequire(import.meta.url)("./package.json") as { version: string };
 
-/** Stamp every emitted chunk into the service worker's atomic offline cache. */
+/** Keep the install-time cache small enough to remain reliable on mobile storage. */
+export const OFFLINE_SHELL_BUDGET_BYTES = 2 * 1024 * 1024;
+
+/** List emitted files so the worker can recognise, but not eagerly fetch, lazy assets. */
 async function listOutputFiles(directory: string, relative = ""): Promise<string[]> {
   const entries = await readdir(resolve(directory, relative), { withFileTypes: true });
   const files: string[] = [];
@@ -27,7 +30,40 @@ async function listOutputFiles(directory: string, relative = ""): Promise<string
   return files;
 }
 
-/** Write a complete, content-versioned worker after every build artifact exists. */
+function attribute(tag: string, name: string): string | null {
+  const match = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i").exec(tag);
+  return match?.[1] ?? match?.[2] ?? null;
+}
+
+/**
+ * Find only the resources needed to boot the viewer. Vite writes the entry,
+ * its static imports and its stylesheet into index.html; everything else is
+ * a lazy feature, worker or heavyweight runtime and belongs in the on-demand
+ * cache instead.
+ */
+export function shellFiles(files: readonly string[], indexHtml: string): string[] {
+  const selected = new Set<string>();
+  if (files.includes("index.html")) selected.add("index.html");
+
+  for (const match of indexHtml.matchAll(/<(script|link)\b[^>]*>/gi)) {
+    const kind = match[1]?.toLowerCase();
+    const tag = match[0];
+    const reference = kind === "script"
+      ? attribute(tag, "src")
+      : attribute(tag, "rel")?.toLowerCase().split(/\s+/).some((rel) => rel === "stylesheet" || rel === "modulepreload")
+        ? attribute(tag, "href")
+        : null;
+    if (!reference || /^(?:data:|https?:|\/\/)/i.test(reference)) continue;
+
+    const pathname = new URL(reference, "https://ifcviewx.invalid/").pathname;
+    const file = files.find((candidate) => pathname === `/${candidate}` || pathname.endsWith(`/${candidate}`));
+    if (file) selected.add(file);
+  }
+
+  return [...selected].sort();
+}
+
+/** Write a content-versioned worker after every build artifact exists. */
 export async function writeOfflineWorker(directory: string): Promise<void> {
   const template = await readFile(new URL("./public/sw.js", import.meta.url), "utf8");
   const files = (await listOutputFiles(directory))
@@ -36,15 +72,28 @@ export async function writeOfflineWorker(directory: string): Promise<void> {
   const hash = createHash("sha256");
   hash.update(version);
   hash.update(template);
+  const contents = new Map<string, Buffer>();
   for (const file of files) {
+    const content = await readFile(resolve(directory, file));
+    contents.set(file, content);
     hash.update(file);
-    hash.update(await readFile(resolve(directory, file)));
+    hash.update(content);
   }
   const digest = hash.digest("hex").slice(0, 12);
-  const precache = files.map((file) => `./${file}`);
+  const shell = shellFiles(files, contents.get("index.html")?.toString("utf8") ?? "");
+  const shellBytes = shell.reduce((total, file) => total + (contents.get(file)?.byteLength ?? 0), 0);
+  if (shellBytes > OFFLINE_SHELL_BUDGET_BYTES) {
+    throw new Error(
+      `Offline shell is ${(shellBytes / 1024 / 1024).toFixed(2)} MiB; `
+      + `the ${(OFFLINE_SHELL_BUDGET_BYTES / 1024 / 1024).toFixed(0)} MiB budget prevents eager-cache regressions.`,
+    );
+  }
+  const precache = shell.map((file) => `./${file}`);
+  const runtime = files.filter((file) => !shell.includes(file)).map((file) => `./${file}`);
   const worker = template
     .replace('"__IFCVIEWX_VERSION__"', JSON.stringify(`${version}-${digest}`))
-    .replace("__IFCVIEWX_PRECACHE__", JSON.stringify(precache, null, 2));
+    .replace("__IFCVIEWX_PRECACHE__", JSON.stringify(precache, null, 2))
+    .replace("__IFCVIEWX_RUNTIME__", JSON.stringify(runtime, null, 2));
   await writeFile(resolve(directory, "sw.js"), worker, "utf8");
 }
 

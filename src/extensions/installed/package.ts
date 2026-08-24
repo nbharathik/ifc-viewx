@@ -110,6 +110,11 @@ function validateEntryHtml(html: string): void {
   if (forbidden) throw new ExtensionPackageError(`<${forbidden.tagName.toLowerCase()}> is not allowed in a sandbox entry`, "entry-html");
   const external = document.querySelector("script[src], link[href]");
   if (external) throw new ExtensionPackageError("The first package format requires self-contained inline scripts and styles", "external-asset");
+  const navigation = document.querySelector("a[ping], area[ping]") ?? [...document.querySelectorAll("a[href], area[href]")].find((element) => {
+    const href = element.getAttribute("href")?.trim() ?? "";
+    return !href.startsWith("#");
+  });
+  if (navigation) throw new ExtensionPackageError("Navigation links are not allowed in a sandbox entry", "navigation");
   for (const element of document.querySelectorAll<HTMLElement>("img[src], audio[src], video[src], source[src]")) {
     const value = element.getAttribute("src")?.trim() ?? "";
     if (value && !value.startsWith("data:") && !value.startsWith("blob:")) {

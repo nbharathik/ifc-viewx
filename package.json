@@ -4,6 +4,9 @@
   "version": "0.1.4",
   "type": "module",
   "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "description": "Fast browser-based IFC viewer with Python (IfcOpenShell/Pyodide) editing, LLM assistance, and MCP bridge",
   "scripts": {
     "dev": "vite",

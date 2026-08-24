@@ -281,6 +281,17 @@ export class ViewerControls {
     const euler = new THREE.Euler(0, 0, 0, 'YXZ');
     euler.setFromQuaternion(cam.quaternion);
     euler.z = 0;
+    // Keep the control that launched flight as a narrow fallback. Some
+    // browsers can leave focus on the clicked ribbon button even after the
+    // canvas asks for it; that button has no use for WASD once flight is on.
+    // Other controls (and anything inside a modal) still keep their keys.
+    const focused = this.doc.activeElement;
+    const launchControl =
+      focused !== null &&
+      focused.closest('button, [role="button"]') === focused &&
+      !focused.closest('dialog, [aria-modal="true"]')
+        ? focused
+        : null;
 
     const fly: NonNullable<ViewerControls['fly']> = {
       keys: new Set<string>(),
@@ -294,9 +305,17 @@ export class ViewerControls {
       plan: this.scene.isPlanView(),
       onKeyDown: (e) => {
         if (e.ctrlKey || e.metaKey || e.altKey) return;
-        // UI controls and modal surfaces own their keys even during flight.
-        if (this.uiOwnsKeyboard(e)) return;
         const key = e.key.toLowerCase();
+        // UI controls and modal surfaces own their keys even during flight.
+        // The one exception is the control that just launched flight: focus
+        // handoff is best-effort across engines, but movement must not be.
+        if (this.uiOwnsKeyboard(e) && (e.target !== launchControl || this.modalOwnsKeyboard())) return;
+        if (key === 'escape') {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          this.stopFly();
+          return;
+        }
         if (key === 'shift') fly.keys.add('shift');
         if (!ViewerControls.FLY_KEYS.has(key)) return;
         fly.keys.add(key);
@@ -793,13 +812,16 @@ export class ViewerControls {
 
   /** App controls and top-layer dialogs take precedence over viewport keys. */
   private uiOwnsKeyboard(e: KeyboardEvent): boolean {
-    if (this.doc.querySelector('dialog[open]')) return true;
-    const customModal = [...this.doc.querySelectorAll('[aria-modal="true"]')].some(
-      (modal) => !modal.closest('.hidden, [hidden], [aria-hidden="true"]'),
-    );
-    if (customModal) return true;
+    if (this.modalOwnsKeyboard()) return true;
     const target = e.target as Element | null;
     return Boolean(target?.closest?.(UI_KEYBOARD_TARGET));
+  }
+
+  private modalOwnsKeyboard(): boolean {
+    if (this.doc.querySelector('dialog[open]')) return true;
+    return [...this.doc.querySelectorAll('[aria-modal="true"]')].some(
+      (modal) => !modal.closest('.hidden, [hidden], [aria-hidden="true"]'),
+    );
   }
 
   private onResize(): void {

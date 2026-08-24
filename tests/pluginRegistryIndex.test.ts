@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { zipSync } from "fflate";
 
 import {
   fetchPackage,
@@ -10,9 +11,14 @@ import {
   REGISTRY_FORMAT,
   type RegistryEntry,
 } from "../src/extensions/registry.js";
+import { InstalledExtensionManager } from "../src/extensions/installed/manager.js";
+import { MemoryExtensionStore } from "../src/extensions/installed/store.js";
+import type { ExtensionManifest } from "../src/sdk/contributions.js";
+
+const EXTENSION_ID = "org.acme.tools";
 
 const entry = (patch: Partial<RegistryEntry> = {}): RegistryEntry => ({
-  id: "acme-tools",
+  id: EXTENSION_ID,
   name: "Acme Tools",
   version: "1.2.0",
   description: "A plugin",
@@ -27,12 +33,69 @@ const entry = (patch: Partial<RegistryEntry> = {}): RegistryEntry => ({
 const index = (packages: RegistryEntry[]) =>
   JSON.stringify({ format: REGISTRY_FORMAT, version: 1, name: "Acme registry", updatedAt: "2026-08-01", packages });
 
+const base64Url = (bytes: Uint8Array): string => {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+};
+
+function extensionArchive(): Uint8Array {
+  const manifest: ExtensionManifest = {
+    manifestVersion: 2,
+    id: EXTENSION_ID,
+    name: "Acme Tools",
+    version: "1.2.0",
+    sdk: ">=2.0.0 <3",
+    description: "A signed registry package fixture.",
+    publisher: { name: "Acme" },
+    runtime: { kind: "sandboxed", entry: "panel.html" },
+    activationEvents: ["onPanel:main"],
+    permissions: ["model.structure.read"],
+    contributes: { panels: [{ id: "main", title: "Acme Tools" }] },
+    catalog: {
+      tagline: "Registry fixture",
+      about: "Proves signed package resolution and installation.",
+      icon: "blocks",
+      category: "Tests",
+      keywords: "signed registry",
+      does: ["Install from a signed registry"],
+    },
+  };
+  const encode = (value: string): Uint8Array => new TextEncoder().encode(value);
+  return zipSync({
+    "extension.json": encode(JSON.stringify(manifest)),
+    "panel.html": encode("<!doctype html><html><body><script>IFCViewX.ready()</script></body></html>"),
+  });
+}
+
 describe("parsing an index", () => {
   it("reads a well-formed index", () => {
     const parsed = parseRegistry(index([entry()]));
     expect(parsed.name).toBe("Acme registry");
     expect(parsed.packages).toHaveLength(1);
-    expect(parsed.packages[0].id).toBe("acme-tools");
+    expect(parsed.packages[0].id).toBe(EXTENSION_ID);
+  });
+
+  it("accepts only well-formed reverse-domain package ids", () => {
+    const parsed = parseRegistry(index([
+      entry(),
+      entry({ id: "acme-tools" }),
+      entry({ id: "org..acme" }),
+      entry({ id: "org.acme." }),
+      entry({ id: "Org.acme" }),
+    ]));
+    expect(parsed.packages.map((item) => item.id)).toEqual([EXTENSION_ID]);
+  });
+
+  it("uses the manifest SemVer rules for registry version pins", () => {
+    const parsed = parseRegistry(index([
+      entry({ version: "1.2.0+build.7" }),
+      entry({ id: "org.acme.leading-zero", version: "01.2.0" }),
+      entry({ id: "org.acme.bad-prerelease", version: "1.2.0-beta.01" }),
+    ]));
+    expect(parsed.packages.map(({ id, version }) => [id, version])).toEqual([
+      [EXTENSION_ID, "1.2.0+build.7"],
+    ]);
   });
 
   it("refuses a file that is not a registry", () => {
@@ -44,10 +107,10 @@ describe("parsing an index", () => {
   it("drops an entry with no usable hash rather than offering an unpinned download", () => {
     const parsed = parseRegistry(index([
       entry(),
-      entry({ id: "no-hash", sha256: "" as string }),
-      entry({ id: "short-hash", sha256: "abc" }),
+      entry({ id: "org.acme.no-hash", sha256: "" as string }),
+      entry({ id: "org.acme.short-hash", sha256: "abc" }),
     ]));
-    expect(parsed.packages.map((item) => item.id)).toEqual(["acme-tools"]);
+    expect(parsed.packages.map((item) => item.id)).toEqual([EXTENSION_ID]);
   });
 
   it("normalizes a hash written in upper case", () => {
@@ -57,19 +120,19 @@ describe("parsing an index", () => {
 
   it("fills in what an entry left out", () => {
     const parsed = parseRegistry(index([entry({ name: undefined as never, publisher: undefined as never })]));
-    expect(parsed.packages[0].name).toBe("acme-tools");
+    expect(parsed.packages[0].name).toBe(EXTENSION_ID);
     expect(parsed.packages[0].publisher).toBe("unknown");
   });
 
   it("drops entries with unknown permissions before the UI can render them", () => {
-    const parsed = parseRegistry(index([entry(), entry({ id: "bad", permissions: ["root.everything" as never] })]));
-    expect(parsed.packages.map((item) => item.id)).toEqual(["acme-tools"]);
+    const parsed = parseRegistry(index([entry(), entry({ id: "org.acme.bad", permissions: ["root.everything" as never] })]));
+    expect(parsed.packages.map((item) => item.id)).toEqual([EXTENSION_ID]);
   });
 
   it("deduplicates one id and version and caps pathological catalogs", () => {
     expect(parseRegistry(index([entry(), entry()])).packages).toHaveLength(1);
     expect(() => parseRegistry(index(Array.from({ length: 1_001 }, (_, number) =>
-      entry({ id: `package-${number}`, version: "1.0.0" })))))
+      entry({ id: `org.acme.package-${number}`, version: "1.0.0" })))))
       .toThrow(/too many/i);
   });
 });
@@ -84,12 +147,48 @@ describe("trust", () => {
     const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
     const bytes = new TextEncoder().encode(index([entry()]));
     const signature = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, bytes));
-    let binary = "";
-    for (const byte of signature) binary += String.fromCharCode(byte);
-    const encoded = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
     const publicKey = await crypto.subtle.exportKey("jwk", pair.publicKey);
-    expect(await verifyIndex(bytes, encoded, publicKey)).toBe("signed");
-    expect(await verifyIndex(new Uint8Array([...bytes, 0x20]), encoded, publicKey)).toBe("invalid");
+    expect(await verifyIndex(bytes, base64Url(signature), publicKey)).toBe("signed");
+    expect(await verifyIndex(new Uint8Array([...bytes, 0x20]), base64Url(signature), publicKey)).toBe("invalid");
+  });
+
+  it("resolves and installs a reverse-domain package from a verified signed entry", async () => {
+    const packageBytes = extensionArchive();
+    const registryEntry = entry({
+      sha256: await sha256Hex(packageBytes),
+      size: packageBytes.byteLength,
+    });
+    const registryBytes = new TextEncoder().encode(index([registryEntry]));
+    const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+    const signature = new Uint8Array(await crypto.subtle.sign(
+      { name: "ECDSA", hash: "SHA-256" },
+      pair.privateKey,
+      registryBytes,
+    ));
+    const publicKey = await crypto.subtle.exportKey("jwk", pair.publicKey);
+    expect(await verifyIndex(registryBytes, base64Url(signature), publicKey)).toBe("signed");
+
+    const [resolved] = parseRegistry(new TextDecoder().decode(registryBytes)).packages;
+    expect(resolved.id).toBe(EXTENSION_ID);
+    const requests: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      requests.push(String(input));
+      return new Response(packageBytes.slice().buffer as ArrayBuffer);
+    }) as typeof fetch;
+    try {
+      const downloaded = await fetchPackage(resolved, "https://registry.example.org/plugins/index.json");
+      const manager = new InstalledExtensionManager(new MemoryExtensionStore());
+      await manager.install(await manager.prepare(downloaded));
+      expect(manager.current(EXTENSION_ID)).toMatchObject({
+        version: registryEntry.version,
+        hash: registryEntry.sha256,
+        manifest: { id: EXTENSION_ID, runtime: { kind: "sandboxed" } },
+      });
+      expect(requests).toEqual(["https://registry.example.org/plugins/packages/acme-1.2.0.zip"]);
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 });
 
@@ -143,9 +242,11 @@ describe("downloading a package", () => {
     const fetcher = vi.fn();
     globalThis.fetch = fetcher as typeof fetch;
     try {
+      await expect(fetchPackage(entry({ id: "acme-tools" }), "https://example.org/index.json")).rejects.toThrow(/id or version binding/i);
       await expect(fetchPackage(entry({ size: Number.NaN }), "https://example.org/index.json")).rejects.toThrow(/size binding/i);
       await expect(fetchPackage(entry({ sha256: "not-a-hash" }), "https://example.org/index.json")).rejects.toThrow(/SHA-256 binding/i);
       await expect(fetchPackage(entry({ version: "latest" }), "https://example.org/index.json")).rejects.toThrow(/version binding/i);
+      await expect(fetchPackage(entry({ version: "01.2.0" }), "https://example.org/index.json")).rejects.toThrow(/version binding/i);
       expect(fetcher).not.toHaveBeenCalled();
     } finally {
       globalThis.fetch = original;

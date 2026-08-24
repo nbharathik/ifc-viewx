@@ -106,16 +106,23 @@ interface Running {
 }
 
 const OPEN_KEY = "ifcviewx.plugins.open";
+let hostSequence = 0;
 
 export class PluginHost {
+  private readonly domId = `plugin-host-${++hostSequence}`;
   private readonly container: HTMLElement;
   private readonly workspace: HTMLElement;
   private readonly strip: HTMLElement;
+  private readonly tabList: HTMLElement;
   private readonly body: HTMLElement;
   private readonly blank: HTMLElement;
-  private readonly expanded: HTMLElement;
+  private readonly expanded: HTMLDialogElement;
   private readonly expandedBody: HTMLElement;
   private readonly expandedTitle: HTMLElement;
+  private readonly expandedClose: HTMLButtonElement;
+  private readonly backgroundRoot: HTMLElement;
+  private backgroundWasInert = false;
+  private restoreFocus: HTMLElement | null = null;
   private expandButton: HTMLButtonElement | null = null;
   private readonly running = new Map<string, Running>();
   private readonly propertyIndex: PropertyIndex;
@@ -147,39 +154,60 @@ export class PluginHost {
     this.container = container;
     this.results = new ExtensionResultStore(sharedResults);
     this.propertyIndex = new PropertyIndex(viewer, () => actions.modelKey());
-    this.strip = h("div", { class: "plug-strip" });
+    this.tabList = h("div", {
+      class: "plug-tabs",
+      role: "tablist",
+      "aria-label": "Open plugins",
+      "aria-orientation": "horizontal",
+    });
+    this.tabList.addEventListener("keydown", (event) => this.moveTabFocus(event));
+    this.strip = h("div", { class: "plug-strip" }, [this.tabList]);
     this.body = h("div", { class: "plug-body" });
     this.blank = h("div", { class: "page plug-page scroll" });
     this.workspace = h("div", { class: "plug-workspace" }, [this.strip, this.body, this.blank]);
     this.expandedBody = h("div", { class: "plug-expanded-body" });
-    this.expandedTitle = h("div", { class: "plug-expanded-title" });
-    this.expanded = h("div", {
+    this.expandedTitle = h("div", { class: "plug-expanded-title", id: `${this.domId}-expanded-title` });
+    this.expandedClose = iconButton(
+      "minimize",
+      "Return plugin to the inspector",
+      () => this.setExpanded(false),
+      "icon-btn",
+    );
+    this.expanded = h("dialog", {
+      id: `${this.domId}-expanded`,
       class: "plug-expanded hidden",
-      role: "dialog",
       "aria-modal": "true",
-      "aria-label": "Expanded plugin workspace",
+      "aria-labelledby": this.expandedTitle.id,
     }, [
       h("div", { class: "plug-expanded-card" }, [
         h("div", { class: "plug-expanded-head" }, [
           this.expandedTitle,
           h("span", { class: "grow" }),
           h("kbd", { class: "plug-expanded-key", text: "Esc" }),
-          iconButton("minimize", "Return plugin to the inspector  Esc", () => this.setExpanded(false), "icon-btn"),
+          this.expandedClose,
         ]),
         this.expandedBody,
       ]),
-    ]);
+    ]) as HTMLDialogElement;
     this.expanded.addEventListener("click", (event) => {
       if (event.target === this.expanded) this.setExpanded(false);
     });
-    document.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape" || this.expanded.classList.contains("hidden")) return;
+    this.expanded.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      this.setExpanded(false);
+    });
+    this.expanded.addEventListener("keydown", (event) => {
+      if (event.key === "Tab") return this.trapExpandedFocus(event);
+      if (event.key !== "Escape") return;
       // A plugin can open its own modal on top; that dialog owns Escape first.
-      if (this.expanded.querySelector("dialog[open]") ?? document.querySelector("dialog[open]")) return;
+      const dialog = (event.target as Element | null)?.closest<HTMLDialogElement>("dialog[open]");
+      if (dialog && dialog !== this.expanded) return;
+      event.preventDefault();
       this.setExpanded(false);
     });
     container.appendChild(this.workspace);
     document.body.appendChild(this.expanded);
+    this.backgroundRoot = container.closest<HTMLElement>("#app") ?? container;
     this.buildCatalog();
     this.paint();
   }
@@ -300,7 +328,13 @@ export class PluginHost {
       else live.pending = payload;
       return;
     }
-    const host = h("div", { class: "plug-host" });
+    const host = h("div", {
+      class: "plug-host",
+      id: this.panelId(id),
+      role: "tabpanel",
+      tabindex: "0",
+      "aria-labelledby": this.tabId(id),
+    });
     const scoped = createHostContext(manifest, this.deps());
     const extensionScope = manifest.extension
       ? new ExtensionScope(manifest.id, this.contributions)
@@ -347,6 +381,7 @@ export class PluginHost {
   close(id: string): void {
     const entry = this.running.get(id);
     if (!entry) return;
+    const focused = this.container.ownerDocument.activeElement;
     entry.release();
     try {
       entry.instance?.dispose?.();
@@ -359,6 +394,13 @@ export class PluginHost {
     this.select(this.active);
     this.persist();
     if (this.running.size === 0) this.setExpanded(false);
+    // Closing can originate inside the plugin through ctx.close(), not only
+    // through host chrome. If the close removed the focused node, leave a
+    // useful tab or catalog action focused instead of dropping to <body>.
+    if (focused instanceof HTMLElement && !focused.isConnected) {
+      if (this.active) this.focusTab(this.active);
+      else this.focusWorkspaceFallback();
+    }
   }
 
   contributionCount(owner?: string): number {
@@ -368,7 +410,11 @@ export class PluginHost {
   select(id: string): void {
     if (id && !this.running.has(id)) return;
     this.active = id;
-    for (const [key, entry] of this.running) entry.host.classList.toggle("hidden", key !== id);
+    for (const [key, entry] of this.running) {
+      const hidden = key !== id;
+      entry.host.classList.toggle("hidden", hidden);
+      entry.host.toggleAttribute("hidden", hidden);
+    }
     this.paint();
   }
 
@@ -386,12 +432,11 @@ export class PluginHost {
 
   /** Repaint what the service can offer; called after every connection probe. */
   refresh(): void {
-    if (this.running.size === 0) this.buildCatalog();
+    if (this.running.size === 0) this.paint();
     this.emit("service");
   }
 
   catalogChanged(): void {
-    if (this.running.size === 0) this.buildCatalog();
     this.paint();
   }
 
@@ -426,13 +471,24 @@ export class PluginHost {
   }
 
   private persist(): void {
-    localStorage.setItem(OPEN_KEY, JSON.stringify([...this.running.keys()]));
+    try {
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem(OPEN_KEY, JSON.stringify([...this.running.keys()]));
+      }
+    } catch (error) {
+      // A full or blocked storage area must not interrupt opening or closing a
+      // plugin. The live workspace remains authoritative for this session.
+      console.warn("Plugin workspace state could not be saved", error);
+    }
     this.actions.setPanelVisible(this.running.size > 0);
     this.actions.changed();
   }
 
   private paint(): void {
-    this.strip.replaceChildren();
+    const focused = this.container.ownerDocument.activeElement;
+    const focusWasInWorkspace = focused instanceof HTMLElement && this.workspace.contains(focused);
+    this.tabList.replaceChildren();
+    this.strip.replaceChildren(this.tabList);
     this.blank.classList.toggle("hidden", this.running.size > 0);
     this.strip.classList.toggle("hidden", this.running.size === 0);
     // An empty body still claims its share of the panel, which on a tall screen
@@ -442,29 +498,45 @@ export class PluginHost {
     for (const [id, entry] of this.running) {
       const tab = h("button", {
         class: `plug-tab${id === this.active ? " active" : ""}`,
+        id: this.tabId(id),
         type: "button",
+        role: "tab",
+        tabindex: id === this.active ? "0" : "-1",
+        "aria-selected": String(id === this.active),
+        "aria-controls": this.panelId(id),
+        "data-plugin-id": id,
         title: entry.manifest.tagline,
       }, [icon(entry.manifest.icon, 13), h("span", { text: entry.manifest.name })]);
       tab.addEventListener("click", () => this.select(id));
-      const shut = iconButton("x", `Close ${entry.manifest.name}`, () => this.close(id), "icon-btn sm");
-      this.strip.appendChild(h("span", { class: "plug-tab-wrap" }, [tab, shut]));
+      this.tabList.appendChild(tab);
     }
     const wide = !this.expanded.classList.contains("hidden");
     if (this.running.size > 0) {
+      const active = this.running.get(this.active);
       this.expandButton = iconButton(
         wide ? "minimize" : "maximize",
         wide ? "Return plugins to the inspector" : "Expand plugins to a wide workspace",
         () => this.setExpanded(!wide),
         "icon-btn sm",
       );
-      this.expandButton.setAttribute("aria-pressed", String(wide));
+      this.expandButton.setAttribute("aria-expanded", String(wide));
+      this.expandButton.setAttribute("aria-controls", this.expanded.id);
+      this.expandButton.setAttribute("aria-haspopup", "dialog");
       this.strip.append(
         h("span", { class: "grow" }),
+        iconButton("x", `Close ${active?.manifest.name ?? "plugin"}`, () => {
+          if (this.active) this.close(this.active);
+        }, "icon-btn sm"),
         this.expandButton,
         iconButton("blocks", "Browse plugins", () => this.browse(), "icon-btn sm"),
       );
     } else this.expandButton = null;
     this.paintExpandedTitle();
+    if (focusWasInWorkspace &&
+      (!focused.isConnected || focused.closest(".hidden, [hidden], [inert]"))) {
+      if (this.active) this.focusTab(this.active);
+      else this.focusWorkspaceFallback();
+    }
   }
 
   /** The wide workspace names the plugin it is showing, not itself. */
@@ -477,19 +549,113 @@ export class PluginHost {
         h("small", { text: manifest?.tagline ?? "" }),
       ]),
     );
-    this.expanded.setAttribute("aria-label", manifest ? `${manifest.name} workspace` : "Expanded plugin workspace");
   }
 
   private setExpanded(open: boolean): void {
     if (open && this.running.size === 0) return;
-    if (open === !this.expanded.classList.contains("hidden")) return;
-    this.expanded.classList.toggle("hidden", !open);
+    if (open === this.isExpanded()) return;
+    if (open) {
+      const active = document.activeElement;
+      this.restoreFocus = active instanceof HTMLElement && active !== document.body ? active : null;
+      this.expandedBody.appendChild(this.workspace);
+      this.backgroundWasInert = this.backgroundRoot.hasAttribute("inert");
+      this.backgroundRoot.toggleAttribute("inert", true);
+      this.expanded.classList.remove("hidden");
+      try {
+        this.expanded.showModal();
+      } catch {
+        // jsdom and older embedded webviews do not implement the top layer.
+        this.expanded.setAttribute("open", "");
+      }
+    } else {
+      if (this.expanded.open && typeof this.expanded.close === "function") this.expanded.close();
+      else this.expanded.removeAttribute("open");
+      this.expanded.classList.add("hidden");
+      this.container.appendChild(this.workspace);
+      this.backgroundRoot.toggleAttribute("inert", this.backgroundWasInert);
+    }
     document.body.classList.toggle("plugin-expanded-open", open);
-    if (open) this.expandedBody.appendChild(this.workspace);
-    else this.container.appendChild(this.workspace);
     this.paint();
-    // Focus follows the workspace, so closing never drops the caret on <body>.
-    if (open) this.expanded.querySelector<HTMLButtonElement>(".plug-expanded-head .icon-btn")?.focus();
-    else this.expandButton?.focus();
+    if (open) this.expandedClose.focus();
+    else {
+      // Repainting replaces the opener, so use it only while it is connected
+      // and otherwise focus the equivalent new control.
+      const target = this.restoreFocus?.isConnected
+        ? this.restoreFocus
+        : this.expandButton ?? this.container.querySelector<HTMLElement>('button, a[href], [tabindex]:not([tabindex="-1"])');
+      target?.focus();
+      this.restoreFocus = null;
+    }
+  }
+
+  private isExpanded(): boolean {
+    return this.expanded.open || !this.expanded.classList.contains("hidden");
+  }
+
+  private tabId(id: string): string {
+    return `${this.domId}-tab-${encodeURIComponent(id).replaceAll("%", "_")}`;
+  }
+
+  private panelId(id: string): string {
+    return `${this.domId}-panel-${encodeURIComponent(id).replaceAll("%", "_")}`;
+  }
+
+  private focusTab(id: string): void {
+    for (const tab of this.tabList.querySelectorAll<HTMLButtonElement>('[role="tab"]')) {
+      if (tab.dataset.pluginId === id) {
+        tab.focus();
+        return;
+      }
+    }
+  }
+
+  private moveTabFocus(event: KeyboardEvent): void {
+    const target = (event.target as Element | null)?.closest<HTMLButtonElement>('[role="tab"]');
+    if (!target || !this.tabList.contains(target)) return;
+    if (event.key === "Delete") {
+      event.preventDefault();
+      const id = target.dataset.pluginId;
+      if (!id) return;
+      this.close(id);
+      return;
+    }
+    const tabs = [...this.tabList.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+    const at = tabs.indexOf(target);
+    let next = -1;
+    if (event.key === "ArrowRight") next = (at + 1) % tabs.length;
+    else if (event.key === "ArrowLeft") next = (at - 1 + tabs.length) % tabs.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = tabs.length - 1;
+    if (next < 0) return;
+    event.preventDefault();
+    const id = tabs[next].dataset.pluginId;
+    if (!id) return;
+    this.select(id);
+  }
+
+  private trapExpandedFocus(event: KeyboardEvent): void {
+    const nested = (event.target as Element | null)?.closest<HTMLDialogElement>("dialog[open]");
+    if (nested && nested !== this.expanded) return;
+    const focusable = [...this.expanded.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )].filter((node) => !node.closest("[hidden], .hidden, [inert]") && node.getAttribute("aria-hidden") !== "true");
+    if (focusable.length === 0) {
+      event.preventDefault();
+      this.expanded.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !this.expanded.contains(document.activeElement))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !this.expanded.contains(document.activeElement))) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  private focusWorkspaceFallback(): void {
+    this.container.querySelector<HTMLElement>('button, a[href], [tabindex]:not([tabindex="-1"])')?.focus();
   }
 }

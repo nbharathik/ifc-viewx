@@ -30,6 +30,7 @@ import { FilterChip, FilterPanel, FilterStore } from "./ui/filters.js";
 import { clearDocket, docketChip, publishDocket, ResultsDock, type DocketRow } from "./ui/resultsDock.js";
 import { clearFindings } from "./ui/findings.js";
 import { FieldMode } from "./ui/fieldMode.js";
+import { PrivacyPanel } from "./ui/privacy.js";
 import { DrivePanel } from "./ui/drivePanel.js";
 import { buildPackage, carriesState, isPackageName, readPackage, PACKAGE_EXTENSION } from "./share/package.js";
 import type { ViewsPane } from "./ui/viewsPane.js";
@@ -281,7 +282,7 @@ function assistant(): AssistantPanel {
       onHistory: (anchor) => showChatHistory(anchor),
       onAttachmentChange: () => syncAttachment(),
       onViewAttachmentChange: () => syncAttachment(),
-      onEvidence: (reference) => openEvidence(reference),
+      onEvidence: (references, action) => openEvidence(references, action),
       onIssueProposal: (payload) => void acceptIssueProposal(payload),
       onDefinitionProposal: (payload) => void acceptDefinitionProposal(payload).catch(reportError),
       extensionTools: () => plugins.assistantToolContributions().map(({ owner, contribution }) => ({
@@ -1837,9 +1838,9 @@ function assistantTransport() {
     : browserProviderTransport(loadSettings());
 }
 
-function assistantSystem(messages: ChatMessage[], native: boolean): ChatMessage[] {
+function assistantSystem(messages: ChatMessage[], native: boolean, mode: "query" | "edit"): ChatMessage[] {
   const brief = buildModelBrief(viewer, fileName, schemaName);
-  return [{ role: "system", content: systemPrompt(brief, assistantMode(), native) }, ...messages];
+  return [{ role: "system", content: systemPrompt(brief, mode, native) }, ...messages];
 }
 
 assistantAgent = new AgentRuntime({
@@ -1932,25 +1933,36 @@ function newChat(): void {
   shell.selectTab("assistant");
 }
 
-function openEvidence(reference: EvidenceReference): void {
-  if (reference.resultId) {
-    activeAssistantResult = reference.resultId;
-    focusedAssistantRow = reference.row;
+/**
+ * Follow a citation back into the model. Selecting is all a click does: the
+ * camera holds still and the assistant stays on screen, because the reader is
+ * mid-conversation and being thrown into the Properties tab loses their place.
+ * Moving the camera is a separate, named request.
+ */
+function openEvidence(references: EvidenceReference[], action: "select" | "focus"): void {
+  const first = references[0];
+  if (!first) return;
+  if (first.resultId) {
+    activeAssistantResult = first.resultId;
+    focusedAssistantRow = first.row;
   }
-  const ids = reference.elementIds?.filter((id) => viewer.hasGeometry(id)) ?? [];
+  const ids = [...new Set(references.flatMap((reference) => reference.elementIds ?? []))]
+    .filter((id) => viewer.hasGeometry(id));
   if (ids.length) {
     viewer.selectMany(ids, "replace");
-    const box = viewer.boxAround(ids, 0.15);
-    if (box) viewer.fitToPoint([
-      (box.min[0] + box.max[0]) / 2,
-      (box.min[1] + box.max[1]) / 2,
-      (box.min[2] + box.max[2]) / 2,
-    ]);
-    shell.selectTab("properties");
-  } else if (reference.point) {
-    viewer.fitToPoint(reference.point);
+    if (action === "focus") {
+      const box = viewer.boxAround(ids, 0.15);
+      if (box) viewer.fitToPoint([
+        (box.min[0] + box.max[0]) / 2,
+        (box.min[1] + box.max[1]) / 2,
+        (box.min[2] + box.max[2]) / 2,
+      ]);
+    }
+  } else if (action === "focus" && first.point) {
+    viewer.fitToPoint(first.point);
   }
-  shell.log(`Opened evidence ${reference.id}: ${reference.label}`, "info", true);
+  const what = references.length === 1 ? `${first.id}: ${first.label}` : `${references.length} references`;
+  shell.log(`${action === "focus" ? "Zoomed to" : "Selected"} evidence ${what}`, "info", true);
 }
 
 async function acceptIssueProposal(payload: Record<string, unknown>): Promise<void> {
@@ -2473,7 +2485,31 @@ function showSettings(): void {
     : !isConfigured(llm)
       ? "Not configured yet."
       : `${provider.label} · ${llm.model}, ${isVerified(llm) ? "verified" : "not verified yet"}.`;
+  // Measured off the disk each time it is opened: these numbers are worth
+  // nothing if they are stale, and nobody opens Settings often enough for a
+  // background poll to pay for itself.
+  void privacyPanel().refresh();
   openDialog(settingsDialog);
+}
+
+let privacy: PrivacyPanel | null = null;
+
+/** The "Your data" block: what has been kept, and one button per thing. */
+function privacyPanel(): PrivacyPanel {
+  if (!privacy) {
+    privacy = new PrivacyPanel({
+      paths: () => service.storagePaths(),
+      reveal: (which) => service.revealFolder(which),
+      changed: () => {
+        // Deleting the key or the cache changes what the assistant header
+        // claims and what the dropzone offers to reopen.
+        refreshAssistantEngine();
+        void renderRecents();
+      },
+    });
+    $("privacy-panel").appendChild(privacy.root);
+  }
+  return privacy;
 }
 
 // ---------------------------------------------------------------------------
@@ -3070,6 +3106,10 @@ installedExtensions.onChange((change) => {
     plugins.close(change.id);
   }
   syncInstalledExtensions();
+  // Saved installed panels are not discoverable until initialize() has
+  // populated the runtime catalog. Restore only after that catalog sync;
+  // PluginHost.open() is idempotent if startup is signalled more than once.
+  if (change.kind === "initialized") plugins.restore();
   if (reload) void plugins.open(change.id, false, { type: "reload" });
 });
 
@@ -3105,7 +3145,6 @@ function syncPluginToggle(): void {
 }
 
 syncPluginToggle();
-plugins.restore();
 viewer.onModelLoaded(() => plugins.modelChanged());
 dock.setPropertyIndex(() => plugins.index());
 viewer.onModelLoaded(() => dock.resetColors());
@@ -3356,70 +3395,6 @@ attachInput.addEventListener("change", () => {
 });
 $("btn-open-first").addEventListener("click", () => fileInput.click());
 $("btn-sample").addEventListener("click", () => replaceOrConfirm(() => void openSample().catch(reportError)));
-
-/**
- * The task launcher. Twenty-odd tools is a discovery problem, and the empty
- * state is the one moment the app has the user's full attention. Each route
- * opens a file and lands in the tool that job starts in, rather than in the
- * default panel with the tools still to be found.
- */
-const TASKS: Array<{ label: string; detail: string; icon: string; open: () => void }> = [
-  {
-    label: "Review a model",
-    detail: "Structure, properties and saved views",
-    icon: "info",
-    open: () => {
-      shell.selectTab("views");
-      showPane("tree");
-    },
-  },
-  {
-    label: "Check requirements",
-    detail: "IDS specifications and the rule set",
-    icon: "clipboard",
-    open: () => shell.selectTab("ids"),
-  },
-  {
-    label: "Coordinate clashes",
-    detail: "Clash detection and the results dock",
-    icon: "alert",
-    open: () => {
-      void plugins.open("clash");
-      results.setOpen(true);
-    },
-  },
-  {
-    label: "Take off quantities",
-    detail: "Quantities, schedules and the report builder",
-    icon: "calculator",
-    open: () => void plugins.open("takeoff"),
-  },
-];
-
-const taskLauncher = h("div", { class: "dz-tasks" }, TASKS.map((task) => {
-  const button = h("button", { class: "dz-task", type: "button", title: task.detail }, [
-    icon(task.icon, 15),
-    h("span", { class: "grow" }, [
-      h("b", { text: task.label }),
-      h("small", { text: task.detail }),
-    ]),
-  ]);
-  // Nothing to review without a model, so the route opens one first and runs
-  // when the load lands.
-  button.addEventListener("click", () => {
-    if (hasModel()) return task.open();
-    pendingTask = task.open;
-    fileInput.click();
-  });
-  return button;
-}));
-let pendingTask: (() => void) | null = null;
-document.querySelector(".dz-card")?.insertBefore(taskLauncher, document.getElementById("recent"));
-viewer.onModelLoaded(() => {
-  const run = pendingTask;
-  pendingTask = null;
-  if (run) setTimeout(run, 0);
-});
 
 let dragDepth = 0;
 window.addEventListener("dragenter", (e) => {
