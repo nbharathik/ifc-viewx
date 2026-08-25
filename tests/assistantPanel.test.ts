@@ -307,15 +307,15 @@ describe("assistant panel workflow", () => {
     expect(members[0].querySelector(".evidence-detail")?.textContent).toBe("1 #10");
   });
 
-  it("asks for the camera only from the zoom control", () => {
+  it("isolates all evidence without using the unreliable multi-object locate action", () => {
     const { host, panel, callbacks } = buildPanel();
     const onEvidence = vi.fn();
     callbacks.onEvidence = onEvidence;
     panel.addEvidence([{ id: "E1", kind: "element", label: "Wall:Basic:1 #10", capabilityId: "c", elementIds: [1] }]);
 
-    host.querySelector<HTMLButtonElement>('[aria-label="Zoom to all of this evidence"]')!.click();
+    host.querySelector<HTMLButtonElement>('[aria-label="Isolate every element cited here"]')!.click();
 
-    expect(onEvidence).toHaveBeenCalledWith(expect.any(Array), "focus");
+    expect(onEvidence).toHaveBeenCalledWith(expect.any(Array), "isolate");
   });
 
   it("keeps a reference with no shared stem as its own row", () => {

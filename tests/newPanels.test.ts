@@ -12,10 +12,9 @@ import { mount as mountPresentation } from "../src/plugins/presentation/panel.js
 import { mount as mountReportBuilder } from "../src/plugins/report-builder/panel.js";
 import { mount as mountRuleStudio } from "../src/plugins/rule-studio/panel.js";
 import { mount as mountSheets } from "../src/plugins/sheets/panel.js";
-import { mount as mountSunStudy } from "../src/plugins/sun-study/panel.js";
 import { DrivePanel } from "../src/ui/drivePanel.js";
 import { ResultsDock, clearDocket, docketSets, publishDocket } from "../src/ui/resultsDock.js";
-import { ViewsPane } from "../src/ui/viewsPane.js";
+import { ComputedPane, ViewsPane } from "../src/ui/viewsPane.js";
 import { ComputedStore } from "../src/data/computed.js";
 import { ViewStore } from "../src/views/definition.js";
 import type { ExtensionContext } from "../src/sdk/index.js";
@@ -108,7 +107,6 @@ const PANELS: Array<[string, (host: HTMLElement, ctx: ExtensionContext) => unkno
   ["Rule Studio", mountRuleStudio],
   ["Report Builder", mountReportBuilder],
   ["Sheets", mountSheets],
-  ["Sun and Shadow", mountSunStudy],
   ["Point Cloud", mountPointCloud],
   ["Presentation", mountPresentation],
 ];
@@ -198,7 +196,7 @@ const memoryStorage = (): Storage => {
 };
 
 describe("the Views pane", () => {
-  it("builds both halves of the definitions layer and offers to save the current view", () => {
+  it("contains saved views without mixing computed properties into the panel", () => {
     const host = document.createElement("div");
     const index = { ready: () => false, all: () => [], propertyKeys: () => [], setComputed: vi.fn() } as unknown as PropertyIndex;
     new ViewsPane(
@@ -207,14 +205,25 @@ describe("the Views pane", () => {
       index,
       { colorRule: () => null, setColorRule: vi.fn(), selectors: () => new Map(), log: vi.fn() },
       new ViewStore(memoryStorage()),
-      new ComputedStore(memoryStorage()),
     );
     expect(host.textContent).toContain("Save this view");
     expect(host.textContent).toContain("No saved views yet");
-    const tabs = [...host.querySelectorAll("button")].filter((node) => node.textContent === "Properties");
-    expect(tabs).toHaveLength(1);
-    tabs[0].click();
+    expect(host.textContent).not.toContain("Computed properties");
+  });
+
+  it("mounts computed properties in their own panel", () => {
+    const host = document.createElement("div");
+    const index = { ready: () => false, all: () => [], propertyKeys: () => [], setComputed: vi.fn() } as unknown as PropertyIndex;
+    new ComputedPane(
+      host,
+      fakeViewer(),
+      index,
+      { log: vi.fn() },
+      new ComputedStore(memoryStorage()),
+    );
+    expect(host.textContent).toContain("Computed properties");
     expect(host.textContent).toContain("No computed properties");
+    expect(host.textContent).not.toContain("Save this view");
   });
 });
 

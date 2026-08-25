@@ -25,6 +25,15 @@ interface StagedCorrection {
   suggestion: string;
 }
 
+interface OverflowAction {
+  label: string;
+  icon: string;
+  run: () => void;
+  title?: string;
+  disabled?: boolean;
+  danger?: boolean;
+}
+
 const FACETS: Array<[IdsFacetKind, string]> = [
   ["entity", "Entity"], ["attribute", "Attribute"], ["property", "Property"],
   ["partOf", "Part of"], ["classification", "Classification"], ["material", "Material"],
@@ -87,6 +96,8 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   let bsddBusy = false;
   let bsddError = "";
   let bsddController: AbortController | null = null;
+  let validating = false;
+  let validationGeneration = 0;
   /** Set when a click moved the facet selection, so a stacked layout follows it. */
   let revealFacet = false;
   let edited = false;
@@ -96,6 +107,11 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   const root = page();
   root.classList.add("ids-studio");
   host.appendChild(root);
+
+  const setEdited = (value: boolean): void => {
+    edited = value;
+    root.classList.toggle("is-edited", value);
+  };
 
   const currentSpec = (): IdsSpecificationDraft => draft.specifications.find((item) => item.id === selectedSpec) ?? draft.specifications[0];
   const facetSelection = (): { facet: IdsFacetDraft; requirements: boolean } | null => {
@@ -108,13 +124,38 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   // Any edit to the draft outdates the last run, and marks the document as
   // worth confirming before it is thrown away.
   const invalidate = (): void => {
-    edited = true;
+    setEdited(true);
     results = [];
     report = null;
     staged = new Map();
   };
 
+  const overflowMenu = (label: string, actions: OverflowAction[], className = ""): HTMLElement => {
+    const menu = h("details", { class: `ids-menu${className ? ` ${className}` : ""}` });
+    const body = h("div", { class: "ids-menu-body" }, actions.map((action) => {
+      const item = h("button", {
+        type: "button",
+        title: action.title ?? action.label,
+        disabled: action.disabled,
+        class: action.danger ? "danger" : "",
+      }, [icon(action.icon, 13), h("span", { text: action.label })]);
+      item.addEventListener("click", () => {
+        menu.removeAttribute("open");
+        action.run();
+      });
+      return item;
+    }));
+    menu.append(
+      h("summary", { class: "btn sm" }, [h("span", { text: label }), icon("chevron", 12)]),
+      body,
+    );
+    return menu;
+  };
+
   const selectFacet = (id: string): void => {
+    bsddController?.abort();
+    bsddController = null;
+    bsddBusy = false;
     selectedFacet = id;
     bsddHits = [];
     revealFacet = true;
@@ -129,7 +170,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       selectedSpec = draft.specifications[0].id;
       selectedFacet = draft.specifications[0].requirements[0]?.id ?? draft.specifications[0].applicability[0]?.id ?? "";
       invalidate();
-      edited = false;
+      setEdited(false);
       // Land on Check: an opened IDS file is almost always about to be run.
       view = "validate";
       paint();
@@ -140,10 +181,16 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   };
 
   const exportIds = (): void => {
-    const xml = serializeIdsDocument(draft);
-    loadIds(xml, draft.fileName);
-    ctx.files.export("ids-studio.ids", draft.fileName.replace(/\.(xml|ids)$/i, "") + ".ids", xml, "application/xml");
-    ctx.feedback.toast("IDS 1.0 file exported", "success");
+    try {
+      const xml = serializeIdsDocument(draft);
+      loadIds(xml, draft.fileName);
+      ctx.files.export("ids-studio.ids", draft.fileName.replace(/\.(xml|ids)$/i, "") + ".ids", xml, "application/xml");
+      setEdited(false);
+      paint();
+      ctx.feedback.toast("IDS 1.0 file exported", "success");
+    } catch (error) {
+      ctx.feedback.toast(error instanceof Error ? error.message : String(error), "error");
+    }
   };
 
   const source = (): Viewer => ({
@@ -153,7 +200,10 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   }) as unknown as Viewer;
 
   const validate = async (): Promise<void> => {
+    if (validating) return;
     if (!ctx.session.model().loaded) return void ctx.feedback.toast("Open an IFC model before validating", "error");
+    validating = true;
+    const generation = ++validationGeneration;
     try {
       view = "validate";
       results = [];
@@ -161,13 +211,16 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       staged = new Map();
       paint();
       loadIds(serializeIdsDocument(draft), draft.fileName);
-      results = await runIds(
+      const nextResults = await runIds(
         source(),
         undefined,
-        (spec, index, total, done, of) => runProgress.set(done, Math.max(1, of), `${index + 1}/${total}  ${spec.name}`),
+        (spec, index, total, done, of) => {
+          if (generation === validationGeneration) runProgress.set(done, Math.max(1, of), `${index + 1}/${total}  ${spec.name}`);
+        },
       );
+      if (generation !== validationGeneration) return;
+      results = nextResults;
       report = lastIdsReport();
-      runProgress.hide();
       if (report) {
         ctx.results.create("ids-studio.results", report.specifications, {
           metadata: { summary: `${report.failedSpecifications} failing specification(s)` },
@@ -184,11 +237,12 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
           })),
         );
       }
-      paint();
       ctx.feedback.log(report?.failedSpecifications ? "IDS validation found failures" : "IDS validation passed", report?.failedSpecifications ? "error" : "success");
     } catch (error) {
+      if (generation === validationGeneration) ctx.feedback.toast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      validating = false;
       runProgress.hide();
-      ctx.feedback.toast(error instanceof Error ? error.message : String(error), "error");
       paint();
     }
   };
@@ -199,14 +253,16 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
     reason: failure.reason,
     suggestion: failure.suggestion ?? "Review this requirement",
   })));
+  const correctionKey = (correction: StagedCorrection): string =>
+    `${correction.specification}\u001f${correction.expressID}\u001f${correction.reason}`;
   const stage = (correction: StagedCorrection): void => {
-    const key = `${correction.specification}:${correction.expressID}`;
+    const key = correctionKey(correction);
     if (staged.has(key)) staged.delete(key);
     else staged.set(key, correction);
     paint();
   };
   const stageAll = (): void => {
-    staged = new Map(corrections().map((item) => [`${item.specification}:${item.expressID}`, item]));
+    staged = new Map(corrections().map((item) => [correctionKey(item), item]));
     paint();
   };
 
@@ -254,10 +310,14 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   /** Ids must stay unique even when two are made in the same millisecond. */
   const nextId = (prefix: string): string => `${prefix}-${Date.now()}-${++sequence}`;
 
-  const openSpecification = (spec: IdsSpecificationDraft): void => {
+  const selectSpecification = (spec: IdsSpecificationDraft): void => {
+    bsddController?.abort();
+    bsddController = null;
+    bsddBusy = false;
     selectedSpec = spec.id;
     selectedFacet = spec.requirements[0]?.id ?? spec.applicability[0]?.id ?? "";
-    invalidate();
+    bsddHits = [];
+    bsddError = "";
     paint();
   };
 
@@ -267,7 +327,8 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
     template.name = "New specification";
     template.identifier = `REQ-${String(draft.specifications.length + 1).padStart(3, "0")}`;
     draft.specifications.push(template);
-    openSpecification(template);
+    invalidate();
+    selectSpecification(template);
   };
 
   const duplicateSpecification = (spec: IdsSpecificationDraft): void => {
@@ -280,7 +341,8 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       requirements: spec.requirements.map(cloneFacet),
     };
     draft.specifications.splice(draft.specifications.indexOf(spec) + 1, 0, copy);
-    openSpecification(copy);
+    invalidate();
+    selectSpecification(copy);
   };
 
   const removeSpecification = (spec: IdsSpecificationDraft): void => {
@@ -290,7 +352,8 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
     const drop = (): void => {
       const at = draft.specifications.indexOf(spec);
       draft.specifications.splice(at, 1);
-      openSpecification(draft.specifications[Math.min(at, draft.specifications.length - 1)]);
+      invalidate();
+      selectSpecification(draft.specifications[Math.min(at, draft.specifications.length - 1)]);
     };
     if (!spec.requirements.length && !spec.applicability.length) return drop();
     confirmAction(
@@ -307,12 +370,12 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       selectedSpec = draft.specifications[0].id;
       selectedFacet = draft.specifications[0].requirements[0].id;
       invalidate();
-      edited = false;
+      setEdited(false);
       view = "author";
       paint();
     };
     if (!edited) return reset();
-    confirmAction("Start a new IDS file?", `“${draft.title}” has unsaved edits. Export the .ids file first if you want to keep it.`, "Discard and start over", reset);
+    confirmAction("Start a new IDS file?", `"${draft.title}" has unsaved edits. Export the .ids file first if you want to keep it.`, "Discard and start over", reset);
   };
 
   const addFacet = (kind: IdsFacetKind, requirements: boolean): void => {
@@ -357,17 +420,33 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
 
   const runBsddSearch = async (kind: BsddKind | "All"): Promise<void> => {
     bsddController?.abort();
-    bsddController = new AbortController();
+    bsddController = null;
+    const query = bsddQuery.trim();
+    if (query.length < 2) {
+      bsddHits = [];
+      bsddBusy = false;
+      bsddError = "Enter at least two characters.";
+      paint();
+      return;
+    }
+    const runController = new AbortController();
+    bsddController = runController;
     bsddBusy = true;
     bsddError = "";
     paint();
     try {
-      bsddHits = await searchBsdd(bsddQuery, kind, bsddController.signal);
+      const hits = await searchBsdd(query, kind, runController.signal);
+      if (bsddController === runController) bsddHits = hits;
     } catch (error) {
-      if (!(error instanceof DOMException && error.name === "AbortError")) bsddError = error instanceof Error ? error.message : String(error);
+      if (bsddController === runController && !(error instanceof DOMException && error.name === "AbortError")) {
+        bsddError = error instanceof Error ? error.message : String(error);
+      }
     } finally {
-      bsddBusy = false;
-      paint();
+      if (bsddController === runController) {
+        bsddController = null;
+        bsddBusy = false;
+        paint();
+      }
     }
   };
 
@@ -587,7 +666,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       spec.id,
       (id) => {
         const next = draft.specifications.find((item) => item.id === id);
-        if (next) openSpecification(next);
+        if (next) selectSpecification(next);
       },
     );
     picker.classList.add("ids-spec-picker");
@@ -596,8 +675,10 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       h("div", { class: "ids-spec-bar" }, [
         picker,
         iconButton("plus", "Add a specification", addSpecification, "icon-btn sm"),
-        iconButton("copy", "Duplicate this specification", () => duplicateSpecification(spec), "icon-btn sm"),
-        iconButton("trash", "Remove this specification", () => removeSpecification(spec), "icon-btn sm"),
+        overflowMenu("Specification", [
+          { label: "Duplicate", icon: "copy", title: "Duplicate this specification", run: () => duplicateSpecification(spec) },
+          { label: "Remove", icon: "trash", title: "Remove this specification", run: () => removeSpecification(spec), danger: true },
+        ], "ids-spec-menu"),
       ]),
       h("div", { class: "ids-meta-grid" }, [
         field("Name", textInput(spec.name, (value) => { spec.name = value; invalidate(); })),
@@ -640,7 +721,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
           reason: failure.reason,
           suggestion: failure.suggestion ?? "Review this requirement",
         };
-        const key = `${correction.specification}:${correction.expressID}`;
+        const key = correctionKey(correction);
         const row = h("div", { class: "ids-failure" }, [
           h("button", { class: "ids-failure-pick", type: "button" }, [
             h("span", { class: "mono", text: `#${failure.id}` }),
@@ -670,14 +751,18 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       });
       return h("section", { class: "ids-result-card" }, [toggle, body]);
     });
+    const check = button(validating ? "Checking model" : results.length ? "Check again" : "Check the open model", () => void validate(), "accent");
+    check.disabled = validating;
     return h("div", { class: "ids-page" }, [
       h("div", { class: "ids-actionbar" }, [
-        button(results.length ? "Check again" : "Check the open model", () => void validate(), "accent"),
+        check,
         ...(results.length ? [
-          button("Export results", exportResults),
-          button("Raise BCF issues", () => void createBcf()),
-          button("Stage all fixes", stageAll),
-          button("Save as baseline", saveBaseline),
+          overflowMenu("Result actions", [
+            { label: "Export results", icon: "download", run: exportResults },
+            { label: "Raise BCF issues", icon: "flag", run: () => void createBcf() },
+            { label: "Stage all fixes", icon: "check", run: stageAll },
+            { label: "Save as baseline", icon: "bookmark", run: saveBaseline },
+          ], "ids-result-menu"),
         ] : []),
       ]),
       runProgress.root,
@@ -722,12 +807,14 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
         h("span", { class: "grow", text: `The baseline was saved from ${baseline.modelName}, not the open model. These deltas compare two different files.` }),
       ])] : []),
       ...(baseline.idsTitle !== draft.title ? [h("div", { class: "ids-staged-bar" }, [
-        h("span", { class: "grow", text: `The baseline used the IDS file “${baseline.idsTitle}”. Specifications renamed since then compare as missing.` }),
+        h("span", { class: "grow", text: `The baseline used the IDS file "${baseline.idsTitle}". Specifications renamed since then compare as missing.` }),
       ])] : []),
       h("div", { class: "note", text: `Baseline ${baseline.modelName}, saved ${new Date(baseline.savedAt).toLocaleString()}, against ${ctx.session.model().name || "the open model"}${report ? "" : " (not checked yet)"}.` }),
       h("div", { class: "ids-actionbar" }, [
         button("Check this revision", () => void validate(), "accent"),
-        button("Replace baseline", saveBaseline),
+        overflowMenu("Baseline", [
+          { label: "Replace baseline", icon: "refresh", run: saveBaseline, disabled: !report },
+        ]),
       ]),
       stats([["Improved", String(improved), "ok"], ["Regressed", String(regressed), "err"], ["Unchanged", String(Math.max(0, baseline.report.specifications.length - improved - regressed))]]),
       h("div", { class: "ids-compare-head" }, [h("span", { class: "grow", text: "Specification" }), h("span", { text: "Before" }), h("span", { text: "Delta" }), h("span", { text: "Now" })]),
@@ -739,20 +826,28 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
     const navigation = h("div", { class: "seg ids-nav", role: "tablist" }, ([
       ["validate", "Check"], ["author", "Edit"], ["compare", "Compare"],
     ] as Array<[StudioView, string]>).map(([id, label]) => {
-      const tab = h("button", { type: "button", role: "tab", "aria-pressed": String(view === id), "aria-selected": String(view === id), text: label });
+      const tab = h("button", { type: "button", role: "tab", "aria-pressed": String(view === id), "aria-selected": String(view === id), tabindex: view === id ? "0" : "-1", text: label });
       tab.addEventListener("click", () => { view = id; paint(); });
       return tab;
     }));
-    const title = textInput(draft.title, (value) => { draft.title = value; invalidate(); }, "IDS title", "ids-title-input");
+    const title = textInput(draft.title, (value) => { draft.title = value; setEdited(true); }, "IDS title", "ids-title-input");
+    title.setAttribute("aria-label", "IDS document title");
+    const open = button("Open IDS", () => void openIds(), "accent");
+    open.disabled = validating;
     root.replaceChildren(
       h("header", { class: "plug-head ids-head" }, [
         h("div", { class: "grow" }, [
           title,
-          h("p", { text: `buildingSMART IDS 1.0 · ${draft.specifications.length} specification${draft.specifications.length === 1 ? "" : "s"}` }),
+          h("p", {}, [
+            h("span", { text: `buildingSMART IDS 1.0 / ${draft.specifications.length} specification${draft.specifications.length === 1 ? "" : "s"}` }),
+            h("span", { class: "ids-edited", text: "Unsaved changes" }),
+          ]),
         ]),
-        button("Open", () => void openIds()),
-        button("New", newDocument),
-        button("Export .ids", exportIds),
+        open,
+        overflowMenu("File", [
+          { label: "New IDS", icon: "file", run: newDocument },
+          { label: "Export .ids", icon: "download", run: exportIds },
+        ], "ids-file-menu"),
       ]),
       navigation,
       view === "author" ? editView() : view === "validate" ? checkView() : compareView(),
@@ -766,8 +861,21 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   }
 
   paint();
+  const offModel = ctx.events?.on?.("model", () => {
+    validationGeneration += 1;
+    results = [];
+    report = null;
+    staged = new Map();
+    runProgress.hide();
+    view = "validate";
+    paint();
+  }) ?? (() => undefined);
   return {
-    dispose: () => bsddController?.abort(),
+    dispose: () => {
+      validationGeneration += 1;
+      bsddController?.abort();
+      offModel();
+    },
     receive: (payload) => {
       if (payload && typeof payload === "object" && (payload as { type?: string }).type === "validate") void validate();
     },

@@ -17,12 +17,12 @@ export interface ShellActions {
 export type TabId =
   | "properties"
   | "views"
+  | "computed"
   | "filters"
   | "geo"
   | "ids"
   | "bcf"
   | "assistant"
-  | "schedule"
   | "plugins"
   | "activity";
 export type PaneId = "tree" | "types" | "organize" | "summary";
@@ -42,10 +42,10 @@ const PANES: Array<[string, PaneId]> = [
 const TABS: Array<{ id: TabId; label: string; icon: string; key: string; handoff?: boolean }> = [
   { id: "properties", label: "Properties", icon: "info", key: "P" },
   { id: "views", label: "Views", icon: "bookmark", key: "W" },
+  { id: "computed", label: "Computed", icon: "sliders", key: "" },
   { id: "filters", label: "Filters", icon: "funnel", key: "R" },
   { id: "ids", label: "IDS", icon: "clipboard", key: "" },
   { id: "bcf", label: "Issues", icon: "flag", key: "" },
-  { id: "schedule", label: "Schedule", icon: "table", key: "" },
   { id: "assistant", label: "Assistant", icon: "sparkle", key: "C" },
   { id: "plugins", label: "Plugins", icon: "blocks", key: "" },
   { id: "activity", label: "Activity", icon: "activity", key: "L" },
@@ -134,6 +134,11 @@ export class Shell {
     if (!document.getElementById("tab-views")) {
       $("tab-filters").insertAdjacentElement("beforebegin", h("div", {
         class: "panel-body hidden", id: "tab-views", role: "tabpanel", tabindex: "0", "aria-labelledby": "rail-views",
+      }));
+    }
+    if (!document.getElementById("tab-computed")) {
+      $("tab-filters").insertAdjacentElement("beforebegin", h("div", {
+        class: "panel-body hidden", id: "tab-computed", role: "tabpanel", tabindex: "0", "aria-labelledby": "rail-computed",
       }));
     }
     if (!document.getElementById("tab-ids")) {

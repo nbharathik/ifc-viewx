@@ -1565,7 +1565,7 @@ export class Dock {
       ["Random", { kind: "random" }],
       ["Material", { kind: "material" }],
     ];
-    const seg = h("div", { class: "seg" });
+    const seg = h("div", { class: "seg color-modes" });
     for (const [label, rule] of modes) {
       const button = h("button", { type: "button", text: label });
       button.setAttribute("aria-pressed", String(this.colorRule.kind === rule.kind));

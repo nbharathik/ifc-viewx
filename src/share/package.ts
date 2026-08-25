@@ -67,7 +67,6 @@ export const STATE_PLUGIN_KEYS = new Set([
   "ifcviewx.plug.clash.activeDefinition",
   "ifcviewx.plug.clash.decisions",
   "ifcviewx.plug.clash.ignoreRules",
-  "ifcviewx.plug.sun-study.settings",
 ]);
 
 export const carriesState = (key: string): boolean =>

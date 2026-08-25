@@ -33,7 +33,7 @@ import { FieldMode } from "./ui/fieldMode.js";
 import { PrivacyPanel } from "./ui/privacy.js";
 import { DrivePanel } from "./ui/drivePanel.js";
 import { buildPackage, carriesState, isPackageName, readPackage, PACKAGE_EXTENSION } from "./share/package.js";
-import type { ViewsPane } from "./ui/viewsPane.js";
+import type { ComputedPane, ViewsPane } from "./ui/viewsPane.js";
 import { ViewStore, type ViewDefinition } from "./views/definition.js";
 import { ComputedStore, type ComputedProperty } from "./data/computed.js";
 import type { BcfPanel } from "./ui/bcf.js";
@@ -44,7 +44,7 @@ import { Connection } from "./ui/connection.js";
 import { CommandRegistry } from "./ui/commands.js";
 import { Ribbon, type RibbonControl, type RibbonTab } from "./ui/ribbon.js";
 import type { SchedulePanel } from "./ui/schedules.js";
-import { buildMenu, busyRow, CommandPalette, confirmAction, copyText, h, icon, lightDismiss, menuKeys, openLayer, promptForm, safeStorageGet, safeStorageSet, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
+import { buildMenu, busyRow, CommandPalette, confirmAction, copyText, h, icon, iconButton, lightDismiss, menuKeys, openLayer, promptForm, safeStorageGet, safeStorageSet, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
 import { ageLabel, clearChats, readChats, saveChat, type Conversation } from "./llm/chatStore.js";
 import { sampleModel, SAMPLE_NAME } from "./ui/sample.js";
 import { download, elementsOf } from "./sdk/data.js";
@@ -259,8 +259,11 @@ const ifc = new IfcEngine(`${import.meta.env.BASE_URL}wasm/`);
 // no work for panels nobody opened.
 let assistantUi: AssistantPanel | null = null;
 let scheduleUi: SchedulePanel | null = null;
+let scheduleDialog: HTMLDialogElement | null = null;
+let scheduleMount: HTMLElement | null = null;
 let filterUi: FilterPanel | null = null;
 let viewsUi: ViewsPane | null = null;
+let computedUi: ComputedPane | null = null;
 let bcfUi: BcfPanel | null = null;
 let geoUi: GeoContextPanel | null = null;
 let idsUi: unknown = null;
@@ -356,11 +359,41 @@ function toolAvailability(): ToolAvailability {
   };
 }
 
-/** The schedule panel only exists in Local Studio, so it loads on demand. */
+function ensureScheduleWorkspace(): HTMLElement {
+  if (scheduleDialog && scheduleMount) return scheduleMount;
+  scheduleMount = h("div", { class: "plug-expanded-body schedule-workspace-body" });
+  const close = iconButton("x", "Close element schedules", () => scheduleDialog?.close(), "icon-btn");
+  scheduleDialog = h("dialog", {
+    class: "plug-expanded schedule-workspace hidden",
+    "aria-label": "Element schedules",
+  }, [
+    h("div", { class: "plug-expanded-card" }, [
+      h("div", { class: "plug-expanded-head" }, [
+        h("div", { class: "plug-expanded-title" }, [
+          icon("table", 16),
+          h("span", { class: "grow" }, [
+            h("b", { text: "Element schedules" }),
+            h("small", { text: "Opened from Plugins" }),
+          ]),
+        ]),
+        h("span", { class: "grow" }),
+        h("kbd", { class: "plug-expanded-key", text: "Esc" }),
+        close,
+      ]),
+      scheduleMount,
+    ]),
+  ]) as HTMLDialogElement;
+  lightDismiss(scheduleDialog);
+  scheduleDialog.addEventListener("close", () => scheduleDialog?.classList.add("hidden"));
+  document.body.appendChild(scheduleDialog);
+  return scheduleMount;
+}
+
+/** Element schedules are an occasional Plugins workspace, loaded on demand. */
 async function schedulePanel(): Promise<SchedulePanel> {
   if (!scheduleUi) {
     const { SchedulePanel } = await import("./ui/schedules.js");
-    scheduleUi = new SchedulePanel($("tab-schedule"), {
+    scheduleUi = new SchedulePanel(ensureScheduleWorkspace(), {
       types: () => Object.entries(elementCounts(viewer)).sort((a, b) => b[1] - a[1]).map(([name]) => name),
       run: (type, properties) => ifc.schedule(type, properties),
       select: (id) => {
@@ -378,15 +411,22 @@ async function schedulePanel(): Promise<SchedulePanel> {
   return scheduleUi;
 }
 
+async function openScheduleWorkspace(): Promise<void> {
+  await schedulePanel();
+  if (scheduleDialog) {
+    scheduleDialog.classList.remove("hidden");
+    openDialog(scheduleDialog);
+  }
+}
+
 function filterPanel(): FilterPanel {
   if (!filterUi) filterUi = new FilterPanel($("tab-filters"), viewer, filters);
   return filterUi;
 }
 
 /**
- * The definitions layer: saved views and computed properties. Built lazily
- * like every other panel, but the store behind it is read at startup so a
- * command can apply a view without the pane ever being opened.
+ * Saved views are built lazily like every other panel. Their store can still
+ * be read by commands before the pane itself has opened.
  */
 async function viewsPane(): Promise<ViewsPane> {
   if (!viewsUi) {
@@ -401,6 +441,16 @@ async function viewsPane(): Promise<ViewsPane> {
     });
   }
   return viewsUi;
+}
+
+async function computedPane(): Promise<ComputedPane> {
+  if (!computedUi) {
+    const { ComputedPane } = await import("./ui/viewsPane.js");
+    computedUi = new ComputedPane($("tab-computed"), viewer, plugins.index(), {
+      log: (message, kind) => shell.log(message, kind),
+    });
+  }
+  return computedUi;
 }
 
 async function bcfPanel(): Promise<BcfPanel> {
@@ -516,10 +566,10 @@ function mountTab(tab: TabId): void {
   if (tab === "assistant") assistant();
   else if (tab === "filters") filterPanel();
   else if (tab === "views") mountLazy(tab, viewsPane);
+  else if (tab === "computed") mountLazy(tab, computedPane);
   else if (tab === "geo") mountLazy(tab, geoPanel);
   else if (tab === "ids") mountLazy(tab, idsPanel);
   else if (tab === "bcf") mountLazy(tab, bcfPanel);
-  else if (tab === "schedule") mountLazy(tab, schedulePanel);
 }
 
 /** The type list is built the first time it is shown, like the tabs above. */
@@ -1070,6 +1120,7 @@ async function openSharePackage(file: File): Promise<void> {
     await sheetStore.put({ ...sheet.record, image: new Blob([sheet.image as BlobPart], { type: "image/png" }) });
   }
   viewsUi?.refresh();
+  computedUi?.refresh();
   shell.log(
     `Opened package: ${contents.views.length} view(s), ${contents.properties.length} propert(ies), ${contents.sheets.length} sheet(s)`,
     "success",
@@ -1939,7 +1990,7 @@ function newChat(): void {
  * mid-conversation and being thrown into the Properties tab loses their place.
  * Moving the camera is a separate, named request.
  */
-function openEvidence(references: EvidenceReference[], action: "select" | "focus"): void {
+function openEvidence(references: EvidenceReference[], action: "select" | "isolate" | "focus"): void {
   const first = references[0];
   if (!first) return;
   if (first.resultId) {
@@ -1949,7 +2000,8 @@ function openEvidence(references: EvidenceReference[], action: "select" | "focus
   const ids = [...new Set(references.flatMap((reference) => reference.elementIds ?? []))]
     .filter((id) => viewer.hasGeometry(id));
   if (ids.length) {
-    viewer.selectMany(ids, "replace");
+    if (action === "isolate") viewer.isolate(ids, "Assistant evidence");
+    else viewer.selectMany(ids, "replace");
     if (action === "focus") {
       const box = viewer.boxAround(ids, 0.15);
       if (box) viewer.fitToPoint([
@@ -1962,7 +2014,8 @@ function openEvidence(references: EvidenceReference[], action: "select" | "focus
     viewer.fitToPoint(first.point);
   }
   const what = references.length === 1 ? `${first.id}: ${first.label}` : `${references.length} references`;
-  shell.log(`${action === "focus" ? "Zoomed to" : "Selected"} evidence ${what}`, "info", true);
+  const verb = action === "focus" ? "Zoomed to" : action === "isolate" ? "Isolated" : "Selected";
+  shell.log(`${verb} evidence ${what}`, "info", true);
 }
 
 async function acceptIssueProposal(payload: Record<string, unknown>): Promise<void> {
@@ -1998,8 +2051,8 @@ async function acceptDefinitionProposal(payload: Record<string, unknown>): Promi
     if (!new ComputedStore().save({ ...body, id: `cp-${Date.now().toString(36)}` })) {
       throw new Error("The assistant returned an invalid computed-property definition");
     }
-    viewsUi?.refresh();
-    shell.selectTab("views");
+    computedUi?.refresh();
+    shell.selectTab("computed");
     shell.log(`Saved the computed property "${String(body.name)}"`, "success", true);
     return;
   }
@@ -2529,11 +2582,11 @@ registry.add([
   { id: "file.screenshot", label: "Screenshot", icon: "camera", section: "File", shortcut: "S", enabled: hasModel, run: () => { viewer.screenshot(); shell.log("Screenshot saved", "success", true); } },
   { id: "file.viewpoint", label: "Viewpoint", icon: "bookmark", section: "File", shortcut: "V", enabled: hasModel, run: saveViewpoint },
   { id: "view.save", label: "Save view", icon: "bookmark", section: "Views", shortcut: "Shift+V", hint: "Store filters, colour, cuts, notes and camera as a definition that re-runs on any revision", enabled: hasModel, run: () => void viewsPane().then((pane) => pane.saveCurrent()).catch(reportError) },
-  { id: "view.open", label: "Views", icon: "bookmark", section: "Views", shortcut: "W", hint: "Saved views and computed properties", run: () => shell.selectTab("views") },
+  { id: "view.open", label: "Views", icon: "bookmark", section: "Views", shortcut: "W", hint: "Saved model views", run: () => shell.selectTab("views") },
   { id: "file.convert", label: "Convert", icon: "refresh", section: "Local Studio", tier: "local", available: () => canLocal("convert"), hint: "IfcOpenShell → .ifcx, then reopens are instant", enabled: hasModel, run: () => void convertWithService() },
   { id: "file.conformance", label: "Conformance", icon: "shield", section: "Review", hint: "Schema, implementer agreements and informal propositions, checked on this machine with nothing uploaded", enabled: () => hasModel() && !conformanceRunning, run: () => void runConformance().catch(reportError) },
   { id: "file.check", label: "Checks", icon: "shield", section: "Review", hint: "Structural QA in this tab, no generated code", enabled: () => hasModel() && !checking, run: () => void validateModel().catch(reportError) },
-  { id: "file.schedule", label: "Schedule", icon: "table", section: "Review", hint: "Tabular export of a class, with pset columns resolved through the type", enabled: hasModel, run: () => shell.selectTab("schedule") },
+  { id: "file.schedule", label: "Element schedules", icon: "table", section: "Plugins", hint: "Tabular export of a class, with pset columns resolved through the type", enabled: hasModel, run: () => void openScheduleWorkspace().catch(reportError) },
   { id: "file.report", label: "Report", icon: "clipboard", section: "Review", hint: "One offline HTML page: checks, IDS, findings and issues. Print it for PDF", enabled: hasModel, run: () => void buildReport().catch(reportError) },
 
   { id: "edit.undo", label: "Undo", icon: "undo", section: "Edit", shortcut: "Ctrl+Z", enabled: () => checkpoints.length > 0, run: () => void undo().catch(reportError) },
@@ -2600,14 +2653,14 @@ registry.add([
   { id: "analysis.takeoff", label: "Takeoff", icon: "calculator", section: "Analyze", hint: "Extract quantities from the model", enabled: hasModel, run: () => void plugins.open("takeoff") },
   { id: "analysis.report-builder", label: "Report builder", icon: "clipboard", section: "Review", hint: "Your columns, your grouping, saved as a template that reproduces on the next revision", enabled: hasModel, run: () => void plugins.open("report-builder") },
   { id: "analysis.point-cloud", label: "Point cloud", icon: "cube", section: "Analyze", hint: "Overlay a laser scan and colour it by its deviation from the model", enabled: hasModel, run: () => void plugins.open("point-cloud") },
-  { id: "analysis.sun", label: "Sun and shadow", icon: "globe", section: "Analyze", hint: "Real sun position by date and place, and sunlight hours accumulated on a surface", enabled: hasModel, run: () => void plugins.open("sun-study") },
   { id: "analysis.presentation", label: "Presentation", icon: "walk", section: "Review", hint: "Saved views as an ordered walkthrough, played or recorded", enabled: hasModel, run: () => void plugins.open("presentation") },
   { id: "analysis.geo", label: "Geo Context", icon: "globe", section: "Analyze", hint: "Inspect CRS metadata, align models and exchange GeoJSON", enabled: hasModel, run: () => shell.selectTab("geo") },
 
   { id: "panel.tree", label: "Structure", icon: "panel-left-close", section: "Panels", shortcut: "Ctrl+B", pressed: () => shell.isPanelOpen("outliner"), run: () => { shell.togglePanel("outliner"); ribbon.sync(); } },
   { id: "panel.insp", label: "Inspector", icon: "panel-right-close", section: "Panels", shortcut: "\\", pressed: () => shell.isPanelOpen("inspector"), run: () => { shell.togglePanel("inspector"); ribbon.sync(); } },
   { id: "panel.props", label: "Properties", icon: "info", section: "Panels", shortcut: "P", run: () => shell.selectTab("properties") },
-  { id: "panel.views", label: "Views", icon: "bookmark", section: "Panels", hint: "The definitions layer: saved views and computed properties", run: () => shell.selectTab("views") },
+  { id: "panel.views", label: "Views", icon: "bookmark", section: "Panels", hint: "Saved model views", run: () => shell.selectTab("views") },
+  { id: "panel.computed", label: "Computed", icon: "sliders", section: "Panels", hint: "Derived properties used by filters, colours, schedules and reports", run: () => shell.selectTab("computed") },
   { id: "panel.filters", label: "Filters", icon: "funnel", section: "Panels", shortcut: "R", run: () => shell.selectTab("filters") },
   { id: "panel.geo", label: "Geo Context", icon: "globe", section: "Panels", hint: "CRS diagnostics, federation alignment and GeoJSON", run: () => shell.selectTab("geo") },
   { id: "panel.ids", label: "IDS", icon: "clipboard", section: "Panels", hint: "Check the model against a buildingSMART IDS file", run: () => shell.selectTab("ids") },
@@ -2784,7 +2837,6 @@ const RIBBON: RibbonTab[] = [
       ] },
       { label: "Geometry", items: [
         { kind: "cmd", id: "analysis.clash", label: "Clash" },
-        { kind: "cmd", id: "analysis.sun", size: "sm", label: "Sun" },
         { kind: "cmd", id: "analysis.alignment", size: "sm", label: "Drive" },
         { kind: "cmd", id: "analysis.point-cloud", size: "sm", label: "Scan" },
         { kind: "cmd", id: "analysis.geo", size: "sm", label: "Geo" },
@@ -2827,7 +2879,6 @@ const RIBBON: RibbonTab[] = [
         { kind: "cmd", id: "file.check" },
         { kind: "cmd", id: "analysis.rules", label: "Rules" },
         { kind: "cmd", id: "file.conformance", size: "sm", label: "Conformance" },
-        { kind: "cmd", id: "file.schedule", size: "sm" },
         { kind: "cmd", id: "panel.ids", size: "sm" },
       ] },
       { label: "Issues", items: [
@@ -2844,7 +2895,6 @@ const RIBBON: RibbonTab[] = [
       { label: "Report", items: [
         { kind: "cmd", id: "analysis.report-builder", label: "Builder" },
         { kind: "cmd", id: "file.report", size: "sm", label: "Session" },
-        { kind: "cmd", id: "file.schedule", size: "sm", label: "Schedule" },
       ] },
     ],
   },

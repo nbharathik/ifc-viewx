@@ -262,19 +262,6 @@ Select a tool to see its purpose and main features.
 
     <small>Category: Navigation</small>
 
-??? info "Sun and Shadow: Sun position by date and place, and sunlight hours on a surface"
-
-    The NOAA solar position algorithm drives the model's light from an explicit site time offset. The accumulation ray-casts a documented grid against the real mesh rather than sampling a shadow map, making it useful for repeatable early-stage sunlight comparisons.
-
-    **Highlights**
-
-    - Light the model from the real sun for any date, time and place
-    - Read the site's latitude and longitude from the IFC where they were written
-    - Accumulate sunlight hours over a whole day on a site grid or the selection
-    - Colour the model by the hours each element receives, and export the grid
-
-    <small>Category: Analysis</small>
-
 ## Local Studio
 
 These need the local service, which is one `pip install` away.

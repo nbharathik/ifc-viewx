@@ -7,7 +7,7 @@ describe("extension registry", () => {
     const ids = [
       "clash", "compare", "explorer", "finder", "ids-studio", "model-health", "point-cloud",
       "presentation", "python", "report-builder", "rule-studio", "schedule-4d",
-      "section-workspace", "sheets", "smart-measure", "spaces", "storeys", "sun-study", "takeoff",
+      "section-workspace", "sheets", "smart-measure", "spaces", "storeys", "takeoff",
     ];
     expect(CATALOG.filter((plugin) => plugin.extension).map((plugin) => plugin.id).sort()).toEqual(ids);
     for (const id of ids) {

@@ -1,9 +1,5 @@
-// The definitions layer, on the inspector rail.
-//
-// Two halves of one idea. Views are the model state a coordinator set up,
-// stored as rules so it re-runs on any revision. Properties are the derived
-// data those rules read. Both export as a file somebody else can open.
-import { confirmAction, h, icon, iconButton, promptForm, slidingPill, toast } from "./kit.js";
+// Saved model views and computed data definitions for the inspector rail.
+import { confirmAction, h, icon, iconButton, promptForm, toast } from "./kit.js";
 import { emptyState } from "./shell.js";
 import type { ColorRule } from "./colorBy.js";
 import { download } from "../sdk/data.js";
@@ -50,9 +46,7 @@ const THUMB_WIDTH = 240;
 
 export class ViewsPane {
   private readonly gallery = h("div", { class: "views-gallery" });
-  private readonly propsList = h("div", { class: "views-props" });
   private readonly viewsSection = h("div", { class: "page-sec" });
-  private readonly propsSection = h("div", { class: "page-sec hidden" });
   private readonly counter = h("span", { class: "n" });
   private readonly search = h("input", {
     type: "search",
@@ -61,7 +55,6 @@ export class ViewsPane {
     "aria-label": "Find a saved view",
   });
   private readonly file = h("input", { type: "file", class: "hidden", accept: ".json,.ifcview,.ifcviews" });
-  private readonly computed = new ComputedSet();
   private query = "";
 
   constructor(
@@ -70,27 +63,12 @@ export class ViewsPane {
     private readonly index: PropertyIndex,
     private readonly actions: ViewsActions,
     private readonly views = new ViewStore(),
-    private readonly properties = new ComputedStore(),
   ) {
     this.search.addEventListener("input", () => {
       this.query = this.search.value.trim().toLowerCase();
       this.paintViews();
     });
     this.file.addEventListener("change", () => void this.importFile());
-
-    const tabs = h("div", { class: "seg" });
-    const viewsTab = h("button", { type: "button", text: "Views", "aria-pressed": "true" });
-    const propsTab = h("button", { type: "button", text: "Properties", "aria-pressed": "false" });
-    const show = (which: "views" | "props"): void => {
-      viewsTab.setAttribute("aria-pressed", String(which === "views"));
-      propsTab.setAttribute("aria-pressed", String(which === "props"));
-      this.viewsSection.classList.toggle("hidden", which !== "views");
-      this.propsSection.classList.toggle("hidden", which !== "props");
-    };
-    viewsTab.addEventListener("click", () => show("views"));
-    propsTab.addEventListener("click", () => show("props"));
-    tabs.append(viewsTab, propsTab);
-    slidingPill(tabs);
 
     const save = h("button", { class: "btn accent grow", type: "button" }, [
       icon("bookmark", 13),
@@ -113,55 +91,14 @@ export class ViewsPane {
       }),
     );
 
-    const add = h("button", { class: "btn accent grow", type: "button" }, [
-      icon("plus", 13),
-      h("span", { text: "New property" }),
-    ]);
-    add.addEventListener("click", () => this.editProperty(null));
-    const templates = h("button", { class: "btn", type: "button", text: "Templates" });
-    templates.addEventListener("click", () => this.showTemplates());
-
-    this.propsSection.append(
-      h("div", { class: "row" }, [add, templates]),
-      h("div", { class: "group-title" }, [
-        h("span", { text: "Computed properties" }),
-        h("span", { class: "row" }, [
-          iconButton("download", "Export these definitions", () => this.exportProperties(), "icon-btn sm"),
-          iconButton("folder", "Import definitions", () => this.file.click(), "icon-btn sm"),
-        ]),
-      ]),
-      this.propsList,
-      h("div", {
-        class: "note",
-        text: "Computed properties read like real ones: they filter, colour, group, schedule and report.",
-      }),
-    );
-
-    host.appendChild(h("div", { class: "page scroll" }, [tabs, this.viewsSection, this.propsSection, this.file]));
+    host.appendChild(h("div", { class: "page scroll" }, [this.viewsSection, this.file]));
 
     this.views.onChange(() => this.paintViews());
-    this.properties.onChange(() => {
-      this.syncComputed();
-      this.paintProperties();
-    });
-    this.syncComputed();
     this.paintViews();
-    this.paintProperties();
-  }
-
-  /** The computed set the rest of the app reads through the property index. */
-  computedSet(): ComputedSet {
-    return this.computed;
-  }
-
-  private syncComputed(): void {
-    this.computed.set(this.properties.list());
-    this.index.setComputed(this.computed.isEmpty() ? null : this.computed);
   }
 
   refresh(): void {
     this.paintViews();
-    this.paintProperties();
   }
 
   // -- views ----------------------------------------------------------------
@@ -384,13 +321,6 @@ export class ViewsPane {
     download("views.ifcview.json", serializeViews(list), "application/json");
   }
 
-  private exportProperties(): void {
-    const list = this.properties.list();
-    if (list.length === 0) return void toast("There is nothing to export yet", "info");
-    download("properties.ifcprops.json", serializeComputed(list), "application/json");
-  }
-
-  /** One picker for both file kinds; the payload says which it is. */
   private async importFile(): Promise<void> {
     const file = this.file.files?.[0];
     this.file.value = "";
@@ -408,13 +338,98 @@ export class ViewsPane {
       this.paintViews();
       return;
     }
+    toast("No saved views were found in that file", "error");
+  }
+}
+
+export interface ComputedActions {
+  log(message: string, kind?: "info" | "success" | "error"): void;
+}
+
+export class ComputedPane {
+  private readonly propsList = h("div", { class: "views-props" });
+  private readonly file = h("input", { type: "file", class: "hidden", accept: ".json,.ifcprops,.ifccomputed" });
+  private readonly computed = new ComputedSet();
+
+  constructor(
+    host: HTMLElement,
+    private readonly viewer: Viewer,
+    private readonly index: PropertyIndex,
+    private readonly actions: ComputedActions,
+    private readonly properties = new ComputedStore(),
+  ) {
+    this.file.addEventListener("change", () => void this.importFile());
+
+    const add = h("button", { class: "btn accent grow", type: "button" }, [
+      icon("plus", 13),
+      h("span", { text: "New property" }),
+    ]);
+    add.addEventListener("click", () => this.editProperty(null));
+    const templates = h("button", { class: "btn", type: "button", text: "Templates" });
+    templates.addEventListener("click", () => this.showTemplates());
+
+    host.appendChild(h("div", { class: "page scroll" }, [
+      h("div", { class: "row" }, [add, templates]),
+      h("div", { class: "group-title" }, [
+        h("span", { text: "Computed properties" }),
+        h("span", { class: "row" }, [
+          iconButton("download", "Export these definitions", () => this.exportProperties(), "icon-btn sm"),
+          iconButton("folder", "Import definitions", () => this.file.click(), "icon-btn sm"),
+        ]),
+      ]),
+      this.propsList,
+      h("div", {
+        class: "note",
+        text: "Computed properties read like real ones: they filter, colour, group, schedule and report.",
+      }),
+      this.file,
+    ]));
+
+    this.properties.onChange(() => {
+      this.syncComputed();
+      this.paintProperties();
+    });
+    this.syncComputed();
+    this.paintProperties();
+  }
+
+  computedSet(): ComputedSet {
+    return this.computed;
+  }
+
+  private syncComputed(): void {
+    this.computed.set(this.properties.list());
+    this.index.setComputed(this.computed.isEmpty() ? null : this.computed);
+  }
+
+  refresh(): void {
+    this.syncComputed();
+    this.paintProperties();
+  }
+
+  private exportProperties(): void {
+    const list = this.properties.list();
+    if (list.length === 0) return void toast("There is nothing to export yet", "info");
+    download("properties.ifcprops.json", serializeComputed(list), "application/json");
+  }
+
+  private async importFile(): Promise<void> {
+    const file = this.file.files?.[0];
+    this.file.value = "";
+    if (!file) return;
+    let text = "";
+    try {
+      text = await file.text();
+    } catch {
+      return void toast("That file could not be read", "error");
+    }
     const properties = safeParse(() => parseComputedFile(text));
     if (properties.length) {
       const added = this.properties.merge(properties);
       this.actions.log(`Imported ${added} computed propert${added === 1 ? "y" : "ies"}`, "success");
       return;
     }
-    toast("No views or properties were found in that file", "error");
+    toast("No computed properties were found in that file", "error");
   }
 
   // -- computed properties --------------------------------------------------

@@ -150,11 +150,11 @@ export interface AssistantCallbacks extends EscalationActions {
   /** The current viewport image is explicitly attached or removed. */
   onViewAttachmentChange?(): void;
   /**
-   * Follow local evidence back into the model. "select" only selects and
-   * highlights, which is what a citation click should cost; "focus" is the
-   * explicit request to move the camera as well. Neither changes panels.
+   * Follow local evidence back into the model. "select" only highlights,
+   * "isolate" hides everything else, and "focus" also moves the camera.
+   * None of these actions changes panels.
    */
-  onEvidence?(references: EvidenceReference[], action: "select" | "focus"): void;
+  onEvidence?(references: EvidenceReference[], action: "select" | "isolate" | "focus"): void;
   /** Accept a staged issue payload after inspecting its evidence. */
   onIssueProposal?(payload: Record<string, unknown>): void;
   /** Save a view, computed property or ruleset the assistant authored. */
@@ -748,13 +748,13 @@ export class AssistantPanel {
     const groups = groupEvidence(unique);
     const selectable = unique.some((reference) => reference.elementIds?.length);
 
-    const zoom = iconButton("focus", "Zoom to all of this evidence", () => {
-      this.callbacks.onEvidence?.(unique, "focus");
-    }, "icon-btn sm");
     const all = h("button", { class: "btn sm", type: "button", title: "Select every element cited here" }, [
       h("span", { text: "Select all" }),
     ]);
     all.addEventListener("click", () => this.callbacks.onEvidence?.(unique, "select"));
+    const isolate = iconButton("eye", "Isolate every element cited here", () => {
+      this.callbacks.onEvidence?.(unique, "isolate");
+    }, "icon-btn sm");
 
     const list = h("div", { class: "evidence-list" });
     const rail = h("div", { class: "evidence-rail" }, [
@@ -763,7 +763,7 @@ export class AssistantPanel {
         h("span", { class: "evidence-title", text: "Model evidence" }),
         h("span", { class: "evidence-total", text: describeEvidence(unique) }),
         h("span", { class: "grow" }),
-        ...(selectable ? [all, zoom] : []),
+        ...(selectable ? [all, isolate] : []),
       ]),
       list,
     ]);

@@ -66,7 +66,7 @@ Bundled and installable extensions share one permission-scoped SDK contract.
 
 | In the browser | Local Studio | Built into the app |
 | --- | --- | --- |
-| Clash Detection, Element Explorer, Model Compare, Point Cloud, Presentation, Python Console, Quantity Takeoff, Report Builder, Room Book, Rule Studio, Sheets, Storey Navigator, Sun and Shadow | Assistant Key Vault, IfcOpenShell Converter, MCP Bridge, Native Python | Element Schedules, IDS Validation, IFC Conformance, Issue Tracker, Model Checks, Model Edits, Results Dock, Saved Views, Smart Filters |
+| Clash Detection, Element Explorer, Model Compare, Point Cloud, Presentation, Python Console, Quantity Takeoff, Report Builder, Room Book, Rule Studio, Sheets, Storey Navigator | Assistant Key Vault, IfcOpenShell Converter, MCP Bridge, Native Python | Element Schedules, IDS Validation, IFC Conformance, Issue Tracker, Model Checks, Model Edits, Results Dock, Saved Views, Smart Filters |
 
 Want to build an extension? See [Writing an extension](https://nbharathik.github.io/ifc-viewx/docs/plugins/), the [SDK reference](https://nbharathik.github.io/ifc-viewx/docs/plugins/api/), and [working on the repo](https://nbharathik.github.io/ifc-viewx/docs/contributing/).
 

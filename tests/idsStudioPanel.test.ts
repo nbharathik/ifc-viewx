@@ -103,4 +103,23 @@ describe("IDS Requirements Studio panel", () => {
 
     instance?.dispose?.();
   });
+
+  it("does not mark the document dirty when browsing specifications", () => {
+    const host = document.createElement("div");
+    const ctx = context();
+    const instance = mount(host, ctx);
+    openEdit(host);
+
+    host.querySelector<HTMLButtonElement>('[title^="Duplicate"]')!.click();
+    byText(host, "Export .ids").click();
+    expect(ctx.files.export).toHaveBeenCalledOnce();
+    expect(host.querySelector(".ids-studio")?.classList.contains("is-edited")).toBe(false);
+
+    const select = picker(host);
+    select.value = select.options[0].value;
+    select.dispatchEvent(new Event("change"));
+
+    expect(host.querySelector(".ids-studio")?.classList.contains("is-edited")).toBe(false);
+    instance?.dispose?.();
+  });
 });

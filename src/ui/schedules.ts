@@ -1,7 +1,7 @@
 // Element schedules: pick a class, add pset columns, get a table. Property
 // columns resolve through the element type, which is the part a plain
-// instance read gets wrong. Runs in this tab. Rows select in the viewer; the
-// table exports as CSV.
+// instance read gets wrong. Runs as a Plugins workspace. Rows select in the
+// viewer; the table exports as CSV.
 import { h, icon, spinner, toast } from "./kit.js";
 import { emptyState } from "./shell.js";
 import { saveCsv, type Value } from "../sdk/data.js";
