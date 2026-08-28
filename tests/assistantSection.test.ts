@@ -73,7 +73,12 @@ describe("assistant section analysis", () => {
 
   it("creates paged results and linked evidence for the assistant", async () => {
     const state = viewerStub();
-    const adapter = new AssistantCapabilityAdapter(createViewerCapabilityRegistry(), { viewer: state.viewer });
+    const adapter = new AssistantCapabilityAdapter(
+      createViewerCapabilityRegistry(),
+      { viewer: state.viewer },
+      undefined,
+      () => true,
+    );
     adapter.tools("query");
     const execution = await adapter.execute(
       "sectionContours",

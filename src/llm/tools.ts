@@ -4,6 +4,8 @@
 // assistant settings are both rendered from this array, so what the assistant
 // is told it has and what the app claims it has cannot drift apart. A new tool
 // is one row here plus one case in actions.ts.
+import { isReleaseAssistantCapabilityVisible } from "../app/release.js";
+
 export type ToolTier = "viewer" | "edit" | "python";
 export type AssistantMode = "query" | "edit";
 
@@ -247,7 +249,7 @@ const PAD = 58;
 
 /** The tool table as the model reads it: syntax, padded, then the summary. */
 export function toolBlock(tier: ToolTier): string {
-  return TOOLS.filter((tool) => tool.tier === tier)
+  return TOOLS.filter((tool) => tool.tier === tier && isReleaseAssistantCapabilityVisible(tool.name))
     .map((tool) => `${tool.syntax.padEnd(PAD)}  ${tool.summary}`)
     .join("\n");
 }

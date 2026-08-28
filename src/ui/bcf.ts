@@ -394,6 +394,7 @@ export interface BcfActions {
   log(message: string, kind?: "info" | "success" | "error"): void;
   /** Load a file the CDE handed over: as the model, or beside it to compare. */
   openDocument?(name: string, bytes: Uint8Array, intent: "open" | "compare"): Promise<void>;
+  compareDocuments?: boolean;
   openCdeFetch?: OpenCdeFetch;
 }
 
@@ -829,7 +830,7 @@ export class BcfPanel {
         h("b", { text: `${document_.name}${document_.version ? ` ${document_.version}` : ""}` }),
         h("small", { text: document_.size ? `${(document_.size / 1e6).toFixed(1)} MB` : document_.guid }),
       ]),
-      compare,
+      ...(this.actions.compareDocuments ? [compare] : []),
       open,
     ]);
   }

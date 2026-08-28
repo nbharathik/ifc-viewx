@@ -6,6 +6,7 @@ import type { ExtensionManifest } from "../sdk/contributions.js";
 import { validateManifest } from "../extensions/manifest.js";
 import type { ServiceClient } from "../bridge/serviceClient.js";
 import type { InstalledExtensionView } from "../extensions/installed/types.js";
+import { isReleasePluginVisible } from "../app/release.js";
 
 const extensionManifests = import.meta.glob<ExtensionManifest>("./*/extension.json", {
   eager: true,
@@ -84,7 +85,7 @@ function collect(): CatalogPlugin[] {
   for (const [path, raw] of Object.entries(extensionManifests)) {
     const folder = folderOf(path);
     const extension = fromExtension(folder, raw, panels[`./${folder}/panel.ts`]);
-    if (extension) found.push(extension);
+    if (extension && isReleasePluginVisible(extension.id)) found.push(extension);
   }
   return [...found, ...SHORTCUTS].sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -98,7 +99,7 @@ export function setInstalledExtensions(
   const bundled = CATALOG.filter((plugin) => !plugin.installation);
   const bundledIds = new Set(bundled.map((plugin) => plugin.id));
   const installed = records
-    .filter((record) => !bundledIds.has(record.id))
+    .filter((record) => isReleasePluginVisible(record.id) && !bundledIds.has(record.id))
     .map((record): CatalogPlugin => {
       const version = record.versions.find((entry) => entry.hash === record.activeHash);
       if (!version) throw new Error(`${record.id} has no active installed version`);

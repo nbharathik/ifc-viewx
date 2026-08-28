@@ -8,6 +8,7 @@
 // stops at the typed tools below.
 import type { AssistantMode } from "./llmClient.js";
 import { toolBlock } from "./tools.js";
+import { isReleaseAssistantCapabilityVisible } from "../app/release.js";
 
 const QUERY_RULE = `MODE: QUERY (read-only). You may inspect anything and change what is shown in 3D, but you may not
 change the model. Edit ops and \`\`\`python edit\`\`\` are refused before they run, so do not attempt them: if the user
@@ -34,9 +35,12 @@ Always get ids from a \`\`\`viewer find first. Never guess an id. Report the mea
 const TRUNCATION_RULE = `TRUNCATED REPORTS: a report carrying "truncated": true is partial. Use its "matches" or "total" for
 the real count and never present the listed rows as the whole set; narrow the query if the user needs them all.`;
 
+const TOOL_SCOPE = isReleaseAssistantCapabilityVisible("clash")
+  ? "reading, QA, schedules, IDS and clash"
+  : "reading, QA, schedules, IDS and model navigation";
+
 const PYTHON_RULE = (mode: AssistantMode): string => `PYTHON IS NEVER RUN FOR YOU. Not in this tab, not on any service,
-whatever the user has connected. The actions above are your tools, and they cover reading, QA, schedules, IDS and
-clash${mode === "edit" ? ", renaming and property edits" : ""}.
+whatever the user has connected. The actions above are your tools, and they cover ${TOOL_SCOPE}${mode === "edit" ? ", renaming and property edits" : ""}.
 Reach for Python only when something genuinely needs it: geometry math, creating new entities, or analysis across
 thousands of elements. In that case say in one sentence what it needs and why, then write the IfcOpenShell code in a
 \`\`\`python block. It will NOT be executed. The app shows it to the user, who can run it themselves in the Python

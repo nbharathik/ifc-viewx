@@ -7,6 +7,7 @@ import type { AssistantMode } from "../llm/llmClient.js";
 import type { NativeTool } from "../llm/tools.js";
 import { evidenceFooter, evidenceForRows } from "./evidence.js";
 import type { AssistantToolExecution } from "./types.js";
+import { isReleaseAssistantCapabilityVisible } from "../app/release.js";
 
 export interface AssistantToolApproval {
   owner: string;
@@ -81,6 +82,7 @@ export class AssistantCapabilityAdapter {
     private readonly registry: CapabilityRegistry<ViewerCapabilityContext>,
     private readonly context: ViewerCapabilityContext,
     results = new ResultStore({ maxHandles: 96, maxItems: 100_000, maxPageSize: 500 }),
+    private readonly capabilityVisible: (id: string) => boolean = isReleaseAssistantCapabilityVisible,
   ) {
     this.results = results;
     this.context.results = results;
@@ -90,6 +92,7 @@ export class AssistantCapabilityAdapter {
     const approved = options.approvals ?? [];
     this.entries = new Map();
     const capabilities = this.registry.list((capability) => {
+      if (!this.capabilityVisible(capability.id)) return false;
       const grant = approved.find((entry) => entry.enabled && entry.capability === capability.id && (
         capability.source === "core" ||
         entry.owner === capability.source ||

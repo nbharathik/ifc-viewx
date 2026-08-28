@@ -61,6 +61,7 @@ import { ServiceClient, type EditDiff } from "./bridge/serviceClient.js";
 import { loadAppSettings, LOD_PIXELS, saveAppSettings } from "./app/settings.js";
 import { createBrowserBridge } from "./app/browserBridge.js";
 import { bindAppInput } from "./app/input.js";
+import { isReleaseCommandVisible, isReleasePluginVisible, releaseUi } from "./app/release.js";
 
 const $ = <T extends HTMLElement>(id: string): T => {
   const node = document.getElementById(id);
@@ -318,8 +319,8 @@ function refreshAssistantEngine(): void {
   assistantUi.setTools(
     editing ? "Tools + edits" : "Tools only",
     editing
-      ? "Reads, checks, schedules, IDS, clash and property edits, all in this tab. Generated Python is never run for it."
-      : "Reads, checks, schedules, IDS and clash, all in this tab. Switch to Edit for property changes.",
+      ? "Reads, checks, schedules, IDS and property edits, all in this tab. Generated Python is never run for it."
+      : "Reads, checks, schedules and IDS, all in this tab. Switch to Edit for property changes.",
   );
   assistantUi.setToolState(toolAvailability());
 }
@@ -435,6 +436,7 @@ async function bcfPanel(): Promise<BcfPanel> {
       viewer,
       modelName: () => fileName,
       log: (message, kind) => shell.log(message, kind),
+      compareDocuments: isReleasePluginVisible("compare"),
       // A revision pulled from the CDE lands in the viewer, not in a folder.
       openDocument: async (name, bytes, intent) => {
         if (intent === "compare") {
@@ -506,7 +508,9 @@ async function idsPanel(): Promise<unknown> {
       report: (title, ids) => void raiseIssue(title, ids).catch(reportError),
       log: (message, kind) => shell.log(message, kind),
       changed: () => ribbon.sync(),
-      openStudio: () => void plugins.open("ids-studio"),
+      ...(isReleasePluginVisible("ids-studio")
+        ? { openStudio: () => void plugins.open("ids-studio") }
+        : {}),
     });
   }
   return idsUi;
@@ -1307,6 +1311,7 @@ function toggleMeasure(): void {
 }
 
 function reportGeoStatus(model: FederatedModel): void {
+  if (!releaseUi.geoContext) return;
   if (model.geoStatus === "aligned") {
     shell.log(`Geo Context: automatically aligned ${model.name} to the federation CRS`, "success");
     return;
@@ -2654,7 +2659,7 @@ registry.add([
   { id: "panel.ai", label: "Assistant", icon: "sparkle", section: "Panels", shortcut: "C", run: () => shell.selectTab("assistant") },
   { id: "panel.py", label: "Python console", icon: "terminal", section: "Panels", shortcut: "Y", hint: "Write IfcOpenShell yourself; opens as a plugin", run: () => void plugins.open("python") },
   { id: "panel.log", label: "Activity", icon: "activity", section: "Panels", shortcut: "L", run: () => shell.selectTab("activity") },
-  { id: "panel.results", label: "Results dock", icon: "list", section: "Panels", shortcut: "D", hint: "One dock for clash, rules, IDS and checks, with the same grouping and BCF handoff", pressed: () => results.isOpen(), run: () => { results.toggle(); ribbon.sync(); } },
+  { id: "panel.results", label: "Results dock", icon: "list", section: "Panels", shortcut: "D", hint: "Analysis results with shared grouping and BCF handoff", pressed: () => results.isOpen(), run: () => { results.toggle(); ribbon.sync(); } },
   { id: "panel.summary", label: "Summary", icon: "list", section: "Panels", run: () => showPane("summary") },
   { id: "panel.types", label: "Types", icon: "layers", section: "Panels", hint: "Browse the model by IFC class", run: () => showPane("types") },
   { id: "panel.organize", label: "Organize", icon: "layers", section: "Panels", hint: "Groups, layers, classifications and materials", run: () => showPane("organize") },
@@ -2665,7 +2670,7 @@ registry.add([
 
   { id: "ai.new", label: "New chat", icon: "message", section: "Assistant", run: newChat },
 
-  { id: "app.plugins", label: "Plugins", icon: "blocks", section: "Application", hint: "Python console, clash detection, takeoff, explorer, compare and the Local Studio add-ons", run: () => pluginBrowser.open() },
+  { id: "app.plugins", label: "Plugins", icon: "blocks", section: "Application", hint: "Browse the plugins available in this release and the Local Studio add-ons", run: () => pluginBrowser.open() },
   { id: "app.connection", label: "Studio", icon: "plug", section: "Application", hint: "Web Studio or Local Studio", run: () => connection.open() },
   { id: "app.install", label: "Install app", icon: "walk", section: "Application", hint: "Install IFCViewX so it opens from the home screen and works with no connection", run: () => void field.install() },
   { id: "app.touch", label: "Touch mode", icon: "walk", section: "Application", hint: "Bigger hit targets for a tablet on site", pressed: () => field.isTouch(), run: () => { field.setTouch(!field.isTouch()); ribbon.sync(); shell.log(field.isTouch() ? "Touch mode on" : "Touch mode off"); } },
@@ -2674,7 +2679,7 @@ registry.add([
   { id: "app.help", label: "Shortcuts", icon: "help", section: "Application", shortcut: "?", run: () => openDialog(helpDialog) },
   { id: "app.palette", label: "Command palette", icon: "command", section: "Application", shortcut: "Ctrl+K", run: () => palette.toggle() },
   { id: "app.ribbon", label: "Collapse ribbon", icon: "chevron", section: "Application", shortcut: "Ctrl+F1", run: () => ribbon.setCollapsed(!ribbon.isCollapsed()) },
-]);
+], (command) => isReleaseCommandVisible(command.id));
 
 /** Ribbon layout: pure data over command ids. */
 const RIBBON: RibbonTab[] = [
@@ -2885,6 +2890,21 @@ const RIBBON: RibbonTab[] = [
   },
 ];
 
+function visibleRibbon(tabs: RibbonTab[]): RibbonTab[] {
+  return tabs
+    .filter((tab) => releaseUi.advancedWorkflows || tab.id !== "sheets")
+    .map((tab) => ({
+      ...tab,
+      groups: tab.groups
+        .map((group) => ({
+          ...group,
+          items: group.items.filter((item) => item.kind !== "cmd" || registry.get(item.id)),
+        }))
+        .filter((group) => group.items.length > 0),
+    }))
+    .filter((tab) => tab.groups.length > 0);
+}
+
 function buildScaleControl(): RibbonControl {
   const select = h("select", { class: "rib-select", title: "Render scale", "aria-label": "Render scale" });
   for (const [value, label] of [["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.5", "150%"], ["2", "200%"]]) {
@@ -2908,7 +2928,7 @@ function buildScaleControl(): RibbonControl {
   };
 }
 
-const ribbon = new Ribbon($("ribbon-tabs"), $("ribbon"), registry, RIBBON);
+const ribbon = new Ribbon($("ribbon-tabs"), $("ribbon"), registry, visibleRibbon(RIBBON));
 // The status bar mirrors the same state the ribbon reads, so it repaints with it.
 ribbon.onSync = syncViewState;
 filters.onChange(() => syncViewState());
@@ -3163,7 +3183,7 @@ const pluginCount = h("span", { class: "plug-count hidden" });
 const pluginToggle = h("button", {
   class: "icon-btn plug-btn",
   type: "button",
-  title: "Plugins: Python console, clash detection, takeoff, explorer, compare and the Local Studio add-ons",
+  title: "Browse plugins and Local Studio add-ons",
   "aria-label": "Plugins",
 }, [icon("blocks"), pluginCount]);
 pluginToggle.addEventListener("click", () => pluginBrowser.open());
@@ -3260,7 +3280,9 @@ shell.viewerHost.addEventListener("contextmenu", (e) => {
       { label: `Isolate${scope}`, run: () => viewer.isolateSelected() },
       { label: `Hide${scope}`, run: () => viewer.hideSelected() },
       { separator: true },
-      ...(count === 2 ? [{ label: "Measure shortest clearance", run: openSmartMeasure }] : []),
+      ...(count === 2 && isReleasePluginVisible("smart-measure")
+        ? [{ label: "Measure shortest clearance", run: openSmartMeasure }]
+        : []),
       { label: `Section box around selection${scope}`, run: sectionBoxAroundSelection },
       { label: "Cut on this face", run: () => { if (!viewer.addSectionFromPick()) toast("No usable face normal here", "info"); } },
       {
@@ -3271,7 +3293,9 @@ shell.viewerHost.addEventListener("contextmenu", (e) => {
           toast("Note added", "success");
         }),
       },
-      { label: "Open section drawing", run: () => void plugins.open("section-workspace") },
+      ...(isReleasePluginVisible("section-workspace")
+        ? [{ label: "Open section drawing", run: () => void plugins.open("section-workspace") }]
+        : []),
       { separator: true },
       { label: `Isolate all ${type}`, run: () => isolateByType(type) },
       { label: "Show all", run: () => viewer.showAll() },

@@ -12,6 +12,8 @@ import type { Viewer } from "../src/viewer-core/viewer.js";
 const real = new AssistantCapabilityAdapter(
   createViewerCapabilityRegistry(),
   { viewer: {} as Viewer },
+  undefined,
+  () => true,
 ).tools("query");
 const mirrorNames = (MIRROR as Array<[string, string, object, string[]]>).map(([name]) => name);
 

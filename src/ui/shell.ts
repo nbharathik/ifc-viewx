@@ -2,6 +2,7 @@
 // and the activity log. Pure presentation. Everything it can do is passed in
 // as actions, so this module never reaches into the viewer or the service.
 import { h, icon, iconButton, iconLink, makeResizer, slidingPill, swapText, toast } from "./kit.js";
+import { releaseUi } from "../app/release.js";
 
 export interface ShellActions {
   toggleTheme(): void;
@@ -49,8 +50,9 @@ const TABS: Array<{ id: TabId; label: string; icon: string; key: string; handoff
   { id: "assistant", label: "Assistant", icon: "sparkle", key: "C" },
   { id: "plugins", label: "Plugins", icon: "blocks", key: "" },
   { id: "activity", label: "Activity", icon: "activity", key: "L" },
-  // Geo sits last: it is a per-project setup step, not a daily panel.
-  { id: "geo", label: "Geo Context", icon: "globe", key: "" },
+  ...(releaseUi.geoContext
+    ? [{ id: "geo" as const, label: "Geo Context", icon: "globe", key: "" }]
+    : []),
 ];
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -267,6 +269,7 @@ export class Shell {
   /** Switch tabs; the first time a tab is shown the host gets to build it. */
   selectTab(tab: TabId): void {
     const meta = TABS.find((item) => item.id === tab);
+    if (!meta) return;
     if (meta?.handoff) return this.actions.tabShown(tab);
     this.activeTab = tab;
     if (this.inspector.classList.contains("collapsed")) this.togglePanel("inspector");

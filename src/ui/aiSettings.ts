@@ -24,6 +24,7 @@ import {
   type ToolAvailability,
   type ToolTier,
 } from "../llm/tools.js";
+import { isReleaseAssistantCapabilityVisible } from "../app/release.js";
 
 /** What the verify line is saying, which decides its icon and its colour. */
 type VerifyState = "idle" | "busy" | "ok" | "fail";
@@ -141,7 +142,7 @@ export class AssistantSettings {
   setToolState(state: ToolAvailability): void {
     const blocks: HTMLElement[] = [];
     for (const tier of ["viewer", "edit"] as ToolTier[]) {
-      const rows = TOOLS.filter((tool) => tool.tier === tier);
+      const rows = TOOLS.filter((tool) => tool.tier === tier && isReleaseAssistantCapabilityVisible(tool.name));
       const blocked = rows.map((tool) => toolBlocker(tool, state));
       // One reason for the whole tier is said once, next to the heading.
       // Repeating "open a model" down thirteen rows is noise, not information.

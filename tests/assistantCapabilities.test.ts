@@ -17,8 +17,10 @@ describe("assistant capability adapter", () => {
     expect(query.map((tool) => tool.name)).not.toContain(assistantToolName("view.pickAt"));
     expect(edit.map((tool) => tool.name)).toContain(assistantToolName("issue.stage"));
     expect(edit.map((tool) => tool.name)).toContain(assistantToolName("view.pickAt"));
-    expect(query.map((tool) => tool.name)).toContain(assistantToolName("laser"));
-    expect(query.map((tool) => tool.name)).toContain(assistantToolName("sectionContours"));
+    expect(query.map((tool) => tool.name)).not.toContain(assistantToolName("clash"));
+    expect(query.map((tool) => tool.name)).not.toContain(assistantToolName("laser"));
+    expect(query.map((tool) => tool.name)).not.toContain(assistantToolName("sectionContours"));
+    expect(edit.map((tool) => tool.name)).not.toContain(assistantToolName("definition.ruleset"));
     expect(edit.every((tool) => tool.schema.additionalProperties === false)).toBe(true);
   });
 
@@ -145,59 +147,33 @@ describe("assistant capability adapter", () => {
     )))).resolves.toHaveLength(3);
   });
 
-  it("keeps clash rows connected through open, isolate and staged issue steps", async () => {
-    const isolate = vi.fn();
-    const active = vi.fn();
+  it("keeps the release-hidden clash capability out of assistant execution", async () => {
     const clash = vi.fn(async () => ({
       clashes: 1,
-      worst: [{
-        a: { id: 101, type: "IfcWall" },
-        b: { id: 202, type: "IfcPipeSegment" },
-        kind: "hard",
-        penetrationMm: 18,
-        at: [1, 2, 3],
-      }],
+      worst: [],
     }));
-    const clashViewer = {
-      getSpatialTree: () => null,
-      isolate,
-    } as unknown as Viewer;
     const registry = createViewerCapabilityRegistry();
     const context: ViewerCapabilityContext = {
-      viewer: clashViewer,
+      viewer,
       semantic: {
         check: async () => ({}),
         schedule: async () => ({}),
         ids: async () => ({}),
         clash,
       },
-      revision: () => "model-a",
-      setActiveResult: active,
     };
     const adapter = new AssistantCapabilityAdapter(registry, context);
     adapter.tools("edit");
 
-    const detected = await adapter.execute(
+    await expect(adapter.execute(
       "clash",
       { a: ["IfcWall"], b: ["IfcPipeSegment"] },
       "edit",
       new AbortController().signal,
-    );
-    await adapter.execute("result__open", { handle: detected.result!.id }, "edit", new AbortController().signal);
-    await adapter.execute("result__isolate", { handle: detected.result!.id, rows: [0] }, "edit", new AbortController().signal);
-    const issue = await adapter.execute(
-      "issue__stage",
-      { title: "Wall and pipe clash", handle: detected.result!.id, rows: [0] },
-      "edit",
-      new AbortController().signal,
-    );
+    )).rejects.toThrow(/unknown or unapproved/i);
 
-    expect(clash).toHaveBeenCalledTimes(1);
-    expect(active).toHaveBeenCalledWith(detected.result!.id, undefined);
-    expect(isolate).toHaveBeenCalledWith([101, 202], `Result ${detected.result!.id}`);
-    expect(issue.value).toMatchObject({ staged: true, elementIds: [101, 202] });
-    expect(issue.evidence[0]).toMatchObject({ resultId: detected.result!.id, row: 0, elementIds: [101, 202] });
-    expect(issue.report).toContain("[E");
+    expect(clash).not.toHaveBeenCalled();
+    expect(registry.has("clash")).toBe(true);
   });
 
   it("keeps large result arrays out of assistant history reports", async () => {

@@ -45,8 +45,9 @@ export class CommandRegistry {
   private readonly commands = new Map<string, Command>();
   private readonly keys = new Map<string, string>();
 
-  add(commands: Command[]): void {
+  add(commands: Command[], include: (command: Command) => boolean = () => true): void {
     for (const command of commands) {
+      if (!include(command)) continue;
       this.commands.set(command.id, command);
       const chord = command.binding ?? command.shortcut;
       if (chord) this.keys.set(normalize(chord), command.id);

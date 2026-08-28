@@ -20,6 +20,7 @@ import type { PropertyIndex } from "../data/model.js";
 import { isAxisSection } from "../viewer-core/viewer.js";
 import { classifyByPlanes } from "../geometry/plane.js";
 import { measureVolumes } from "../geometry/volumes.js";
+import { isReleasePluginVisible } from "../app/release.js";
 import type {
   AnnotationState, AxisSectionState, CameraPose, ItemProperties, LazyCategory, MeasureConstraint, MeasurementFormat,
   MeasurementObject, MeasurementState, MeasureMode, PlaneSectionState, SectionBox, SectionState, ShapeMeasure, SnapMode,
@@ -622,13 +623,15 @@ export class Dock {
       ]),
     ]);
 
-    const smart = h("button", {
-      class: "mc-smart",
-      type: "button",
-      text: "Smart",
-      title: "Open clearance and axis scan",
-    });
-    smart.addEventListener("click", () => {
+    const smart = isReleasePluginVisible("smart-measure")
+      ? h("button", {
+          class: "mc-smart",
+          type: "button",
+          text: "Smart",
+          title: "Open clearance and axis scan",
+        })
+      : null;
+    smart?.addEventListener("click", () => {
       this.viewer.setMeasuring(false);
       this.onOpenSmartMeasure?.();
     });
@@ -638,7 +641,7 @@ export class Dock {
         icon("ruler", 12),
         h("span", { class: "grow", text: "Measure" }),
         this.measureCount,
-        smart,
+        ...(smart ? [smart] : []),
         done,
       ]),
       modes,
@@ -1186,14 +1189,16 @@ export class Dock {
     });
     planePanel.appendChild(h("div", { class: "pop-row section-actions" }, [plan, off]));
     this.buildSectionBox(boxPanel, bounds);
-    const drawing = h("button", {
-      class: "btn section-workspace-open",
-      type: "button",
-      text: "Open plans and sections",
-      title: "Build a synchronized 2D drawing from the active cut",
-    });
-    drawing.addEventListener("click", () => this.onOpenSectionWorkspace?.());
-    pop.appendChild(drawing);
+    if (isReleasePluginVisible("section-workspace")) {
+      const drawing = h("button", {
+        class: "btn section-workspace-open",
+        type: "button",
+        text: "Open plans and sections",
+        title: "Build a synchronized 2D drawing from the active cut",
+      });
+      drawing.addEventListener("click", () => this.onOpenSectionWorkspace?.());
+      pop.appendChild(drawing);
+    }
     setMode(this.viewer.getSectionBox() ? "box" : "planes");
   }
 

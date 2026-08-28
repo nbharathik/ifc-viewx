@@ -186,7 +186,7 @@ export class ResultsDock {
     const set = list.find((entry) => entry.id === this.active);
     if (!set) {
       this.summary.textContent = "";
-      this.body.replaceChildren(emptyState("list", "No results yet", "Clash, rules, IDS and compare all land here."));
+      this.body.replaceChildren(emptyState("list", "No results yet", "Analysis and validation results land here."));
       return;
     }
     this.summary.textContent = set.summary;

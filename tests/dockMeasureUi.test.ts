@@ -56,7 +56,7 @@ describe("Measure card layout", () => {
     expect(card?.querySelector(".mc-ledger summary")?.textContent).toContain("0 saved");
   });
 
-  it("opens Smart Measure from the compact instrument header", () => {
+  it("keeps Smart Measure out of the compact instrument header", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
     const viewer = measureViewer();
@@ -64,10 +64,10 @@ describe("Measure card layout", () => {
     const open = vi.fn();
     dock.onOpenSmartMeasure = open;
 
-    host.querySelector<HTMLButtonElement>(".mc-smart")?.click();
+    expect(host.querySelector(".mc-smart")).toBeNull();
 
-    expect(viewer.setMeasuring).toHaveBeenCalledWith(false);
-    expect(open).toHaveBeenCalledOnce();
+    expect(viewer.setMeasuring).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
   });
 
   it("mounts when browser storage is unavailable", () => {
