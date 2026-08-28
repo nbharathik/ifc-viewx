@@ -141,7 +141,7 @@ function validateEntryHtml(html: string): void {
 
 async function sha256(bytes: Uint8Array): Promise<string> {
   if (!globalThis.crypto?.subtle) throw new ExtensionPackageError("This browser cannot hash extension packages", "crypto");
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
