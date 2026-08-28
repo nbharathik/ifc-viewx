@@ -6,7 +6,7 @@ import { moduleSpecifiers } from "./plugin-imports.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCE = resolve(ROOT, "src");
-const BASELINE = resolve(ROOT, "docs/refactor/architecture-baseline.json");
+const BASELINE = resolve(ROOT, "tests/contracts/architecture-baseline.json");
 const slash = (value) => value.replaceAll("\\", "/");
 const compareText = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 

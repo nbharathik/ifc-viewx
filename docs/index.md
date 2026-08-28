@@ -1,57 +1,35 @@
-# IFCViewX
+# IFCViewX 0.1.2
 
-Open an IFC model in your browser. Nothing is uploaded. Parsing, viewing,
-checks, edits, and exports run on your machine.
+IFCViewX is a fast, private IFC viewer for inspecting and reviewing building
+models. Files are processed locally and stay on your machine.
 
 [Open IFCViewX](https://nbharathik.github.io/ifc-viewx/){ .md-button .md-button--primary }
-[Browse the tools](plugins/catalog.md){ .md-button }
+[Available tools](plugins/catalog.md){ .md-button }
 
-## Start in three steps
+## Start
 
-1. Open the viewer.
-2. Drop in an IFC file, or choose the sample model.
-3. Select an element to see its properties, then open a tool from the viewer.
+Open the viewer and drop in an IFC file. You can also choose the sample model
+if you want to explore first. Select any element in the model or tree to see
+its properties and related data.
 
-!!! tip
-    Start with the browser version. Install Local Studio only if you need
-    native Python, conversion, command-line checks, or an MCP bridge.
+## Inspect and review
 
-## Choose how to run it
+The model tree helps you browse elements, properties, quantities and schedules.
+For visual review, you can measure the model, create sections and 2D plans, and
+save viewpoints you want to return to.
 
-| Browser | Local Studio |
-| --- | --- |
-| No installation | Install with `pip install ifcviewx` |
-| Best for everyday viewing and review | Adds native IfcOpenShell tools |
-| Files stay in the browser tab | Files stay on your computer |
+## Check and organize
 
-[Learn about Local Studio](local-studio.md)
+Use filters to focus on important elements, then run model checks, IFC
+conformance or IDS validation. Findings can be recorded as BCF issues or kept
+in an offline report. Model changes are prepared for review before they are
+applied.
 
-## Main tools
+## Optional tools
 
-<div class="grid cards" markdown>
+The Python Console supports advanced model queries. The assistant can search
+the model, explain properties and help control the view.
 
--   **Inspect and organize**
-
-    Browse the model tree, properties, quantities, schedules, and saved
-    selection sets.
-
--   **Review geometry**
-
-    Measure, cut sections, build 2D plans, compare revisions, and check clashes.
-
--   **Check and report**
-
-    Run model checks and IDS validation. Export an offline report or BCF issues.
-
--   **Extend the viewer**
-
-    Add a bundled or installed extension through the permission-scoped SDK.
-
-</div>
-
-## Where to go next
-
-- Use [Smart Measure](smart-measure.md) for gaps and axis measurements.
-- Use [Section Workspace](section-workspace.md) for plans and elevations.
-- Read the [Assistant guide](assistant.md) before connecting an AI provider.
-- See [Extensions](plugins/index.md) if you want to add a tool.
+The browser needs no installation. [Local Studio](local-studio.md) serves the
+same viewer locally and adds native IfcOpenShell tools, command-line checks and
+an MCP bridge.

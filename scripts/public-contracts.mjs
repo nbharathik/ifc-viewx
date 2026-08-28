@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const SNAPSHOT = resolve(ROOT, "docs/refactor/public-contracts.json");
+const SNAPSHOT = resolve(ROOT, "tests/contracts/public-contracts.json");
 
 const slash = (value) => value.replaceAll("\\", "/");
 const compareText = (a, b) => a < b ? -1 : a > b ? 1 : 0;

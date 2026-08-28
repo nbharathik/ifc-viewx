@@ -13,12 +13,15 @@ async function evaluate(source) {
   return import(`data:text/javascript,${encodeURIComponent(code)}`);
 }
 
+const release = await evaluate(await readFile(join("src", "app", "release.ts"), "utf8"));
+
 const found = [];
 for (const entry of await readdir(PLUGINS, { withFileTypes: true })) {
   if (!entry.isDirectory() || entry.name === "runtime") continue;
   const manifestText = await readFile(join(PLUGINS, entry.name, "extension.json"), "utf8").catch(() => null);
   if (!manifestText) continue;
   const manifest = JSON.parse(manifestText);
+  if (!release.isReleasePluginVisible(manifest.id)) continue;
   found.push({
     id: manifest.id,
     name: manifest.name,
@@ -33,55 +36,35 @@ for (const entry of await readdir(PLUGINS, { withFileTypes: true })) {
     url: manifest.publisher?.url,
   });
 }
-found.push(...(await evaluate(await readFile(join(PLUGINS, "shortcuts.ts"), "utf8"))).SHORTCUTS);
+found.push(...(await evaluate(await readFile(join(PLUGINS, "shortcuts.ts"), "utf8"))).SHORTCUTS
+  .filter((plugin) => release.isReleasePluginVisible(plugin.id)));
 found.sort((a, b) => a.name.localeCompare(b.name));
 
 const TIERS = [
-  ["web", "In the browser", "These run in the tab. Nothing to install, nothing uploaded."],
-  ["local", "Local Studio", "These need the local service, which is one `pip install` away."],
-  ["core", "Built into the app", "These have their own panel on the rail rather than being opened from the catalog."],
+  ["web", "Viewer plugins", "Available from **Plugins** in the viewer."],
+  ["core", "Built-in tools", "Available directly from the viewer."],
+  ["local", "Local Studio", "Available after installing Local Studio."],
 ];
 
 const section = ([tier, title, blurb]) => {
   const list = found.filter((plugin) => plugin.tier === tier);
   if (!list.length) return "";
-  const entries = list.map((plugin) => {
-    const credit = plugin.author
-      ? `    By ${plugin.url ? `[${plugin.author}](${plugin.url})` : plugin.author}.`
-      : "";
-    return [
-      `??? info "${plugin.name}${plugin.soon ? " (planned)" : ""}: ${plugin.tagline}"`,
-      "",
-      `    ${plugin.about}`,
-      "",
-      "    **Highlights**",
-      "",
-      ...plugin.does.map((line) => `    - ${line}`),
-      "",
-      credit,
-      `    <small>Category: ${plugin.category}${plugin.capability ? ` &middot; Needs: \`${plugin.capability}\`` : ""}</small>`,
-      "",
-    ].filter((line, index, lines) => line || lines[index - 1]).join("\n");
-  });
   return [
     `## ${title}`,
     "",
     blurb,
-    "Select a tool to see its purpose and main features.",
     "",
-    ...entries,
+    ...list.flatMap((plugin) => [`**${plugin.name}.** ${plugin.tagline}.`, ""]),
   ].join("\n");
 };
 
 const page = [
-  "# Extension catalog",
+  "# Available tools in 0.1.2",
   "",
-  "Find the tool you need without leaving the viewer. This page is generated",
-  "from the extension manifests, so it stays in sync with the app.",
-  "See [Build an extension](index.md) to add your own tool.",
+  "This page lists the tools available in the planned 0.1.2 release. Each one runs in the browser or through Local Studio.",
   "",
   ...TIERS.map(section).filter(Boolean),
 ].join("\n");
 
-await writeFile(OUT, `${page}\n`);
+await writeFile(OUT, `${page.trimEnd()}\n`);
 console.log(`Wrote ${OUT} with ${found.length} plugin(s).`);

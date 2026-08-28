@@ -1,5 +1,5 @@
 site_name: IFCViewX Docs
-site_description: Simple guides for viewing, checking, and extending IFC models with IFCViewX
+site_description: Short guides for the planned IFCViewX 0.1.2 release
 site_url: https://nbharathik.github.io/ifc-viewx/docs/
 repo_url: https://github.com/nbharathik/ifc-viewx
 repo_name: nbharathik/ifc-viewx
@@ -75,22 +75,6 @@ extra:
 
 nav:
   - Home: index.md
-  - Viewer tools:
-      - Assistant: assistant.md
-      - Smart Measure: smart-measure.md
-      - Section Workspace: section-workspace.md
-  - Extensions:
-      - Start here: plugins/index.md
-      - Install a package: plugins/installed.md
-      - SDK reference: plugins/api.md
-      - Tool catalog: plugins/catalog.md
-  - Local Studio:
-      - Overview: local-studio.md
-      - Native providers: local-providers.md
-  - Development:
-      - How it works: how-it-works.md
-      - Work on the repo: contributing.md
-      - Refactor contract: refactor/index.md
-      - Frozen features: refactor/features.md
-      - Verification: refactor/verification.md
-      - Refactor report: refactor/report.md
+  - Assistant: assistant.md
+  - Available tools: plugins/catalog.md
+  - Local Studio: local-studio.md

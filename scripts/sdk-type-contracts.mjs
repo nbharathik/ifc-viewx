@@ -8,7 +8,7 @@ import ts from "typescript";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const ENTRY = resolve(ROOT, "src/sdk/index.ts");
 const GLOBALS = resolve(ROOT, "src/globals.d.ts");
-const SNAPSHOT = resolve(ROOT, "docs/refactor/sdk-type-contracts.json");
+const SNAPSHOT = resolve(ROOT, "tests/contracts/sdk-type-contracts.json");
 const slash = (value) => value.replaceAll("\\", "/");
 const compareText = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const digest = (value) => createHash("sha256").update(value).digest("hex");

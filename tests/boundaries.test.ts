@@ -17,7 +17,7 @@ describe("architecture boundaries", () => {
 
   it("adds no dependency cycle or boundary violation", async () => {
     const baseline = JSON.parse(await readFile(
-      new URL("../docs/refactor/architecture-baseline.json", import.meta.url),
+      new URL("./contracts/architecture-baseline.json", import.meta.url),
       "utf8",
     )) as { allowedCycles: string[][] };
     const report = await architectureReport();

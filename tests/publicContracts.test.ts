@@ -9,7 +9,7 @@ const contracts = collectPublicContracts();
 
 describe("public contract freeze", () => {
   it("matches the reviewed public contract snapshot", async () => {
-    const snapshot = await readFile(new URL("../docs/refactor/public-contracts.json", import.meta.url), "utf8");
+    const snapshot = await readFile(new URL("./contracts/public-contracts.json", import.meta.url), "utf8");
     expect(contractJson(await contracts)).toBe(snapshot);
   });
 
@@ -41,7 +41,7 @@ describe("public contract freeze", () => {
 
   it("has a reviewed SDK declaration snapshot", async () => {
     const snapshot = JSON.parse(await readFile(
-      new URL("../docs/refactor/sdk-type-contracts.json", import.meta.url),
+      new URL("./contracts/sdk-type-contracts.json", import.meta.url),
       "utf8",
     )) as { digest: string; files: Array<{ path: string; sha256: string }> };
     expect(snapshot.digest).toMatch(/^[a-f0-9]{64}$/);
