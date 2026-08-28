@@ -9,24 +9,23 @@
 // This file is the seam. The panel and the assistant both come through here,
 // so they can never disagree about a model, and neither one has to know that
 // there is a worker behind it. The pieces are in ./clash/.
-import { CLASH_LIMIT, MM } from "./clash/types.js";
-import type { ClashPair, SweepProgress, SweepResult, SweepSpec } from "./clash/types.js";
-import { elementsOf } from "../sdk/data.js";
-import type { ModelElement } from "../sdk/types.js";
+import { CLASH_LIMIT, MM } from "../geometry/clash/types.js";
+import type { ClashOptions, ClashPair, SweepResult, SweepSpec } from "../geometry/clash/types.js";
+import { elementsOf, type ModelElement } from "../data/model.js";
 import type { Viewer } from "../viewer-core/viewer.js";
 import { geometryService } from "../geometry/service.js";
-import { clashClassPair } from "./clash/workflow.js";
+import { clashClassPair } from "../geometry/clash/workflow.js";
 import { packedModelTransforms } from "../geometry/modelTransform.js";
 
-export type { ClashKind, ClashPair, SweepProgress, SweepResult } from "./clash/types.js";
-export { CLASH_LIMIT } from "./clash/types.js";
+export type { ClashKind, ClashOptions, ClashPair, SweepProgress, SweepResult } from "../geometry/clash/types.js";
+export { CLASH_LIMIT } from "../geometry/clash/types.js";
 export {
   clashClassPair,
   clashFingerprint,
   groupClashes,
   resolvedClashes,
   reviewClashes,
-} from "./clash/workflow.js";
+} from "../geometry/clash/workflow.js";
 export type {
   ClashCurrentState,
   ClashDecision,
@@ -36,7 +35,7 @@ export type {
   ClashReviewGroup,
   ClashReviewRow,
   ClashReviewState,
-} from "./clash/workflow.js";
+} from "../geometry/clash/workflow.js";
 
 export const STRUCTURE = ["IfcWall", "IfcWallStandardCase", "IfcSlab", "IfcBeam", "IfcColumn", "IfcFooting", "IfcRoof", "IfcMember", "IfcPlate"];
 export const MEP = ["IfcDuctSegment", "IfcDuctFitting", "IfcPipeSegment", "IfcPipeFitting", "IfcCableCarrierSegment", "IfcCableSegment", "IfcFlowTerminal", "IfcAirTerminal", "IfcSanitaryTerminal", "IfcValve", "IfcPump", "IfcTank", "IfcSpaceHeater", "IfcElectricAppliance"];
@@ -44,17 +43,6 @@ export const OPENINGS = ["IfcDoor", "IfcWindow", "IfcStair", "IfcRailing", "IfcF
 
 /** Anything under this is a graze rather than a clash, unless asked otherwise. */
 export const DEFAULT_TOLERANCE_MM = 10;
-
-/** What a sweep needs to know beyond the two sets. */
-export interface ClashOptions {
-  /** Intersections thinner than this are dropped. */
-  toleranceMm?: number;
-  /** Above zero, pairs that do not touch are also checked for a tight gap. */
-  clearanceMm?: number;
-  limit?: number;
-  onProgress?(progress: SweepProgress): void;
-  signal?: AbortSignal;
-}
 
 /** Element ids of these classes that actually reached the scene as geometry. */
 export function idsOfTypes(elements: ModelElement[], types: Set<string>, hasGeometry: (id: number) => boolean): number[] {

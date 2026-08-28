@@ -16,6 +16,10 @@ import { XrController, type XrMode } from './scene/xr.js';
 import { expressOf, modelOf, packId } from './ids.js';
 import { explodeOffsets, storeyElementSets, storeySlideOffsets } from './arrange.js';
 import { compassPoint, heading, metres, speedLabel, storeyAt, type StoreyBand } from './flyStats.js';
+import { packTree } from './federation.js';
+import type { FederatedModel } from './federation.js';
+import { sameVisibilityStep, VISIBILITY_HISTORY_LIMIT } from './visibility.js';
+import type { VisibilityRule, VisibilityStep } from './visibility.js';
 import {
   canTransform,
   compatibleCrs,
@@ -26,18 +30,43 @@ import {
   safeModelTransform,
 } from '../geo/coordinates.js';
 import {
+  angleAt,
   DEFAULT_MEASUREMENT_FORMAT,
   constrainMeasurementPoint,
+  formatAngle,
   formatArea,
   formatCoordinate,
   formatLength,
   measurementSemantic,
+  pointDistance,
+  ringArea,
+  ringPerimeter,
+  selectMeasureLabels,
 } from './measurements.js';
 import type {
+  DistanceMeasurementState,
   MeasureConstraint,
+  MeasureLabelBox,
+  Measurement,
   MeasurementFormat,
-  MeasurementSemantic,
+  MeasurementObject,
+  MeasurementState,
+  MeasurementUpdate,
+  MeasureMode,
+  ShapeMeasure,
+  ShapeMeasurementState,
+  SnapMode,
 } from './measurements.js';
+import {
+  AXIS_NORMAL,
+  boxPlanes,
+  isAxisSection,
+  normalizeSectionNormal,
+  padBox,
+  sanitizeBox,
+  sectionKey,
+} from './sections.js';
+import type { PlaneSectionState, SectionBox, SectionState } from './sections.js';
 import type { CameraPose, ClipPlaneSpec, ProjectionMode, SceneInfo, SnapHit, SnapKind } from './scene/scene.js';
 import type { PickResult, ViewPreset } from './scene/controls.js';
 import type {
@@ -62,80 +91,48 @@ export * from './engine/types.js';
 export type { CameraPose, ProjectionMode, SceneInfo, SnapHit, SnapKind } from './scene/scene.js';
 export type { PickResult, ViewPreset } from './scene/controls.js';
 export {
+  angleAt,
   DEFAULT_MEASUREMENT_FORMAT,
   constrainMeasurementPoint,
+  formatAngle,
   formatArea,
   formatCoordinate,
   formatLength,
   formatVolume,
   formatWeight,
   measurementSemantic,
+  ringArea,
+  ringPerimeter,
+  selectMeasureLabels,
 } from './measurements.js';
 export type {
+  DistanceMeasurementState,
   MeasureConstraint,
+  MeasureLabelBox,
+  Measurement,
   MeasurementFormat,
+  MeasurementObject,
   MeasurementPrecision,
   MeasurementSemantic,
+  MeasurementState,
+  MeasurementUpdate,
   MeasurementUnit,
+  MeasureMode,
+  ShapeMeasure,
+  ShapeMeasurementState,
+  SnapMode,
 } from './measurements.js';
-
-export type SectionAxisName = 'x' | 'y' | 'z';
-
-export interface AxisSectionState {
-  axis: SectionAxisName;
-  offset: number;
-  flip: boolean;
-}
-
-/**
- * Arbitrary plane: unit normal in scene space, n . p = offset on the plane.
- * flip false discards the n . p > offset half, matching the axis convention.
- */
-export interface PlaneSectionState {
-  axis?: undefined;
-  id: string;
-  name: string;
-  normal: [number, number, number];
-  offset: number;
-  flip: boolean;
-}
-
-export type SectionState = AxisSectionState | PlaneSectionState;
-
-export const isAxisSection = (s: SectionState): s is AxisSectionState =>
-  typeof (s as AxisSectionState).axis === 'string';
-
-const AXIS_NORMAL: Record<SectionAxisName, [number, number, number]> = {
-  x: [1, 0, 0],
-  y: [0, 1, 0],
-  z: [0, 0, 1],
-};
-
-const sectionKey = (s: SectionState): string => (isAxisSection(s) ? s.axis : s.id);
-
-const normalize3 = (v: [number, number, number]): [number, number, number] | null => {
-  const len = Math.hypot(v[0], v[1], v[2]);
-  if (!Number.isFinite(len) || len < 1e-9) return null;
-  return [v[0] / len, v[1] / len, v[2] / len];
-};
-
-/**
- * One model in a federated set. `index` is the slot packed into every id the
- * model owns, so `modelOf(someElementId)` names the model it came from.
- */
-export interface FederatedModel {
-  index: number;
-  name: string;
-  visible: boolean;
-  /** Nudge applied to the whole model, for files that disagree on placement. */
-  offset: [number, number, number];
-  transform: ModelTransform;
-  geo: IfcGeoReference;
-  geoStatus: 'ready' | 'aligned' | 'manual' | 'missing' | 'conflict';
-  diagnostics: string[];
-  elements: number;
-  triangles: number;
-}
+export { boxPlanes, isAxisSection, padBox, sanitizeBox } from './sections.js';
+export type {
+  AxisSectionState,
+  PlaneSectionState,
+  SectionAxisName,
+  SectionBox,
+  SectionState,
+} from './sections.js';
+export { packTree } from './federation.js';
+export type { FederatedModel } from './federation.js';
+export type { VisibilityRule } from './visibility.js';
 
 /** What the viewer keeps per open model. */
 interface ModelEntry {
@@ -149,132 +146,8 @@ interface ModelEntry {
   geo: IfcGeoReference;
 }
 
-/** A clipping volume, in scene coordinates. Corners, not centre and size. */
-export interface SectionBox {
-  min: [number, number, number];
-  max: [number, number, number];
-}
-
-const AXIS_ORDER: SectionAxisName[] = ['x', 'y', 'z'];
-
-/**
- * A box as six half-spaces. Materials keep three's default clipIntersection,
- * so a fragment outside any one of them is dropped, which is the box.
- */
-/**
- * Rewrite a spatial tree's ids into one model's namespace. Model 0 packs to
- * itself, so a single model skips the walk entirely and keeps the exact tree
- * the engine handed over, node identity included.
- */
-export function packTree(node: SpatialNode, modelIndex: number): SpatialNode {
-  if (modelIndex === 0) return node;
-  return {
-    ...node,
-    expressID: packId(modelIndex, node.expressID),
-    children: node.children.map((child) => packTree(child, modelIndex)),
-  };
-}
-
-export function boxPlanes(box: SectionBox): AxisSectionState[] {
-  const planes: AxisSectionState[] = [];
-  AXIS_ORDER.forEach((axis, i) => {
-    planes.push({ axis, offset: box.max[i], flip: false });
-    planes.push({ axis, offset: box.min[i], flip: true });
-  });
-  return planes;
-}
-
-/**
- * Grow a box by a share of its longest side, so the elements it was fitted to
- * do not sit exactly on a clipping plane and lose their own faces.
- */
-export function padBox(box: SectionBox, pad: number): SectionBox {
-  const span = Math.max(box.max[0] - box.min[0], box.max[1] - box.min[1], box.max[2] - box.min[2]);
-  const grow = Math.max(span * pad, 0.01);
-  return {
-    min: [box.min[0] - grow, box.min[1] - grow, box.min[2] - grow],
-    max: [box.max[0] + grow, box.max[1] + grow, box.max[2] + grow],
-  };
-}
-
-/** Keep every axis open by at least a sliver; a collapsed one clips it all. */
-export function sanitizeBox(box: SectionBox): SectionBox {
-  const min = box.min.map((value, i) => Math.min(value, box.max[i] - 1e-3)) as [number, number, number];
-  return { min, max: [...box.max] as [number, number, number] };
-}
-
 /** How a new selection combines with the current one. */
 export type SelectMode = 'replace' | 'add' | 'remove' | 'toggle';
-
-/**
- * What the measure tool pulls a placed point onto. Auto takes a corner first,
- * then an edge midpoint, then the point along the edge; vertex takes corners
- * only, for measuring a grid of them; off measures the raw surface.
- */
-export type SnapMode = 'auto' | 'vertex' | 'off';
-
-/** One first-class distance measurement. Arithmetic stays in metres. */
-export interface Measurement {
-  kind: 'distance';
-  /** Handle for removeMeasurement; 0 while the span still follows the cursor. */
-  id: number;
-  label: string;
-  visible: boolean;
-  semantic: MeasurementSemantic;
-  a: [number, number, number];
-  b: [number, number, number] | null;
-  distance: number;
-  /** Split into the ground plane and the height, the way a builder reads it. */
-  horizontal: number;
-  vertical: number;
-  /** Rise over horizontal run. Null represents a vertical span. */
-  slopePercent: number | null;
-  /** Unsigned angle above the horizontal plane, in degrees. */
-  slopeAngle: number;
-  /** False while the far end is still following the cursor. */
-  complete: boolean;
-  /** What each end caught; the far end is null until it is placed. */
-  ends: [SnapKind, SnapKind | null];
-}
-
-export interface DistanceMeasurementState {
-  /** Absent in viewpoints written before measurements became first-class objects. */
-  kind?: 'distance';
-  id?: number;
-  label?: string;
-  visible?: boolean;
-  a: [number, number, number];
-  b: [number, number, number];
-  ends: [SnapKind, SnapKind];
-}
-
-/** What the measure tool is collecting: two points, three, or a ring of them. */
-export type MeasureMode = 'distance' | 'path' | 'angle' | 'area' | 'coordinate' | 'count';
-
-/** A finished shape or coordinate. Distances are metres, angles degrees. */
-export interface ShapeMeasure {
-  id: number;
-  kind: 'path' | 'angle' | 'area' | 'coordinate' | 'count';
-  label: string;
-  visible: boolean;
-  points: Array<[number, number, number]>;
-  /** Angle at the middle point, degrees. Only for `angle`. */
-  angle?: number;
-  /** Newell area of the ring, m2. Only for `area`. */
-  area?: number;
-  /** Total edge length, closing edge included for an area. */
-  perimeter: number;
-}
-
-export interface ShapeMeasurementState {
-  kind: ShapeMeasure['kind'];
-  id?: number;
-  label?: string;
-  visible?: boolean;
-  points: Array<[number, number, number]>;
-}
-
-export type MeasurementState = DistanceMeasurementState | ShapeMeasurementState;
 
 /** A text note anchored to a scene-space point, optionally about an element. */
 export interface AnnotationState {
@@ -286,87 +159,6 @@ export interface AnnotationState {
   visible?: boolean;
   createdAt?: string;
 }
-export type MeasurementObject = Measurement | ShapeMeasure;
-export interface MeasurementUpdate {
-  label?: string;
-  visible?: boolean;
-}
-
-const sub = (a: [number, number, number], b: [number, number, number]): [number, number, number] => [
-  a[0] - b[0],
-  a[1] - b[1],
-  a[2] - b[2],
-];
-
-const length3 = (v: [number, number, number]): number => Math.hypot(v[0], v[1], v[2]);
-
-/**
- * Newell's method: the area of the best-fit plane the ring sits in. Exact for a
- * planar ring, and the sensible answer for one that is slightly out of plane,
- * which is what picking points off a real model always gives you.
- */
-export function ringArea(points: Array<[number, number, number]>): number {
-  if (points.length < 3) return 0;
-  let x = 0;
-  let y = 0;
-  let z = 0;
-  for (let i = 0; i < points.length; i++) {
-    const a = points[i];
-    const b = points[(i + 1) % points.length];
-    x += a[1] * b[2] - a[2] * b[1];
-    y += a[2] * b[0] - a[0] * b[2];
-    z += a[0] * b[1] - a[1] * b[0];
-  }
-  return Math.hypot(x, y, z) / 2;
-}
-
-/** Angle at `b`, in degrees. Zero-length arms have no angle to report. */
-export function angleAt(
-  a: [number, number, number],
-  b: [number, number, number],
-  c: [number, number, number],
-): number {
-  const u = sub(a, b);
-  const v = sub(c, b);
-  const lu = length3(u);
-  const lv = length3(v);
-  if (lu === 0 || lv === 0) return 0;
-  const cos = (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]) / (lu * lv);
-  return (Math.acos(Math.min(1, Math.max(-1, cos))) * 180) / Math.PI;
-}
-
-export function ringPerimeter(points: Array<[number, number, number]>, closed: boolean): number {
-  let total = 0;
-  const last = closed ? points.length : points.length - 1;
-  for (let i = 0; i < last; i++) total += length3(sub(points[(i + 1) % points.length], points[i]));
-  return total;
-}
-
-/** Degrees, to a tenth: finer than that is noise on a picked point. */
-export function formatAngle(degrees: number): string {
-  return `${degrees.toFixed(1)} deg`;
-}
-
-/**
- * One named visibility rule. Keep rules union with each other, hide rules
- * subtract; both are removable, so a view can be built up and taken apart.
- */
-export interface VisibilityRule {
-  id: string;
-  label: string;
-  mode: 'keep' | 'hide';
-  ids: number[];
-  /** How the rule was built, when the caller could say. Saved views read it. */
-  selector?: unknown;
-}
-
-/** One point in the visibility history: everything `applyVisibility` reads. */
-interface VisibilityStep {
-  rules: VisibilityRule[];
-  hidden: number[];
-}
-
-const VISIBILITY_HISTORY_LIMIT = 50;
 
 /** Shape id carried by the legs of the angle or ring still being placed. */
 const PENDING_SHAPE = -1;
@@ -379,35 +171,6 @@ interface MeasureSpanRecord {
   label?: string;
   visible?: boolean;
   shape?: number;
-}
-
-export interface MeasureLabelBox {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-export function selectMeasureLabels<T extends MeasureLabelBox>(items: T[], limit = 80, gap = 5): T[] {
-  const kept: T[] = [];
-  for (const item of items) {
-    if (kept.length >= limit) break;
-    if (!Number.isFinite(item.x) || !Number.isFinite(item.y)) continue;
-    const overlaps = kept.some((other) =>
-      Math.abs(item.x - other.x) < (item.width + other.width) / 2 + gap
-      && Math.abs(item.y - other.y) < (item.height + other.height) / 2 + gap,
-    );
-    if (!overlaps) kept.push(item);
-  }
-  return kept;
-}
-
-const sameIds = (a: number[], b: number[]): boolean =>
-  a.length === b.length && a.every((id, i) => id === b[i]);
-
-function sameStep(a: VisibilityStep, b: VisibilityStep): boolean {
-  if (a.rules.length !== b.rules.length || !sameIds(a.hidden, b.hidden)) return false;
-  return a.rules.every((rule, i) => rule.mode === b.rules[i].mode && sameIds(rule.ids, b.rules[i].ids));
 }
 
 export interface ViewerWorkerOptions {
@@ -2464,7 +2227,7 @@ class ViewerImpl implements Viewer {
   private pushVisibilityHistory(): void {
     const step = this.snapshotVisibility();
     const top = this.visPast[this.visPast.length - 1];
-    if (top && sameStep(top, step)) return;
+    if (top && sameVisibilityStep(top, step)) return;
     this.visPast.push(step);
     if (this.visPast.length > VISIBILITY_HISTORY_LIMIT) this.visPast.shift();
     this.visFuture = [];
@@ -2726,7 +2489,7 @@ class ViewerImpl implements Viewer {
         byKey.set(state.axis, state);
         continue;
       }
-      const normal = normalize3(state.normal);
+      const normal = normalizeSectionNormal(state.normal);
       if (!normal) continue;
       const numbered = /^plane-(\d+)$/.exec(state.id ?? '');
       if (numbered) this.planeSeq = Math.max(this.planeSeq, Number(numbered[1]));
@@ -3271,7 +3034,7 @@ class ViewerImpl implements Viewer {
       center[2] += point[2] / points.length;
     }
     let radius = 0;
-    for (const point of points) radius = Math.max(radius, length3(sub(point, center)));
+    for (const point of points) radius = Math.max(radius, pointDistance(point, center));
     this.fitToPoint(center, Math.max(0.25, radius * 1.15));
     return true;
   }
@@ -3484,7 +3247,7 @@ class ViewerImpl implements Viewer {
     // polygon tool does and what a user tries before finding the button.
     if (this.measureMode === 'area' && this.chain.length >= 3) {
       const first = this.chain[0];
-      if (length3(sub(point, first)) < this.closeTolerance()) {
+      if (pointDistance(point, first) < this.closeTolerance()) {
         this.closeArea();
         return;
       }

@@ -1,8 +1,22 @@
+import type { SemanticActions } from "../llm/actions.js";
+import type { Viewer } from "../viewer-core/viewer.js";
+import type { ResultStore } from "./results.js";
+
 export type CapabilityEffect = "read" | "view" | "propose" | "write" | "external";
 
 export type CapabilityCost = "instant" | "interactive" | "long";
 
 export type JsonSchema = Record<string, unknown>;
+
+export interface ViewerCapabilityContext {
+  viewer: Viewer;
+  semantic?: SemanticActions;
+  stageEdit?(input: Record<string, unknown>): Promise<string>;
+  results?: ResultStore;
+  revision?(): string;
+  setActiveResult?(id: string, row?: number): void;
+  viewport?: HTMLElement;
+}
 
 export interface CapabilityExposure {
   assistant?: boolean;

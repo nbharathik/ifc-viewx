@@ -8,6 +8,8 @@ licenses. The bundled viewer this wheel serves redistributes their compiled
 form:
 
 - three (MIT), three-mesh-bvh (MIT), and fflate (MIT): compiled JavaScript.
+- PDF.js / pdfjs-dist (Apache-2.0): compiled JavaScript is redistributed in the
+  bundled viewer for drawing-sheet import and rendering.
 - web-ifc (MPL-2.0): its compiled JavaScript and WebAssembly are redistributed
   in the bundled viewer. Source for the exact version used is at
   https://github.com/ThatOpen/engine_web-ifc at tag v0.0.77; the MPL-2.0 text is

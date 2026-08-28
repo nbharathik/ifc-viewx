@@ -90,3 +90,7 @@ nav:
   - Development:
       - How it works: how-it-works.md
       - Work on the repo: contributing.md
+      - Refactor contract: refactor/index.md
+      - Frozen features: refactor/features.md
+      - Verification: refactor/verification.md
+      - Refactor report: refactor/report.md

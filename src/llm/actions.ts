@@ -1,10 +1,10 @@
 // Tier-1 assistant tools: small JSON actions executed against the viewer,
 // plus the model brief injected into the system prompt. Everything answers
 // from data the viewer already holds; no Python runtime is involved.
-import { elementsOf } from "../sdk/data.js";
+import { elementsOf } from "../data/model.js";
 import { buildIndex, type Bm25Index } from "./retrieval.js";
 import type { CameraPose, SectionBox, SpatialNode, Viewer, ViewPreset } from "../viewer-core/viewer.js";
-import type { ModelElement } from "../sdk/types.js";
+import type { ModelElement } from "../data/model.js";
 import { measureDistance } from "../geometry/distance.js";
 import { measureLaser } from "../geometry/laser.js";
 import { extractSectionContours, type SectionAxis } from "../geometry/section.js";

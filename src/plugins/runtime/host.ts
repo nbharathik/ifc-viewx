@@ -7,7 +7,7 @@
 // second copy of themselves.
 import { h, icon, iconButton, toast } from "../../ui/kit.js";
 import { emptyState } from "../../ui/shell.js";
-import { download, PropertyIndex } from "../../sdk/data.js";
+import { download, PropertyIndex } from "../../data/model.js";
 import { createHostContext, type ContextDeps, type PythonRunner } from "./context.js";
 import { CATALOG, findPlugin, isBuiltIn, isLive } from "../registry.js";
 import type { CatalogPlugin } from "../registry.js";
@@ -17,7 +17,7 @@ import type {
   ExtensionIssueInput,
   ExtensionIssueResult,
   ExtensionModule,
-} from "../../sdk/types.js";
+} from "../../extensions/api.js";
 import type { CommandContribution } from "../../sdk/contributions.js";
 import { ExtensionContributionRegistry, ExtensionScope } from "../../extensions/contributions.js";
 import { createExtensionContext } from "../../extensions/context.js";
@@ -25,7 +25,7 @@ import { ExtensionResultStore } from "../../extensions/results.js";
 import type { ResultStore } from "../../capabilities/results.js";
 import type { Viewer } from "../../viewer-core/viewer.js";
 import type { ServiceClient } from "../../bridge/serviceClient.js";
-import type { ColorRule } from "../../ui/colorBy.js";
+import type { ColorRule } from "../../views/color.js";
 
 /** About paragraph and does-list, shared by the panel entry and the browser card. */
 export function pluginDetails(plugin: CatalogPlugin): HTMLElement {

@@ -93,7 +93,7 @@ def _stage(path: Path) -> tuple[str, str]:
 
 def _convert_now(source: Path, sha: str) -> None:
     from . import store
-    from .convert import cache_valid, mark_cache
+    from .convert import cache_valid, publish_cache
 
     target = store.converted_path(sha)
     if cache_valid(target):
@@ -108,8 +108,7 @@ def _convert_now(source: Path, sha: str) -> None:
     staging = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
     try:
         stats = convert(source, staging, report)
-        store.commit_staging(staging, target, keep={sha})
-        mark_cache(target)
+        publish_cache(staging, target, sha)
     except Exception as exc:  # noqa: BLE001 - the message is the product
         sys.exit(f"\nifcviewx: conversion failed: {exc}")
     finally:

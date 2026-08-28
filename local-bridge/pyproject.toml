@@ -48,7 +48,8 @@ Homepage = "https://github.com/nbharathik/ifc-viewx"
 Viewer = "https://nbharathik.github.io/ifc-viewx/"
 
 [build-system]
-requires = ["hatchling>=1.27"]
+# Hatchling 1.32 emits Core Metadata 2.5, which current PyPI tooling rejects.
+requires = ["hatchling>=1.27,<1.32"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]

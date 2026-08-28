@@ -5,8 +5,8 @@
 // extension is given. Everything expensive is memoized for the length of one
 // run: three geometric rules ask for the same bounds and the same storey
 // bands, and the worker round trip is the cost that matters.
-import type { ElementRow } from "../sdk/data.js";
-import type { ExtensionContext } from "../sdk/types.js";
+import type { ElementRow } from "../data/model.js";
+import type { ExtensionContext } from "../extensions/api.js";
 import { matchText, readRowProperty, type Selector } from "../views/definition.js";
 import type { Box, ClashHit, RuleModel, StoreyInfo } from "./engine.js";
 

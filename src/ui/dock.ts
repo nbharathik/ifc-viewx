@@ -14,9 +14,9 @@ import {
   slidingPill,
   toast,
 } from "./kit.js";
-import { applyColors, colorableKeys, computeColors, computeColorsFromEntries, cssColor, CustomColors, materialColorEntries, type ColorResult, type ColorRule } from "./colorBy.js";
+import { applyColors, colorableKeys, computeColors, computeColorsFromEntries, cssColor, CustomColors, materialColorEntries, type ColorResult, type ColorRule } from "../views/color.js";
 import { formatArea, formatLength, formatVolume, formatWeight } from "../viewer-core/viewer.js";
-import type { PropertyIndex } from "../sdk/data.js";
+import type { PropertyIndex } from "../data/model.js";
 import { isAxisSection } from "../viewer-core/viewer.js";
 import { classifyByPlanes } from "../geometry/plane.js";
 import { measureVolumes } from "../geometry/volumes.js";

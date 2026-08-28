@@ -8,14 +8,13 @@
 //
 // Nothing here applies anything. Each capability returns a proposal; the app
 // stages it, and the user decides.
-import type { ColorRule } from "../ui/colorBy.js";
+import type { ColorRule } from "../views/color.js";
 import type { RuleInstance, Ruleset } from "../rules/engine.js";
 import { RULESET_FORMAT } from "../rules/engine.js";
 import { describeSelector, selectorPortable, type Selector, type ViewDefinition } from "../views/definition.js";
 import type { ComputedProperty } from "../data/computed.js";
 import { checkFormula } from "../data/computed.js";
-import type { CapabilityDefinition } from "./types.js";
-import type { ViewerCapabilityContext } from "./viewer.js";
+import type { CapabilityDefinition, ViewerCapabilityContext } from "./types.js";
 
 /** The selector language, as a schema the model can be held to. */
 const SELECTOR_SCHEMA = {

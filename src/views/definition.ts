@@ -5,8 +5,8 @@
 // keyed on, where the cuts are. Rules resolve against whatever model is open,
 // so the same file applies to next week's revision and to a federation the
 // author never saw.
-import type { ElementRow, PropertyIndex } from "../sdk/data.js";
-import type { ColorRule } from "../ui/colorBy.js";
+import type { ElementRow, PropertyIndex } from "../data/model.js";
+import type { ColorRule } from "./color.js";
 import { modelOf } from "../viewer-core/ids.js";
 import type {
   AnnotationState,

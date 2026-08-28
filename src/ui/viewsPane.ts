@@ -1,9 +1,8 @@
 // Saved model views and computed data definitions for the inspector rail.
 import { confirmAction, h, icon, iconButton, promptForm, toast } from "./kit.js";
 import { emptyState } from "./shell.js";
-import type { ColorRule } from "./colorBy.js";
-import { download } from "../sdk/data.js";
-import type { PropertyIndex } from "../sdk/data.js";
+import type { ColorRule } from "../views/color.js";
+import { download, type PropertyIndex } from "../data/model.js";
 import {
   COMPUTED_TEMPLATES,
   ComputedSet,

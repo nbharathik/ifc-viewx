@@ -4,7 +4,7 @@
 // viewer; the table exports as CSV.
 import { h, icon, spinner, toast } from "./kit.js";
 import { emptyState } from "./shell.js";
-import { saveCsv, type Value } from "../sdk/data.js";
+import { saveCsv, type Value } from "../data/model.js";
 import {
   buildTable, describeDiff, diffTable, fromScheduleRows, parseDelimited, sniffDelimiter, toEditOps,
   type TableRow,

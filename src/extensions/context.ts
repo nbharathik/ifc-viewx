@@ -3,7 +3,7 @@ import type {
   ExtensionContext,
   ExtensionIssueInput,
   ExtensionIssueResult,
-} from "../sdk/types.js";
+} from "./api.js";
 import type {
   CommandContribution,
   ContributionFor,
@@ -11,7 +11,7 @@ import type {
   ExtensionManifest,
   ExtensionPermission,
 } from "../sdk/contributions.js";
-import type { HostContext } from "../plugins/runtime/context.js";
+import type { HostContext } from "./hostContext.js";
 import type { ExtensionScope } from "./contributions.js";
 import type { ExtensionResultStore } from "./results.js";
 import type { ResultHandle } from "../capabilities/results.js";

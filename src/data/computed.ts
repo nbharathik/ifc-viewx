@@ -7,7 +7,7 @@
 //
 // Keys land under "Computed.<name>", so every existing property picker finds
 // them without knowing they are derived.
-import type { ElementRow, Value } from "../sdk/data.js";
+import type { ElementRow, Value } from "./types.js";
 
 export const COMPUTED_SET = "Computed";
 export const computedKey = (name: string): string => `${COMPUTED_SET}.${name}`;

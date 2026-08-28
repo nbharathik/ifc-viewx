@@ -1,4 +1,4 @@
-import type { SweepProgress, SweepResult, SweepSpec } from "../ifc/clash/types.js";
+import type { SweepProgress, SweepResult, SweepSpec } from "./clash/types.js";
 import { chunkTransfers, type TriangleStore } from "../viewer-core/scene/triangleStore.js";
 import type { Viewer } from "../viewer-core/viewer.js";
 import type {
@@ -438,7 +438,7 @@ export class GeometryService {
     if (typeof Worker === "undefined") {
       this.starting = Promise.all([
         import("./geometryIndex.js"),
-        import("../ifc/clash/sweep.js"),
+        import("./clash/sweep.js"),
         import("./distanceQuery.js"),
         import("./laserQuery.js"),
         import("./sectionQuery.js"),

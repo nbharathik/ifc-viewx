@@ -4,9 +4,8 @@
 // assistant settings are both rendered from this array, so what the assistant
 // is told it has and what the app claims it has cannot drift apart. A new tool
 // is one row here plus one case in actions.ts.
-import type { AssistantMode } from "./llmClient.js";
-
 export type ToolTier = "viewer" | "edit" | "python";
+export type AssistantMode = "query" | "edit";
 
 export interface ToolSpec {
   name: string;

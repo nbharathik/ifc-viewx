@@ -1,4 +1,4 @@
-import type { Value } from "../sdk/data.js";
+import type { Value } from "../data/model.js";
 import type { GeometrySignature } from "../geometry/types.js";
 
 export type CompareKind = "added" | "removed" | "geometry" | "placement" | "containment" | "properties" | "mixed" | "unchanged";

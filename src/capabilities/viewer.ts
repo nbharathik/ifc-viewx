@@ -1,21 +1,12 @@
-import { runViewerAction, type SemanticActions } from "../llm/actions.js";
+import { runViewerAction } from "../llm/actions.js";
 import { TOOLS, type ToolSpec } from "../llm/tools.js";
-import type { Viewer } from "../viewer-core/viewer.js";
 import type { ResultStore } from "./results.js";
 import { CapabilityRegistry } from "./registry.js";
 import { definitionCapabilities } from "./definitions.js";
 import { graphCapabilities } from "./graph.js";
-import type { CapabilityCost, CapabilityDefinition, CapabilityEffect, JsonSchema } from "./types.js";
+import type { CapabilityCost, CapabilityDefinition, CapabilityEffect, JsonSchema, ViewerCapabilityContext } from "./types.js";
 
-export interface ViewerCapabilityContext {
-  viewer: Viewer;
-  semantic?: SemanticActions;
-  stageEdit?(input: Record<string, unknown>): Promise<string>;
-  results?: ResultStore;
-  revision?(): string;
-  setActiveResult?(id: string, row?: number): void;
-  viewport?: HTMLElement;
-}
+export type { ViewerCapabilityContext } from "./types.js";
 
 const MCP_ACTIONS = new Set([
   "find", "search", "counts", "storeys", "selection", "visibility",
@@ -155,8 +146,11 @@ function resultDefinitions(): Array<CapabilityDefinition<Record<string, unknown>
         return store.page(handle, row ?? 0, 40);
       },
     },
-    ...(["select", "isolate"] as const).map((action) => ({
-      id: `result.${action}`,
+    ...([
+      { action: "select", id: "result.select" },
+      { action: "isolate", id: "result.isolate" },
+    ] as const).map(({ action, id }) => ({
+      id,
       title: `${action === "select" ? "Select" : "Isolate"} result rows`,
       description: `${action === "select" ? "Select" : "Isolate"} elements referenced by prior result rows`,
       input: { type: "object", properties: { handle: RESULT_HANDLE, rows: { type: "array", items: { type: "integer" } } }, required: ["handle"], additionalProperties: false },

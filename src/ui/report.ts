@@ -10,8 +10,8 @@
 import type { ValidationReport } from "../ifc/checks.js";
 import type { IdsReport } from "./ids.js";
 import type { Viewer } from "../viewer-core/viewer.js";
-import { clearFindings, publishFindings, publishedFindings } from "./findings.js";
-import type { FindingSet, ReportFinding, Severity } from "./findings.js";
+import { clearFindings, publishFindings, publishedFindings } from "../results/findings.js";
+import type { FindingSet, ReportFinding, Severity } from "../results/findings.js";
 
 export { clearFindings, publishFindings, publishedFindings };
 export type { FindingSet, ReportFinding, Severity };

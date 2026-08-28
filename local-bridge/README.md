@@ -76,14 +76,17 @@ Environment variables use the `IFCVIEWX_` prefix (the pre-rename
 | `IFCVIEWX_MAX_UPLOAD_MB` | `2048` | per-upload ceiling |
 | `IFCVIEWX_PYTHON_TIMEOUT` | `120` | seconds before generated code is killed |
 | `IFCVIEWX_CONVERT_TIMEOUT` | `900` | seconds before a conversion is killed |
+| `IFCVIEWX_ANALYZE_TIMEOUT` | `300` | seconds before validation or scheduling is killed |
 | `IFCVIEWX_MEMORY_GB` | `4` | address-space cap for child processes (POSIX) |
 | `IFCVIEWX_RESULT_TTL_S` | `3600` | how long an unapplied edit result is kept |
+| `IFCVIEWX_MAX_OUTPUT_CHARS` | `200000` | maximum captured output from generated code |
 | `IFCVIEWX_PROVIDER_TIMEOUT` | `900` | maximum seconds allowed for any provider job |
 | `IFCVIEWX_JOB_TTL_S` | `86400` | how long terminal job metadata is retained |
 | `IFCVIEWX_JOB_CONCURRENCY` | `4` | global concurrent provider job limit |
 | `IFCVIEWX_JOB_QUEUE` | `64` | maximum queued and running provider jobs |
 | `IFCVIEWX_LLM_PROVIDER` | (unset) | `openai-compatible` or `anthropic` to enable the proxy |
 | `IFCVIEWX_LLM_BASE_URL` / `_API_KEY` / `_MODEL` | (unset) | proxy target |
+| `IFCVIEWX_LLM_MULTIMODAL` | `0` | allow image attachments through the assistant proxy |
 
 ## HTTP API
 
@@ -100,8 +103,9 @@ Environment variables use the `IFCVIEWX_` prefix (the pre-rename
 | `POST /guard` | check code without running it |
 | `POST /validate` | structural QA, no code execution |
 | `POST /schedule` | element/property table, no code execution |
-| `GET /store`, `POST /store/prune` | model cache stats and cleanup |
+| `GET /store`, `POST /store/prune`, `POST /store/reveal` | model cache stats, cleanup and local-folder reveal |
 | `POST /llm/chat` | assistant proxy (when configured) |
+| `POST /llm/stream` | streaming assistant proxy (when configured) |
 | `GET /audit` | recent activity |
 | `WS /ws?token=` | MCP bridge to the browser |
 | `GET /api/v1/providers` | native provider manifests and availability |
@@ -110,8 +114,9 @@ Environment variables use the `IFCVIEWX_` prefix (the pre-rename
 | `POST /api/v1/jobs/{id}/cancel` | cancel a provider job |
 | `GET /api/v1/jobs/{id}/result` | read a versioned provider result |
 
-Everything except `/health` and `/models/{sha}` requires the `X-IFC-Token`
-header.
+Every API route except `/health` and `/models/{sha}` requires the
+`X-IFC-Token` header. The WebSocket uses the `token` query parameter; the
+service's own static app receives the token during shell delivery.
 
 ## Security
 
@@ -197,10 +202,18 @@ the bridge is the same app at `http://127.0.0.1:8765`.
 
 ## Tools
 
-Viewer: `get_status`, `get_model_info`, `get_spatial_tree`, `get_selection`,
-`select_element`, `get_properties`, `set_visibility`, `show_all`, `fit_view`.
+Viewer inspection: `get_status`, `get_model_info`, `get_spatial_tree`,
+`get_selection`, `get_properties`, `search_model`, `find_elements`,
+`count_elements`, `list_storeys`, `get_visibility`, `capture_view`,
+`list_viewpoints`.
 
-Analysis without generated code: `validate_model`, `element_schedule`.
+Viewer control: `select_element`, `select_elements`, `set_visibility`,
+`show_all`, `fit_view`, `isolate_elements`, `hide_elements`,
+`unhide_elements`, `load_categories`, `color_elements`, `set_section`,
+`section_box`, `set_camera`, `save_viewpoint`.
+
+Analysis without generated code: `detect_clashes`, `validate_model`,
+`element_schedule`.
 
 Files and housekeeping: `convert_model`, `list_converted_models`,
 `service_status`.
@@ -216,10 +229,14 @@ authenticated with the session token.
 
 ```
 python -m pytest tests -q
+python scripts/smoke_wheel.py dist
 ```
 
-The suite covers guard bypasses, the route authorisation matrix, store quotas
-and path safety, and sandbox behaviour end to end against a real IFC file.
+The suite covers guard bypasses, frozen HTTP/MCP/CLI/provider contracts, the
+route authorisation matrix, store quotas and path safety, and sandbox behaviour
+end to end against a real IFC file. The wheel smoke test checks bundled viewer
+and license files, installs into a clean virtual environment, imports the app,
+and probes both console entry points.
 
 Building the wheel bundles the viewer: `npm run build` at the repo root, then
 `python -m build local-bridge`. The hatch hook copies `dist/` into the package

@@ -38,11 +38,11 @@ class CheckError(Exception):
 
 
 def _version() -> str:
-    try:
-        from importlib.metadata import version
+    from ._version import installed_version
 
-        return version("ifcviewx")
-    except Exception:  # noqa: BLE001 - a missing version must not fail a check
+    try:
+        return installed_version() or "unknown"
+    except Exception:  # noqa: BLE001 - broken metadata must not fail a check
         return "unknown"
 
 

@@ -1,4 +1,4 @@
-import { runSweep } from "../ifc/clash/sweep.js";
+import { runSweep } from "./clash/sweep.js";
 import { runDistance } from "./distanceQuery.js";
 import { runLaser } from "./laserQuery.js";
 import { runSectionContours } from "./sectionQuery.js";

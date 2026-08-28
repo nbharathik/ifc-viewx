@@ -89,6 +89,15 @@ def mark_cache(target: Path) -> None:
     )
 
 
+def publish_cache(staging: Path, target: Path, sha: str) -> dict:
+    """Atomically publish a converted cache, then mark its format revision."""
+    from . import store
+
+    result = store.commit_staging(staging, target, keep={sha})
+    mark_cache(target)
+    return result
+
+
 def models_dir() -> Path:
     """The shared store directory (re-exported so the CLI needs no imports)."""
     from .store import models_dir as _dir
@@ -423,10 +432,7 @@ def main() -> None:
     try:
         stats = convert(args.source, staging, report if args.progress else None)
         if args.serve:
-            from . import store
-
-            store.commit_staging(staging, target, keep={sha})
-            mark_cache(target)
+            publish_cache(staging, target, sha)
         else:
             staging.replace(target)
     finally:

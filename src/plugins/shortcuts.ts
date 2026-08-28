@@ -8,9 +8,22 @@
 // honest catalog is worth more than a tidy rule.
 //
 // Everything else, including anything you write, is a folder. See docs/plugins.
-import type { CatalogPlugin } from "./registry.js";
-
-type CatalogShortcut = Omit<CatalogPlugin, "extension" | "installation" | "load">;
+interface CatalogShortcut {
+  id: string;
+  name: string;
+  tagline: string;
+  about: string;
+  icon: string;
+  category: string;
+  tier: "web" | "local" | "core";
+  keywords: string;
+  does: string[];
+  author?: string;
+  url?: string;
+  capability?: string;
+  command?: string;
+  soon?: boolean;
+}
 const defineShortcut = (shortcut: CatalogShortcut): CatalogShortcut => shortcut;
 
 export const SHORTCUTS: CatalogShortcut[] = [

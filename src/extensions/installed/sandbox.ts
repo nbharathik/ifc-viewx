@@ -1,4 +1,4 @@
-import type { ExtensionContext, ExtensionInstance, ExtensionModule } from "../../sdk/types.js";
+import type { ExtensionContext, ExtensionInstance, ExtensionModule } from "../api.js";
 import type { ExtensionManifest } from "../../sdk/contributions.js";
 import type { SectionState } from "../../viewer-core/viewer.js";
 import type { ExtensionAuditLog } from "./audit.js";

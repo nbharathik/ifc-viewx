@@ -9,12 +9,11 @@
 // graph, the property index is the relational view, and the batcher knows
 // where everything is. This exposes them as one queryable graph, which turns
 // that question from a Python script into a tool call.
-import { elementsOf } from "../sdk/data.js";
+import { elementsOf } from "../data/model.js";
 import { modelOf } from "../viewer-core/ids.js";
 import type { ModelBounds, SpatialNode, Viewer } from "../viewer-core/viewer.js";
-import { docketSets } from "../ui/resultsDock.js";
-import type { CapabilityDefinition } from "./types.js";
-import type { ViewerCapabilityContext } from "./viewer.js";
+import { docketSets } from "../results/docket.js";
+import type { CapabilityDefinition, ViewerCapabilityContext } from "./types.js";
 
 interface Node {
   id: number;

@@ -1,4 +1,4 @@
-import type { SweepProgress, SweepResult, SweepSpec } from "../ifc/clash/types.js";
+import type { SweepProgress, SweepResult, SweepSpec } from "./clash/types.js";
 import type { TriangleChunk } from "../viewer-core/scene/triangleStore.js";
 
 export interface GeometryBounds {

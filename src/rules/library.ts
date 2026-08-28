@@ -19,7 +19,7 @@ import {
   type ResolvedRule,
   type RuleRunContext,
 } from "./engine.js";
-import type { ElementRow } from "../sdk/data.js";
+import type { ElementRow } from "../data/model.js";
 
 const label = (row: ElementRow): string => `${row.type.replace(/^Ifc/, "")} ${row.name || `#${row.id}`}`;
 

@@ -1,5 +1,5 @@
 import { modelOf } from "../viewer-core/ids.js";
-import { buildElement, disposeElement, hardClash, surfaceDistance } from "../ifc/clash/narrow.js";
+import { buildElement, disposeElement, hardClash, surfaceDistance } from "./clash/narrow.js";
 import type { GeometryIndex } from "./geometryIndex.js";
 import type { DistanceResult, DistanceSpec } from "./types.js";
 import { unpackModelTransforms } from "./modelTransform.js";

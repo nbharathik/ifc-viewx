@@ -27,8 +27,9 @@ import { AssistantPanel, type PendingEditView } from "./ui/sidePanel.js";
 import { TypesPane } from "./ui/typesPane.js";
 import { OrganizePane } from "./ui/organizePane.js";
 import { FilterChip, FilterPanel, FilterStore } from "./ui/filters.js";
-import { clearDocket, docketChip, publishDocket, ResultsDock, type DocketRow } from "./ui/resultsDock.js";
-import { clearFindings } from "./ui/findings.js";
+import { docketChip, ResultsDock } from "./ui/resultsDock.js";
+import { clearDocket, publishDocket, type DocketRow } from "./results/docket.js";
+import { clearFindings } from "./results/findings.js";
 import { FieldMode } from "./ui/fieldMode.js";
 import { PrivacyPanel } from "./ui/privacy.js";
 import { DrivePanel } from "./ui/drivePanel.js";
@@ -39,25 +40,27 @@ import { ComputedStore, type ComputedProperty } from "./data/computed.js";
 import type { BcfPanel } from "./ui/bcf.js";
 import type { GeoContextPanel } from "./ui/geo.js";
 import { Shell, emptyState, type PaneId, type TabId } from "./ui/shell.js";
-import { Dock, readViewpoints, saveViewpoint as storeViewpoint, viewpointKey } from "./ui/dock.js";
+import { Dock, saveViewpoint as storeViewpoint } from "./ui/dock.js";
 import { Connection } from "./ui/connection.js";
 import { CommandRegistry } from "./ui/commands.js";
 import { Ribbon, type RibbonControl, type RibbonTab } from "./ui/ribbon.js";
 import type { SchedulePanel } from "./ui/schedules.js";
-import { buildMenu, busyRow, CommandPalette, confirmAction, copyText, h, icon, iconButton, lightDismiss, menuKeys, openLayer, promptForm, safeStorageGet, safeStorageSet, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
+import { buildMenu, busyRow, CommandPalette, confirmAction, copyText, h, icon, iconButton, lightDismiss, menuKeys, openLayer, promptForm, safeStorageSet, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
 import { ageLabel, clearChats, readChats, saveChat, type Conversation } from "./llm/chatStore.js";
 import { sampleModel, SAMPLE_NAME } from "./ui/sample.js";
-import { download, elementsOf } from "./sdk/data.js";
+import { download, elementsOf } from "./data/model.js";
 import { buildIndex } from "./llm/retrieval.js";
 import { saveMesh, type MeshFormat } from "./export/mesh.js";
-import type { ExtensionIssueInput, ExtensionIssueResult } from "./sdk/types.js";
-import type { PythonRunner } from "./plugins/runtime/context.js";
+import type { ExtensionIssueInput, ExtensionIssueResult } from "./extensions/api.js";
+import type { PythonRunner } from "./extensions/hostContext.js";
 import { PluginHost } from "./plugins/runtime/host.js";
 import { PluginBrowser } from "./plugins/runtime/browser.js";
 import { CATALOG, setInstalledExtensions } from "./plugins/registry.js";
 import { InstalledExtensionManager, activeInstalledVersion } from "./extensions/installed/manager.js";
 import { ServiceClient, type EditDiff } from "./bridge/serviceClient.js";
-import { BridgeClient } from "./bridge/bridgeClient.js";
+import { loadAppSettings, LOD_PIXELS, saveAppSettings } from "./app/settings.js";
+import { createBrowserBridge } from "./app/browserBridge.js";
+import { bindAppInput } from "./app/input.js";
 
 const $ = <T extends HTMLElement>(id: string): T => {
   const node = document.getElementById(id);
@@ -110,37 +113,9 @@ const openDialog = (dialog: HTMLDialogElement): void => {
 
 // ---------------------------------------------------------------------------
 // Settings
-interface Settings {
-  scale: number;
-  adaptive: boolean;
-  doubleSided: boolean;
-  antialias: boolean;
-  hud: boolean;
-  /** Skip instanced parts below a couple of pixels on screen. */
-  lod: boolean;
-  /** Say when Local Studio's IfcOpenShell conversion would pay off. */
-  offerConvert: boolean;
-}
-const SETTINGS_KEY = "ifcviewx.settings";
-/** Screen size below which a repeated part is not worth a draw call. */
-const LOD_PIXELS = 2;
-const DEFAULTS: Settings = {
-  scale: 1,
-  adaptive: true,
-  doubleSided: true,
-  antialias: true,
-  hud: false,
-  lod: true,
-  offerConvert: true,
-};
-let settings: Settings = DEFAULTS;
-try {
-  settings = { ...DEFAULTS, ...(JSON.parse(safeStorageGet(SETTINGS_KEY) ?? "{}") as Partial<Settings>) };
-} catch {
-  settings = DEFAULTS;
-}
+const settings = loadAppSettings();
 const persistSettings = (): void => {
-  safeStorageSet(SETTINGS_KEY, JSON.stringify(settings));
+  saveAppSettings(settings);
 };
 
 // ---------------------------------------------------------------------------
@@ -3329,195 +3304,39 @@ shell.viewerHost.addEventListener("contextmenu", (e) => {
 
 // ---------------------------------------------------------------------------
 // MCP bridge (browser as a tool backend for AI clients)
-const bridge = new BridgeClient({
+const bridge = createBrowserBridge({
+  viewer,
+  service,
+  capabilities: viewerCapabilities,
+  capabilityContext: viewerCapabilityContext,
+  state: () => ({
+    loaded: activeBytes !== null,
+    fileName,
+    schema: schemaName,
+    pendingEdit: pendingEdit ? pendingEdit.summary : null,
+  }),
   onStatus: (status, detail) => {
     if (detail) shell.log(detail, status === "disconnected" ? "error" : "info");
   },
 });
-bridge.register("get_status", () => ({
-  loaded: activeBytes !== null,
-  fileName,
-  schema: schemaName,
-  // The sha tells the service it may run natively against its own copy.
-  sha: service.getSha(),
-  mode: service.mode(),
-  pendingEdit: pendingEdit ? pendingEdit.summary : null,
-}));
-bridge.register("get_model_info", async () => ({
-  fileName,
-  schema: schemaName,
-  stats: viewer.getStats(),
-  countsByType: await viewer.getCountsByType(),
-}));
-bridge.register("get_spatial_tree", () => {
-  const tree = viewer.getSpatialTree();
-  if (!tree) throw new Error("no model loaded");
-  return tree;
-});
-bridge.register("get_selection", () => ({ expressId: viewer.getSelection() }));
-bridge.register("select_element", (params) => {
-  const id = Number(params.express_id);
-  if (!Number.isFinite(id)) throw new Error("express_id required");
-  viewer.select(id);
-  viewer.fitToElement(id);
-  return { selected: id };
-});
-bridge.register("get_properties", async (params) => {
-  const id = Number(params.express_id);
-  const props = await viewer.getProperties(id);
-  if (!props) throw new Error(`no properties for express_id ${id}`);
-  return props;
-});
-bridge.register("set_visibility", (params) => {
-  const id = Number(params.express_id);
-  if (!Number.isFinite(id) || id <= 0) throw new Error("express_id required");
-  viewer.setSubtreeVisible(id, Boolean(params.visible));
-  return { expressId: id, visible: Boolean(params.visible) };
-});
-bridge.register("show_all", () => {
-  viewer.showAll();
-  return { ok: true };
-});
-bridge.register("fit_view", (params) => {
-  const id = Number(params.express_id);
-  if (Number.isFinite(id) && id > 0) viewer.fitToElement(id);
-  else viewer.fitToModel();
-  return { ok: true };
-});
-/**
- * Everything the in-tab assistant can do is reachable over the bridge too,
- * and through the same runner rather than a second copy of it, so an external
- * client and the panel cannot drift apart. Edit-tier actions are deliberately
- * absent: an MCP client stages nothing the user has not seen.
- */
-const bridgedCapabilities = viewerCapabilities.list((capability) => capability.exposure.mcp === true);
-for (const capability of bridgedCapabilities) {
-  const name = capability.id;
-  bridge.register(name, async (params) => {
-    const value = await viewerCapabilities.executeValue(name, params, viewerCapabilityContext, {
-      policy: VIEWER_POLICY,
-    });
-    return typeof value === "string" ? { report: value } : value;
-  });
-}
-bridge.register("capture_view", async (params) => {
-  const width = Number(params.max_width);
-  const blob = await viewer.captureImage(Number.isFinite(width) && width > 0 ? Math.min(width, 2048) : 1024, "image/png");
-  if (!blob) throw new Error("nothing to capture");
-  const buffer = new Uint8Array(await blob.arrayBuffer());
-  let binary = "";
-  for (const byte of buffer) binary += String.fromCharCode(byte);
-  const viewport = viewer.getViewport();
-  return { mimeType: "image/png", base64: btoa(binary), width: viewport.width, height: viewport.height };
-});
-bridge.register("list_viewpoints", () => {
-  const key = viewpointKey(viewer);
-  return { viewpoints: key ? readViewpoints(key).map((view) => view.name) : [] };
-});
-bridge.register("save_viewpoint", (params) => {
-  const name = storeViewpoint(viewer, typeof params.name === "string" ? params.name : undefined);
-  if (!name) throw new Error(viewpointKey(viewer) ? "browser could not persist viewpoint" : "no model loaded");
-  return { saved: name };
-});
-// No run_python here on purpose. An MCP client is an AI client, and generated
-// code is never executed for one, in this tab or anywhere else. MCP reads the
-// model and stages typed edits; arbitrary Python belongs to the user and to the
-// Python Console, which only a human click starts.
 
-// ---------------------------------------------------------------------------
-// Input: files, drag and drop, keyboard
-fileInput.addEventListener("change", () => {
-  const file = fileInput.files?.[0];
-  if (file) replaceOrConfirm(() => void openFile(file).catch(reportError));
-  fileInput.value = "";
+bindAppInput({
+  fileInput,
+  attachInput,
+  dropzone,
+  openFirstButton: $("btn-open-first"),
+  sampleButton: $("btn-sample"),
+  palette,
+  commands: registry,
+  hasModel: () => activeBytes !== null,
+  replaceOrConfirm,
+  openFile,
+  attachFile,
+  openSample,
+  showDropzone,
+  syncTools,
+  reportError,
 });
-
-interface FileLaunchQueue {
-  setConsumer(consumer: (params: { files: FileSystemFileHandle[] }) => void | Promise<void>): void;
-}
-
-const launchQueue = (globalThis as typeof globalThis & { launchQueue?: FileLaunchQueue }).launchQueue;
-launchQueue?.setConsumer(async ({ files }) => {
-  const handle = files[0];
-  if (!handle) return;
-  try {
-    const file = await handle.getFile();
-    if (!/\.(ifc|ifcx|ifcpkg)$/i.test(file.name)) throw new Error(`${file.name} is not a supported IFC file`);
-    replaceOrConfirm(() => void openFile(file).catch(reportError));
-  } catch (error) {
-    reportError(error);
-  }
-});
-attachInput.addEventListener("change", () => {
-  const file = attachInput.files?.[0];
-  if (file) void attachFile(file).catch(reportError);
-  attachInput.value = "";
-});
-$("btn-open-first").addEventListener("click", () => fileInput.click());
-$("btn-sample").addEventListener("click", () => replaceOrConfirm(() => void openSample().catch(reportError)));
-
-let dragDepth = 0;
-window.addEventListener("dragenter", (e) => {
-  e.preventDefault();
-  dragDepth += 1;
-  showDropzone();
-  dropzone.classList.add("dragging");
-});
-window.addEventListener("dragover", (e) => e.preventDefault());
-window.addEventListener("dragleave", () => {
-  dragDepth = Math.max(0, dragDepth - 1);
-  if (dragDepth === 0) {
-    dropzone.classList.remove("dragging");
-    if (activeBytes) dropzone.classList.add("hidden");
-  }
-});
-window.addEventListener("drop", (e) => {
-  e.preventDefault();
-  dragDepth = 0;
-  dropzone.classList.remove("dragging");
-  if (activeBytes) dropzone.classList.add("hidden");
-  const file = e.dataTransfer?.files?.[0];
-  if (!file) return void toast("Drop an .ifc, .ifcx or .ifcpkg file", "info");
-  if (!/\.(ifc|ifcx|ifcpkg)$/i.test(file.name)) {
-    return void toast(`${file.name} is not a supported IFC file`, "error");
-  }
-  replaceOrConfirm(() => void openFile(file).catch(reportError));
-});
-
-window.addEventListener("keydown", (e) => {
-  const target = e.target as HTMLElement | null;
-  // A modal dialog owns the keyboard: the app behind it is inert, so a stray
-  // S would download a screenshot of a viewport nobody can see.
-  if (document.querySelector("dialog[open]")) return;
-  const typing =
-    target instanceof HTMLInputElement ||
-    target instanceof HTMLTextAreaElement ||
-    target instanceof HTMLSelectElement ||
-    target?.isContentEditable === true;
-  // Menus, lists and trees drive themselves with the same keys, so they own
-  // the keyboard entirely.
-  const navSurface = Boolean(target?.closest(
-    "[role='menu'], [role='listbox'], [role='tree'], [role='grid']",
-  ));
-  // A focused button or link only needs the keys that activate it; a single
-  // letter shortcut must still reach the registry, or every shortcut dies the
-  // moment a toolbar button keeps focus after a click.
-  const onControl = Boolean(target?.closest("button, a[href], summary, [role='button']"));
-  const activates = e.key === "Enter" || e.key === " " || e.key === "Spacebar";
-
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
-    e.preventDefault();
-    return palette.toggle();
-  }
-  // Esc is handled inside viewer-core (close popover / clear selection / exit
-  // measure); this only resyncs the controls that mirror that state.
-  if (e.key === "Escape") return syncTools();
-  if (typing || navSurface || palette.isOpen()) return;
-  if (onControl && activates) return;
-  registry.handleKey(e);
-});
-
-// F / H / I / A / Esc stay owned by viewer-core's own key handler.
 
 updateModelChrome();
 void renderRecents();

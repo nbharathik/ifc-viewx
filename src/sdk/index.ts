@@ -201,7 +201,7 @@ export {
 export type { ComputedKind, ComputedProperty, ComputeContext } from "../data/computed.js";
 
 // What `ctx.publishFindings` takes, so a panel's results land in the report.
-export type { ReportFinding } from "../ui/report.js";
+export type { ReportFinding } from "../results/findings.js";
 
 // Viewer data types used by the scoped SDK services.
 export type {

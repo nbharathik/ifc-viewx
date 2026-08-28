@@ -6,8 +6,7 @@
 // element, named by GlobalId, is what a downstream tool expects.
 import { BufferAttribute, BufferGeometry, DoubleSide, Mesh, MeshStandardMaterial, Scene } from "three";
 import { elementMeshes } from "../geometry/meshes.js";
-import { download } from "../sdk/data.js";
-import { elementsOf } from "../sdk/data.js";
+import { download, elementsOf } from "../data/model.js";
 import { modelOf } from "../viewer-core/ids.js";
 import type { Viewer } from "../viewer-core/viewer.js";
 

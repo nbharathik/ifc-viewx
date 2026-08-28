@@ -1,4 +1,4 @@
-import type { ExtensionModule } from "../../sdk/types.js";
+import type { ExtensionModule } from "../api.js";
 import type { ExtensionPermission } from "../../sdk/contributions.js";
 import { validateManifest } from "../manifest.js";
 import { ExtensionAuditLog } from "./audit.js";

@@ -5,7 +5,7 @@
 // The document for an element is its class, name, storey and, when the caller
 // has already read them, its property values. That is the text a person types
 // when they ask for something, which is the whole point of ranking it.
-import type { IndexedElement } from "./actions.js";
+import type { ModelElement as IndexedElement } from "../data/model.js";
 
 /** Saturation and length normalisation. The usual defaults; nothing tuned. */
 const K1 = 1.5;

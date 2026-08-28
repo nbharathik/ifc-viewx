@@ -70,6 +70,14 @@ Bundled and installable extensions share one permission-scoped SDK contract.
 
 Want to build an extension? See [Writing an extension](https://nbharathik.github.io/ifc-viewx/docs/plugins/), the [SDK reference](https://nbharathik.github.io/ifc-viewx/docs/plugins/api/), and [working on the repo](https://nbharathik.github.io/ifc-viewx/docs/contributing/).
 
+## Quality and publication
+
+Refactoring follows a [frozen feature inventory](docs/refactor/features.md), a
+generated [public contract snapshot](docs/refactor/public-contracts.json), and a
+documented [verification and publication gate](docs/refactor/verification.md).
+These gates protect dynamic plugins, workers, the SDK, browser persistence and
+the Local Studio interfaces that ordinary unused-code scans cannot see.
+
 ## License
 
 Apache License 2.0, see [LICENSE](LICENSE).

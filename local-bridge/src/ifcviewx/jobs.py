@@ -1,9 +1,9 @@
 """Child-side jobs. Everything here runs inside sandbox.py's subprocess and is
 the only code in the service that imports ifcopenshell.
 
-Three jobs: run guarded user code, validate a model, and extract an element
-schedule. The last two exist so the common questions ("is this model sound?",
-"list every door with its fire rating") never need generated code at all.
+Four jobs: run guarded user code, validate a model, extract an element schedule,
+and convert IFC. Validation and schedules keep common questions out of generated
+code, while conversion shares the same constrained child-process boundary.
 """
 
 from __future__ import annotations

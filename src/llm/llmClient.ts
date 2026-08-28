@@ -7,7 +7,7 @@
 // only thing left to choose is the model. Known models are listed up front and
 // the real list can be pulled from the endpoint itself, which never goes stale.
 
-import type { NativeTool } from "./tools.js";
+import type { AssistantMode, NativeTool } from "./tools.js";
 
 export type ProviderId = "anthropic" | "openai" | "openrouter" | "local" | "custom";
 
@@ -96,7 +96,7 @@ export const findProvider = (id: string): Provider =>
   PROVIDERS.find((p) => p.id === id) ?? PROVIDERS[0];
 
 /** What the assistant may do: read the model, or also stage property edits. */
-export type AssistantMode = "query" | "edit";
+export type { AssistantMode } from "./tools.js";
 
 export interface LlmSettings {
   provider: ProviderId;

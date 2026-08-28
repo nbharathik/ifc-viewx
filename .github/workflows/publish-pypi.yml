@@ -21,6 +21,7 @@ jobs:
       - run: npm ci
       - run: npm audit --audit-level=moderate
       - run: npm run build
+      - run: npm run contracts:types:check
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -40,6 +41,14 @@ jobs:
           python -c "from ifcviewx import server; assert server.mcp"
       - run: python -m build local-bridge
       - run: twine check local-bridge/dist/*
+      - name: Verify the wheel contains the viewer
+        run: python -c "import glob, zipfile; names = zipfile.ZipFile(glob.glob('local-bridge/dist/*.whl')[0]).namelist(); assert 'ifcviewx/app/index.html' in names; assert not any(name.startswith('ifcviewx/app/docs/') for name in names)"
+      - name: Install and smoke-test the release wheel
+        run: |
+          python -m venv .wheel-smoke
+          .wheel-smoke/bin/python -m pip install local-bridge/dist/*.whl
+          .wheel-smoke/bin/python -m pip check
+          .wheel-smoke/bin/ifcviewx --help
       - uses: actions/upload-artifact@v4
         with:
           name: dist

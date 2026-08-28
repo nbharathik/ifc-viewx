@@ -2,7 +2,7 @@ import { CapabilityPolicy } from "../capabilities/policy.js";
 import type { CapabilityRegistry } from "../capabilities/registry.js";
 import { ResultStore, type ResultHandle } from "../capabilities/results.js";
 import type { CapabilityEffect, CapabilitySummary } from "../capabilities/types.js";
-import type { ViewerCapabilityContext } from "../capabilities/viewer.js";
+import type { ViewerCapabilityContext } from "../capabilities/types.js";
 import type { AssistantMode } from "../llm/llmClient.js";
 import type { NativeTool } from "../llm/tools.js";
 import { evidenceFooter, evidenceForRows } from "./evidence.js";

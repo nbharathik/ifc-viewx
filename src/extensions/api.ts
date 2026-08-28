@@ -1,0 +1,292 @@
+import type { ElementRow, ModelElement, PropertyIndex } from "../data/model.js";
+import type { ClashOptions, SweepResult } from "../geometry/clash/types.js";
+import type { DistanceOptions, DistanceResult } from "../geometry/distance.js";
+import type { LaserOptions, LaserResult } from "../geometry/laser.js";
+import type { SectionAxis, SectionContourOptions, SectionContourResult } from "../geometry/section.js";
+import type { GeometrySignatureOptions, GeometrySignatureResult } from "../geometry/signatures.js";
+import type { VolumeOptions, VolumesResult } from "../geometry/volumes.js";
+import type { SunOptions } from "../geometry/sun.js";
+import type { SunResult, SunSample } from "../geometry/types.js";
+import type { DeviationOptions } from "../geometry/deviation.js";
+import type { DeviationResult } from "../geometry/types.js";
+import type { ResultHandle, ResultOptions, ResultPage } from "../capabilities/results.js";
+import type { ReportFinding } from "../results/findings.js";
+import type { DocketRow } from "../results/docket.js";
+import type {
+  CameraPose,
+  FederatedModel,
+  IfcTaskGraph,
+  ItemProperties,
+  LazyCategory,
+  Measurement,
+  ModelBounds,
+  PickResult,
+  SectionBox,
+  SectionState,
+  SpatialNode,
+  ViewPreset,
+  VisibilityRule,
+} from "../viewer-core/viewer.js";
+import type {
+  ContributionFor,
+  ContributionKind,
+  ExtensionManifest,
+} from "../sdk/contributions.js";
+import type {
+  ApplyReport,
+  SavedViewApplyOptions,
+  ViewDefinition,
+} from "../views/definition.js";
+
+export type ExtensionEvent =
+  | "model"
+  | "selection"
+  | "visibility"
+  | "section"
+  | "measure"
+  | "service";
+
+export interface ModelInfo {
+  key: string;
+  name: string;
+  loaded: boolean;
+}
+
+export type { ModelElement } from "../data/model.js";
+
+export interface ExtensionCapabilitySummary {
+  id: string;
+  title: string;
+  description: string;
+  effect: "read" | "view" | "propose" | "write" | "external";
+  cost: "instant" | "interactive" | "long";
+  parallelSafe: boolean;
+}
+
+export interface ExtensionCapabilities {
+  list(): ExtensionCapabilitySummary[];
+  execute<T = unknown>(id: string, input?: Record<string, unknown>, signal?: AbortSignal): Promise<T>;
+}
+
+export interface ExtensionSessionService {
+  model(): ModelInfo;
+}
+
+export interface ExtensionModelService {
+  elements(): ModelElement[];
+  classes(): Array<[string, number]>;
+  properties(id: number): Promise<ItemProperties | null>;
+  tree(): SpatialNode | null;
+  subtree(id: number): number[];
+  bounds(id: number): ModelBounds | null;
+  index(): PropertyIndex;
+  modelOf(id: number): number;
+  expressOf(id: number): number;
+  scheduleGraph(): Promise<IfcTaskGraph>;
+}
+
+export interface ExtensionGeometryService {
+  clash(a: number[], b: number[], options?: ClashOptions): Promise<SweepResult>;
+  distance(a: number, b: number, options?: DistanceOptions): Promise<DistanceResult>;
+  laser(origin: [number, number, number], options?: LaserOptions): Promise<LaserResult>;
+  sectionContours(axis: SectionAxis, offset: number, options?: SectionContourOptions): Promise<SectionContourResult>;
+  signatures(ids: number[], options?: GeometrySignatureOptions): Promise<GeometrySignatureResult>;
+  /** Watertight mesh volume per element, and whether the mesh actually closed. */
+  volumes(ids: number[], options?: VolumeOptions): Promise<VolumesResult>;
+  /** Distance from each scanned point to the nearest model surface. */
+  deviation(points: Float64Array, options?: DeviationOptions): Promise<DeviationResult>;
+  /** Sunlit hours per sample point, by ray casting against the real mesh. */
+  sun(
+    samples: SunSample[],
+    directions: Array<[number, number, number]>,
+    stepMinutes: number,
+    options?: SunOptions,
+  ): Promise<SunResult>;
+}
+
+export interface ExtensionViewService {
+  select(ids: number | number[] | null): void;
+  selection(): number[];
+  lastPick(): PickResult | null;
+  measuring(): boolean;
+  pickGuide(on: boolean): void;
+  isVisible(id: number): boolean;
+  rules(): VisibilityRule[];
+  models(): FederatedModel[];
+  setModelVisible(index: number, visible: boolean): void;
+  categoryVisible(category: LazyCategory): boolean;
+  setCategoryVisible(category: LazyCategory, visible: boolean): Promise<void>;
+  /** Apply one complete saved view through the host's shared view pipeline. */
+  applySavedView(view: ViewDefinition, options?: SavedViewApplyOptions): Promise<ApplyReport>;
+  isolate(ids: number[], label?: string): void;
+  hide(ids: number[]): void;
+  showAll(): void;
+  frame(id?: number): void;
+  frameAt(point: [number, number, number], radius?: number): void;
+  viewFrom(view: ViewPreset): void;
+  camera(): CameraPose;
+  setCamera(pose: CameraPose): void;
+  sections(): SectionState[];
+  setSections(states: SectionState[]): void;
+  sectionBox(): SectionBox | null;
+  setSectionBox(box: SectionBox | null): void;
+  boxAround(ids: number[], pad?: number): SectionBox | null;
+  /** The model's full extent, before anything narrowed it. */
+  modelBox(): SectionBox | null;
+  /** Projected coordinates into the scene, when a model is georeferenced. */
+  georeferencedToScene(point: [number, number, number]): [number, number, number] | null;
+  colorBy(assignment: Map<number, number>, colors: Array<[number, number, number]>): void;
+  measurements(): Measurement[];
+  addMeasurement(a: [number, number, number], b: [number, number, number]): Measurement;
+  removeMeasurement(id: number): void;
+  /** Light the model from a real sun direction; null restores the neutral rig. */
+  setSun(direction: [number, number, number] | null): void;
+  /** Draw a scan as points in scene coordinates; null clears it. */
+  setPointCloud(positions: Float32Array | null, colors?: Float32Array | null, size?: number): void;
+  setPointCloudSize(size: number): void;
+  setPointCloudVisible(visible: boolean): void;
+  /** The viewport as an image; needs the viewport.capture permission. */
+  capture(maxWidth?: number, type?: string, quality?: number): Promise<Blob | null>;
+  /** Start recording the viewport. False when the browser cannot. */
+  recordStart(fps?: number): boolean;
+  /** Stop and hand back the recording, or null when none was running. */
+  recordStop(): Promise<Blob | null>;
+}
+
+export interface ExtensionEventService {
+  on(event: ExtensionEvent, handler: () => void): () => void;
+}
+
+export interface ExtensionStorageService {
+  read<T>(key: string, fallback: T): T;
+  write(key: string, value: unknown): void;
+}
+
+export interface ExtensionFeedbackService {
+  publishFindings(summary: string, findings: ReportFinding[]): void;
+  /**
+   * Publish a result set into the shared results dock, where clash, rules,
+   * IDS and compare all land with the same grouping, severity, assignment
+   * and BCF handoff. Publishing again with the same panel replaces the run.
+   */
+  publishResults(set: { title: string; summary: string; rows: DocketRow[] }): void;
+  log(text: string, kind?: "info" | "success" | "error"): void;
+  toast(text: string, kind?: "info" | "success" | "error"): void;
+}
+
+export interface ExtensionCommandService {
+  run(id: string): void;
+  register(id: string, handler: () => void): () => void;
+}
+
+export interface ExtensionContributionService {
+  register<Kind extends ContributionKind>(
+    kind: Kind,
+    contribution: ContributionFor<Kind>,
+    cleanup?: () => void,
+  ): () => void;
+}
+
+export interface ExtensionOverlayService {
+  line(
+    overlay: string,
+    a: [number, number, number],
+    b: [number, number, number],
+  ): string;
+  remove(id: string): boolean;
+  clear(): void;
+}
+
+export interface ExtensionFileService {
+  open(importer: string): Promise<{ name: string; mimeType: string; text: string }>;
+  export(exporter: string, name: string, data: string, mimeType: string): void;
+}
+
+export type ExtensionIssuePriority = "Low" | "Normal" | "High" | "Critical";
+
+export interface ExtensionIssueInput {
+  title: string;
+  description?: string;
+  elementIds?: number[];
+  point?: [number, number, number];
+  priority?: ExtensionIssuePriority;
+  metadata?: Record<string, string | number | boolean>;
+}
+
+export interface ExtensionIssueResult {
+  id: string;
+  title: string;
+  status: "Open";
+  snapshot: "pending";
+}
+
+export interface ExtensionIssueService {
+  create(input: ExtensionIssueInput): Promise<ExtensionIssueResult>;
+}
+
+export interface ExtensionResultService {
+  create<T>(resultView: string, items: readonly T[], options?: ResultOptions): ResultHandle;
+  get(id: string): ResultHandle | null;
+  page<T>(id: string, offset?: number, limit?: number): ResultPage<T>;
+  dispose(id: string): boolean;
+}
+
+export interface ExtensionLocalStatus {
+  state: "available" | "offline" | "missing" | "incompatible";
+  providerId: string;
+  expectedVersion: string;
+  installedVersion?: string;
+  trustedNative: true;
+}
+
+export interface ExtensionLocalService {
+  status(): ExtensionLocalStatus;
+  capabilities(): string[];
+  invoke<T>(capability: string, input?: Record<string, unknown>, signal?: AbortSignal): Promise<T>;
+}
+
+export interface ExtensionPythonService {
+  runsNatively(): boolean;
+  query(code: string, onStatus?: (text: string) => void): Promise<string>;
+  propose(code: string, onStatus?: (text: string) => void): Promise<string>;
+}
+
+export interface ExtensionInstance {
+  dispose?(): void;
+  receive?(payload: unknown): void;
+}
+
+export interface ExtensionContext {
+  readonly manifest: ExtensionManifest;
+  readonly signal: AbortSignal;
+  readonly session: ExtensionSessionService;
+  readonly model: ExtensionModelService;
+  readonly geometry: ExtensionGeometryService;
+  readonly view: ExtensionViewService;
+  readonly events: ExtensionEventService;
+  readonly storage: ExtensionStorageService;
+  readonly feedback: ExtensionFeedbackService;
+  readonly commands: ExtensionCommandService;
+  readonly capabilities: ExtensionCapabilities;
+  readonly contributions: ExtensionContributionService;
+  readonly overlays: ExtensionOverlayService;
+  readonly files: ExtensionFileService;
+  readonly issues: ExtensionIssueService;
+  readonly results: ExtensionResultService;
+  readonly local: ExtensionLocalService;
+  readonly python: ExtensionPythonService;
+  close(): void;
+}
+
+export type ExtensionPanelMount = (
+  host: HTMLElement,
+  context: ExtensionContext,
+  payload?: unknown,
+) => ExtensionInstance | void;
+
+export interface ExtensionModule {
+  mount: ExtensionPanelMount;
+}
+
+export type { ElementRow };
+export type { ResultHandle, ResultOptions, ResultPage };

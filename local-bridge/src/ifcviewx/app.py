@@ -28,46 +28,32 @@ import asyncio
 import hashlib
 import json
 import os
-import secrets
 import subprocess
 import sys
 import threading
 import time
 import uuid
-from importlib import metadata
 from importlib.util import find_spec
 from pathlib import Path
-from urllib.parse import urlsplit
 
-from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi import FastAPI, File, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from . import audit, llm, store
+from ._version import installed_version
 from .config import settings
 from .convert import cache_valid, is_valid_ifcx
 from .guard import guard_code
+from .http_browser import _app_root as _app_root
+from .http_browser import _inject_token as _inject_token
+from .http_browser import register_browser_routes
+from .http_security import HttpSecurity
 from .provider_jobs import JobRequestError, ProviderJobManager
 from .providers import PROTOCOL_MAX, PROTOCOL_MIN, ProviderRegistry
 from .sandbox import run as run_job
 from .ws import BrowserHub
 
-LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
-# The hosted build is served from /<repo>/; strip it so one build serves both.
-BASE_PREFIX = "/ifc-viewx"
 UPLOAD_CHUNK = 4 * 1024 * 1024
-#: Paths that require the session token: everything that writes, executes, or
-#: describes this machine. Matched exactly or by prefix so /models (public,
-#: content-addressed reads) is never caught by /model.
-GUARDED_EXACT = {"/model", "/convert", "/python", "/guard", "/validate", "/schedule", "/store", "/audit"}
-GUARDED_PREFIX = ("/python/", "/jobs/", "/store/", "/llm/", "/api/")
-AUTH_FAIL_LIMIT = 5
-AUTH_LOCK_S = 30.0
-#: The token is 128 bits, so the throttle only has to be a speed bump. Capping
-#: it stops a flood of wrong tokens from locking the real viewer out for hours.
-AUTH_LOCK_MAX_S = 60.0
-AUTH_CLIENTS_MAX = 256
-#: Marks a response the middleware must not make cross-origin readable.
-NO_CORS_MARK = "x-ifc-no-cors"
 _results: dict[str, Path] = {}
 
 
@@ -76,43 +62,8 @@ def reset_state() -> None:
     _results.clear()
 
 
-def _needs_token(path: str) -> bool:
-    return path in GUARDED_EXACT or path.startswith(GUARDED_PREFIX)
-
-
 def _version() -> str:
-    try:
-        return metadata.version("ifcviewx")
-    except metadata.PackageNotFoundError:
-        return "dev"
-
-
-def _host_ok(host: str) -> bool:
-    hostname = host.strip()
-    if hostname.startswith("["):
-        hostname = hostname[1:].partition("]")[0]
-    else:
-        hostname = hostname.partition(":")[0]
-    return hostname.lower() in LOCAL_HOSTS
-
-
-def _origin_ok(origin: str | None) -> bool:
-    """Loopback only. Local Studio and Web Studio are separate apps that never
-    talk, so a page from anywhere else has no business here."""
-    if origin is None:
-        return True  # non-browser client; the token still gates everything
-    value = origin.strip().lower()
-    if urlsplit(value).hostname in LOCAL_HOSTS:
-        return True
-    return value.rstrip("/") in settings().extra_origins
-
-
-def _same_origin(origin: str | None) -> bool:
-    """True only for the app this service served. A top-level navigation sends
-    no Origin; anything else is another site asking on its own behalf."""
-    if origin is None:
-        return True
-    return urlsplit(origin.strip().lower()).hostname in LOCAL_HOSTS
+    return installed_version() or "dev"
 
 
 def _capabilities() -> list[str]:
@@ -127,22 +78,6 @@ def _capabilities() -> list[str]:
     if llm.configured():
         caps.append("llm")
     return caps
-
-
-def _app_root() -> Path | None:
-    """The built viewer: an override, a checkout's dist/, or the packaged copy."""
-    from .config import env
-
-    override = env("APP")
-    if override and (Path(override) / "index.html").is_file():
-        return Path(override).resolve()
-    repo_dist = Path(__file__).resolve().parents[3] / "dist"
-    if (repo_dist / "index.html").is_file():
-        return repo_dist
-    packaged = (Path(__file__).parent / "app").resolve()
-    if (packaged / "index.html").is_file():
-        return packaged
-    return None
 
 
 def _prune() -> None:
@@ -193,6 +128,19 @@ def _legacy_outcome(manager: ProviderJobManager, job: dict) -> dict:
     }
 
 
+async def _run_core_job(
+    manager: ProviderJobManager,
+    capability: str,
+    inputs: dict,
+    model_sha: object,
+    timeout_s: float,
+) -> tuple[dict, dict]:
+    job = manager.submit("org.ifcviewx.core", "*", capability, inputs, model_sha)
+    finished = await asyncio.to_thread(manager.wait, job["id"], timeout_s + 5)
+    current = finished or job
+    return current, _legacy_outcome(manager, current)
+
+
 def create_app(hub: BrowserHub) -> FastAPI:
     config = settings()
     app = FastAPI(title="ifcviewx", docs_url=None, redoc_url=None, openapi_url=None)
@@ -203,86 +151,8 @@ def create_app(hub: BrowserHub) -> FastAPI:
     app.state.providers = providers
     app.state.provider_jobs = provider_jobs
 
-    # Per-service, so a wrong token slows that client down without leaking
-    # state between services in the same process.
-    auth_fails: dict[str, tuple[int, float]] = {}
-
-    def authorized(request: Request) -> bool:
-        supplied = request.headers.get("x-ifc-token") or ""
-        # Bytes, not str: compare_digest rejects non-ASCII str, and headers are
-        # decoded as latin-1, so one high byte would otherwise raise in here.
-        return secrets.compare_digest(supplied.encode(), hub.token.encode())
-
-    def throttled(client: str) -> float:
-        fails, until = auth_fails.get(client, (0, 0.0))
-        if fails < AUTH_FAIL_LIMIT:
-            return 0.0
-        wait = until - time.time()
-        if wait <= 0:
-            auth_fails.pop(client, None)  # lock served: start clean, never ratchet
-            return 0.0
-        return wait
-
-    def note_auth(client: str, ok: bool) -> None:
-        if ok:
-            auth_fails.pop(client, None)
-            return
-        fails, _ = auth_fails.get(client, (0, 0.0))
-        fails += 1
-        if len(auth_fails) > AUTH_CLIENTS_MAX:
-            auth_fails.clear()
-        lock = min(AUTH_LOCK_S * max(1, fails - AUTH_FAIL_LIMIT + 1), AUTH_LOCK_MAX_S)
-        auth_fails[client] = (fails, time.time() + lock)
-
-    @app.middleware("http")
-    async def security(request: Request, call_next):
-        if not _host_ok(request.headers.get("host", "")):
-            return JSONResponse({"error": "forbidden_host"}, status_code=403)
-        origin = request.headers.get("origin")
-        if not _origin_ok(origin):
-            audit.record("auth.origin_rejected", origin=origin)
-            return JSONResponse({"error": "forbidden_origin"}, status_code=403)
-
-        if request.method == "OPTIONS":
-            response: Response = Response(status_code=204)
-        elif _needs_token(request.url.path):
-            # Keyed by peer and origin: everything reaches this service as
-            # 127.0.0.1, so a bare peer key lets any page spend the viewer's
-            # own budget and lock the user out of their own Local Studio.
-            peer = request.client.host if request.client else "?"
-            client = f"{peer}|{origin or '-'}"
-            wait = throttled(client)
-            if wait > 0:
-                response = JSONResponse(
-                    {"error": "too_many_attempts", "retryAfterS": round(wait, 1)},
-                    status_code=429,
-                )
-            else:
-                # Checked here so an unauthorized caller never reaches body parsing.
-                ok = authorized(request)
-                note_auth(client, ok)
-                if not ok:
-                    audit.record("auth.rejected", path=request.url.path, client=client)
-                    response = JSONResponse({"error": "unauthorized"}, status_code=401)
-                else:
-                    response = await call_next(request)
-        else:
-            response = await call_next(request)
-
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "no-referrer"
-        # The app shell carries the session token, so it must never be readable
-        # by another site even though that site is allowed to talk to us.
-        no_cors = NO_CORS_MARK in response.headers
-        if no_cors:
-            del response.headers[NO_CORS_MARK]
-        if origin and not no_cors:
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Headers"] = "content-type, x-ifc-token"
-            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-            response.headers["Access-Control-Max-Age"] = "600"
-        response.headers["Vary"] = "Origin"
-        return response
+    security = HttpSecurity(hub.token)
+    app.middleware("http")(security.middleware)
 
     # -- discovery ----------------------------------------------------------
     @app.get("/health")
@@ -298,7 +168,7 @@ def create_app(hub: BrowserHub) -> FastAPI:
             "readonly": config.readonly,
             "pythonEnabled": config.allow_python,
         }
-        if authorized(request):
+        if security.authorized(request):
             body["store"] = store.stats()
             body["llm"] = llm.describe()
             body["browserConnected"] = hub.connected()
@@ -562,23 +432,21 @@ def create_app(hub: BrowserHub) -> FastAPI:
         code = str(body.get("code", ""))
         mode = "edit" if body.get("mode") == "edit" else "query"
         try:
-            job = provider_jobs.submit(
-                "org.ifcviewx.core",
-                "*",
+            current, outcome = await _run_core_job(
+                provider_jobs,
                 f"ifc.python.{mode}",
                 {"code": code},
                 body.get("sha"),
+                config.provider_timeout_s,
             )
         except JobRequestError as exc:
             return JSONResponse({"error": exc.code, "message": exc.message}, status_code=exc.status_code)
-        finished = await asyncio.to_thread(provider_jobs.wait, job["id"], config.provider_timeout_s + 5)
-        outcome = _legacy_outcome(provider_jobs, finished or job)
         audit.record(
             "python.run",
             sha=str(body.get("sha", ""))[:12],
             mode=mode,
             outcome=outcome.get("error", "ok"),
-            elapsedMs=(finished or job).get("elapsedMs"),
+            elapsedMs=current.get("elapsedMs"),
             changed=outcome.get("diff", {}).get("modified") if isinstance(outcome.get("diff"), dict) else None,
             code=audit.code_fingerprint(code),
         )
@@ -605,13 +473,16 @@ def create_app(hub: BrowserHub) -> FastAPI:
     async def validate_endpoint(request: Request) -> JSONResponse:
         body = await _json(request)
         try:
-            job = provider_jobs.submit(
-                "org.ifcviewx.core", "*", "ifc.validate", {}, body.get("sha")
+            _, outcome = await _run_core_job(
+                provider_jobs,
+                "ifc.validate",
+                {},
+                body.get("sha"),
+                config.provider_timeout_s,
             )
         except JobRequestError as exc:
             return JSONResponse({"error": exc.code, "message": exc.message}, status_code=exc.status_code)
-        finished = await asyncio.to_thread(provider_jobs.wait, job["id"], config.provider_timeout_s + 5)
-        return JSONResponse(_legacy_outcome(provider_jobs, finished or job))
+        return JSONResponse(outcome)
 
     @app.post("/schedule")
     async def schedule_endpoint(request: Request) -> JSONResponse:
@@ -626,13 +497,16 @@ def create_app(hub: BrowserHub) -> FastAPI:
             if value is not None
         }
         try:
-            job = provider_jobs.submit(
-                "org.ifcviewx.core", "*", "ifc.schedule", inputs, body.get("sha")
+            _, outcome = await _run_core_job(
+                provider_jobs,
+                "ifc.schedule",
+                inputs,
+                body.get("sha"),
+                config.provider_timeout_s,
             )
         except JobRequestError as exc:
             return JSONResponse({"error": exc.code, "message": exc.message}, status_code=exc.status_code)
-        finished = await asyncio.to_thread(provider_jobs.wait, job["id"], config.provider_timeout_s + 5)
-        return JSONResponse(_legacy_outcome(provider_jobs, finished or job))
+        return JSONResponse(outcome)
 
     # -- assistant proxy ----------------------------------------------------
     @app.post("/llm/chat")
@@ -686,73 +560,7 @@ def create_app(hub: BrowserHub) -> FastAPI:
     async def audit_tail(limit: int = 50) -> JSONResponse:
         return JSONResponse({"entries": audit.tail(limit)}, headers={"Cache-Control": "no-store"})
 
-    # -- browser bridge -----------------------------------------------------
-    @app.websocket("/ws")
-    async def bridge_socket(websocket: WebSocket) -> None:
-        # The HTTP middleware does not run for websockets, so the host check
-        # that blocks DNS rebinding has to be repeated here rather than assumed.
-        if not _host_ok(websocket.headers.get("host", "")):
-            audit.record("auth.ws_host_rejected")
-            await websocket.close(code=4403)
-            return
-        if not _origin_ok(websocket.headers.get("origin")):
-            audit.record("auth.ws_origin_rejected", origin=websocket.headers.get("origin"))
-            await websocket.close(code=4403)
-            return
-        supplied = websocket.query_params.get("token") or ""
-        if not secrets.compare_digest(supplied.encode(), hub.token.encode()):
-            audit.record("auth.ws_rejected")
-            await websocket.close(code=4401)
-            return
-        await websocket.accept()
-        audit.record("bridge.connected", origin=websocket.headers.get("origin"))
-        try:
-            await hub.serve(websocket)
-        except WebSocketDisconnect:
-            pass
-        finally:
-            audit.record("bridge.disconnected")
-
-    if app_root is not None:
-
-        @app.get("/{path:path}")
-        async def static_files(request: Request, path: str) -> Response:
-            if path.startswith(BASE_PREFIX.lstrip("/")):
-                path = path[len(BASE_PREFIX.lstrip("/")) :].lstrip("/")
-            candidate = (app_root / path).resolve() if path else app_root / "index.html"
-            if candidate.is_dir():
-                candidate = candidate / "index.html"
-            if not candidate.is_file() or not candidate.is_relative_to(app_root):
-                candidate = app_root / "index.html"  # SPA fallback
-            if candidate.name == "index.html":
-                html = candidate.read_text(encoding="utf-8")
-                # Only the app this service itself served is handed the token.
-                # Every unguarded path falls back to this shell, so a site that
-                # is merely allowed to call us must never read one out of it, and
-                # a service worker or subresource fetch (Sec-Fetch-Dest other
-                # than document) must never cache one into the browser profile.
-                dest = request.headers.get("sec-fetch-dest", "document")
-                if _same_origin(request.headers.get("origin")) and dest == "document":
-                    html = _inject_token(html, hub.token, config.port)
-                return HTMLResponse(
-                    html,
-                    headers={
-                        "Cache-Control": "no-cache",
-                        "Content-Security-Policy": "frame-ancestors 'none'",
-                        NO_CORS_MARK: "1",
-                    },
-                )
-            # Hashed asset names are immutable. No COOP/COEP: cross-origin
-            # isolation would switch web-ifc to a threaded build that cannot
-            # boot from the bundled worker (see PLAN.md decision log).
-            cacheable = "/assets/" in candidate.as_posix() or candidate.suffix == ".wasm"
-            return FileResponse(
-                candidate,
-                headers={
-                    "Cache-Control": "public, max-age=31536000, immutable" if cacheable else "no-cache",
-                },
-            )
-
+    register_browser_routes(app, hub, app_root, config.port)
     return app
 
 
@@ -839,23 +647,6 @@ async def _json(request: Request) -> dict:
     except (ValueError, UnicodeDecodeError):
         return {}
     return body if isinstance(body, dict) else {}
-
-
-def _inject_token(html: str, token: str, port: int) -> str:
-    """Hand the app this service served its session token, so Local Studio
-    opens ready to work and no human ever handles the token."""
-    marker = json.dumps({"token": token, "port": port, "served": True})
-    escapes = (
-        ("&", "\\u0026"),
-        ("<", "\\u003c"),
-        (">", "\\u003e"),
-        ("\u2028", "\\u2028"),
-        ("\u2029", "\\u2029"),
-    )
-    for raw, escaped in escapes:
-        marker = marker.replace(raw, escaped)
-    tag = f"<script>window.__IFC_SERVICE__={marker};</script>"
-    return html.replace("</head>", f"{tag}</head>", 1) if "</head>" in html else tag + html
 
 
 def serve(hub: BrowserHub, port: int) -> threading.Thread:

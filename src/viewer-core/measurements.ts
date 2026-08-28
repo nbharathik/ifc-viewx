@@ -2,6 +2,8 @@
  * Measurement arithmetic stays in metres. This module is the display edge:
  * unit choices and rounding never flow back into geometry calculations.
  */
+import type { SnapKind } from "./scene/scene.js";
+
 export type MeasurementUnit =
   | "auto"
   | "millimetres"
@@ -41,6 +43,69 @@ export type MeasurementSemantic =
 export type MeasurementEndKind = "vertex" | "midpoint" | "edge" | "surface";
 export type MeasureConstraint = "free" | "x" | "y" | "z" | "perpendicular" | "parallel";
 export type Point3 = [number, number, number];
+export type SnapMode = "auto" | "vertex" | "off";
+export type MeasureMode = "distance" | "path" | "angle" | "area" | "coordinate" | "count";
+
+export interface Measurement {
+  kind: "distance";
+  id: number;
+  label: string;
+  visible: boolean;
+  semantic: MeasurementSemantic;
+  a: Point3;
+  b: Point3 | null;
+  distance: number;
+  horizontal: number;
+  vertical: number;
+  slopePercent: number | null;
+  slopeAngle: number;
+  complete: boolean;
+  ends: [SnapKind, SnapKind | null];
+}
+
+export interface DistanceMeasurementState {
+  kind?: "distance";
+  id?: number;
+  label?: string;
+  visible?: boolean;
+  a: Point3;
+  b: Point3;
+  ends: [SnapKind, SnapKind];
+}
+
+export interface ShapeMeasure {
+  id: number;
+  kind: Exclude<MeasureMode, "distance">;
+  label: string;
+  visible: boolean;
+  points: Point3[];
+  angle?: number;
+  area?: number;
+  perimeter: number;
+}
+
+export interface ShapeMeasurementState {
+  kind: ShapeMeasure["kind"];
+  id?: number;
+  label?: string;
+  visible?: boolean;
+  points: Point3[];
+}
+
+export type MeasurementState = DistanceMeasurementState | ShapeMeasurementState;
+export type MeasurementObject = Measurement | ShapeMeasure;
+
+export interface MeasurementUpdate {
+  label?: string;
+  visible?: boolean;
+}
+
+export interface MeasureLabelBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 const END_CLASS: Record<MeasurementEndKind, "point" | "line" | "face"> = {
   vertex: "point",
@@ -85,6 +150,77 @@ export function constrainMeasurementPoint(
     }
   }
   return [...point];
+}
+
+const subtract = (a: Point3, b: Point3): Point3 => [
+  a[0] - b[0],
+  a[1] - b[1],
+  a[2] - b[2],
+];
+
+const vectorLength = (value: Point3): number => Math.hypot(value[0], value[1], value[2]);
+
+export const pointDistance = (first: Point3, second: Point3): number =>
+  vectorLength(subtract(first, second));
+
+/** Newell area of the best-fit plane containing the ring. */
+export function ringArea(points: Point3[]): number {
+  if (points.length < 3) return 0;
+  let x = 0;
+  let y = 0;
+  let z = 0;
+  for (let index = 0; index < points.length; index++) {
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    x += current[1] * next[2] - current[2] * next[1];
+    y += current[2] * next[0] - current[0] * next[2];
+    z += current[0] * next[1] - current[1] * next[0];
+  }
+  return Math.hypot(x, y, z) / 2;
+}
+
+/** Angle at the middle point in degrees. */
+export function angleAt(a: Point3, b: Point3, c: Point3): number {
+  const first = subtract(a, b);
+  const second = subtract(c, b);
+  const firstLength = vectorLength(first);
+  const secondLength = vectorLength(second);
+  if (firstLength === 0 || secondLength === 0) return 0;
+  const cosine = (
+    first[0] * second[0] + first[1] * second[1] + first[2] * second[2]
+  ) / (firstLength * secondLength);
+  return (Math.acos(Math.min(1, Math.max(-1, cosine))) * 180) / Math.PI;
+}
+
+export function ringPerimeter(points: Point3[], closed: boolean): number {
+  let total = 0;
+  const last = closed ? points.length : points.length - 1;
+  for (let index = 0; index < last; index++) {
+    total += vectorLength(subtract(points[(index + 1) % points.length], points[index]));
+  }
+  return total;
+}
+
+export function formatAngle(degrees: number): string {
+  return `${degrees.toFixed(1)} deg`;
+}
+
+export function selectMeasureLabels<T extends MeasureLabelBox>(
+  items: T[],
+  limit = 80,
+  gap = 5,
+): T[] {
+  const kept: T[] = [];
+  for (const item of items) {
+    if (kept.length >= limit) break;
+    if (!Number.isFinite(item.x) || !Number.isFinite(item.y)) continue;
+    const overlaps = kept.some((other) =>
+      Math.abs(item.x - other.x) < (item.width + other.width) / 2 + gap
+      && Math.abs(item.y - other.y) < (item.height + other.height) / 2 + gap,
+    );
+    if (!overlaps) kept.push(item);
+  }
+  return kept;
 }
 
 function cleanFormat(value: Partial<MeasurementFormat> | undefined): MeasurementFormat {

@@ -1,7 +1,7 @@
 // Extension folders are discovered from extension.json at build time. Their
 // panels stay behind dynamic imports and load only when opened.
 import { SHORTCUTS } from "./shortcuts.js";
-import type { ExtensionModule } from "../sdk/types.js";
+import type { ExtensionModule } from "../extensions/api.js";
 import type { ExtensionManifest } from "../sdk/contributions.js";
 import { validateManifest } from "../extensions/manifest.js";
 import type { ServiceClient } from "../bridge/serviceClient.js";

@@ -2,7 +2,7 @@ import { modelOf } from "../viewer-core/ids.js";
 import type { ModelTransform } from "../viewer-core/engine/types.js";
 import { normalizedModelTransform } from "./modelTransform.js";
 import type { TriangleChunk } from "../viewer-core/scene/triangleStore.js";
-import type { Placement } from "../ifc/clash/narrow.js";
+import type { Placement } from "./clash/narrow.js";
 import { BufferAttribute, BufferGeometry } from "three";
 import { MeshBVH } from "three-mesh-bvh";
 import { GeometrySignatureBuilder, shapeFingerprint } from "./signature.js";

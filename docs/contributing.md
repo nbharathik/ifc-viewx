@@ -17,8 +17,11 @@ a good starting point.
 | --- | --- |
 | `npm run dev` | Start the viewer with hot reload |
 | `npm test` | Run the Vitest suite |
-| `npm run check` | Type-check, check extension boundaries, and run tests |
+| `npm run check` | Run TypeScript, extension, architecture, contract and test gates |
 | `npm run build` | Check and build the production app in `dist/` |
+| `npm run boundaries` | Reject new import violations or dependency cycles |
+| `npm run contracts:check` | Compare public and dynamic entry points with the reviewed snapshot |
+| `npm run metrics` | Print deterministic source and production-build metrics |
 | `npm run eval` | Evaluate assistant tool choice against a real model |
 | `npm run docs` | Start this documentation site with live reload |
 
@@ -52,6 +55,10 @@ shared APIs to `src/sdk/`.
 - Write comments that explain why.
 
 `npm run check` enforces these rules.
+
+Structural changes also follow the [feature-frozen refactor contract](refactor/index.md).
+If a public contract intentionally changes, review the generated diff before
+running `npm run contracts:update`.
 
 ## Work on the docs
 
@@ -92,3 +99,6 @@ git push origin main --follow-tags
 Review every staged path before committing;
 `git commit -am` omits newly added release files. A tag builds the viewer, creates
 the wheel and source archive, publishes to PyPI, and creates a GitHub release.
+
+Before creating the release commit, run the complete
+[publication gate](refactor/verification.md#publication-gate).

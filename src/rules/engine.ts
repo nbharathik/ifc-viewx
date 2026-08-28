@@ -6,7 +6,7 @@
 //
 // The engine reads a `RuleModel` rather than the viewer, so the same twelve
 // rules run against fixtures in a test and against the real BVH in a tab.
-import type { ElementRow } from "../sdk/data.js";
+import type { ElementRow } from "../data/model.js";
 import { normalizeSelector, type Selector } from "../views/definition.js";
 
 export type RuleSeverity = "error" | "warning" | "info";

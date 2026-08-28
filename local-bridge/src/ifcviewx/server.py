@@ -382,7 +382,7 @@ def convert_model(path: str) -> dict:
     Only .ifc/.ifczip files are read, and only under IFCVIEWX_ROOTS when that
     is configured.
     """
-    from .convert import cache_valid, mark_cache
+    from .convert import cache_valid, publish_cache
     from .sandbox import run
 
     config = settings()
@@ -435,8 +435,7 @@ def convert_model(path: str) -> dict:
                 "message": str(outcome.get("message", "conversion failed")),
             }
         stats = outcome.get("stats") or {}
-        store.commit_staging(staging, target, keep={sha})
-        mark_cache(target)
+        publish_cache(staging, target, sha)
     except store.StoreError as exc:
         staging.unlink(missing_ok=True)
         return {"error": exc.code, "message": exc.message}
