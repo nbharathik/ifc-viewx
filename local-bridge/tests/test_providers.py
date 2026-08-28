@@ -308,8 +308,11 @@ def test_core_provider_precise_distance_on_real_ifc(tmp_path) -> None:
     assert result["distance"] == pytest.approx(2.0)
     assert result["distanceMm"] == pytest.approx(2000.0)
     assert result["intersecting"] is False
-    assert result["pointA"] == pytest.approx([1.0, 0.0, 0.0])
-    assert result["pointB"] == pytest.approx([3.0, 0.0, 0.0])
+    # The facing surfaces are parallel, so the closest pair is any point on them.
+    assert result["pointA"][0] == pytest.approx(1.0)
+    assert result["pointB"][0] == pytest.approx(3.0)
+    assert result["pointA"][1] == pytest.approx(result["pointB"][1])
+    assert result["pointA"][2] == pytest.approx(result["pointB"][2])
     assert result["fidelity"] == "native-mesh"
 
 
