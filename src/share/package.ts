@@ -366,7 +366,7 @@ function sanitizeState(value: unknown, rejectMalformed: boolean): Record<string,
     if (!carriesState(key)) continue;
     const entryBytes = typeof entry === "string" ? encoder.encode(entry).byteLength : 0;
     if (typeof entry !== "string" || key.length > 2_048 || /[\u0000-\u001f\u007f]/.test(key) ||
-      entryBytes > 1024 * 1024 || entries >= 1_024 || totalBytes + entryBytes > PACKAGE_LIMITS.metadata) {
+      entryBytes > PACKAGE_LIMITS.metadata || entries >= 1_024 || totalBytes + entryBytes > PACKAGE_LIMITS.metadata) {
       if (rejectMalformed) throw new Error(`The package state entry is invalid: ${key}`);
       continue;
     }
@@ -574,11 +574,9 @@ function inspectArchive(bytes: Uint8Array): ArchiveEntry[] {
     if (next > end || (flags & 1) || (method !== 0 && method !== 8)) throw new Error("The share package uses an unsupported ZIP entry.");
     const path = archiveDecoder.decode(bytes.subarray(at + 46, at + 46 + nameLength));
     at = next;
-    if (path.endsWith("/")) continue;
-    if (!safeArchivePath(path) || paths.has(path.toLowerCase()) || ((external >>> 16) & 0o170000) === 0o120000) {
-      throw new Error(`Unsafe or duplicate package path: ${path}`);
-    }
-    paths.add(path.toLowerCase());
+    // unzipSync inflates every entry, directory entries included, so the bomb
+    // caps run before the trailing-slash skip or a payload behind "evil/"
+    // expands in memory uncounted.
     const limit = path.startsWith("model/") ? PACKAGE_LIMITS.uncompressed
       : path.startsWith("sheets/") && path.endsWith(".png") ? PACKAGE_LIMITS.sheetImage
         : path === "preview.png" ? PACKAGE_LIMITS.preview : PACKAGE_LIMITS.metadata;
@@ -588,6 +586,16 @@ function inspectArchive(bytes: Uint8Array): ArchiveEntry[] {
     }
     total += size;
     if (total > PACKAGE_LIMITS.uncompressed) throw new Error("The unpacked share package is too large.");
+    const directory = path.endsWith("/");
+    const checkedPath = directory ? path.slice(0, -1) : path;
+    if (!safeArchivePath(checkedPath) || paths.has(checkedPath.toLowerCase()) || ((external >>> 16) & 0o170000) === 0o120000) {
+      throw new Error(`Unsafe or duplicate package path: ${path}`);
+    }
+    paths.add(checkedPath.toLowerCase());
+    if (directory) {
+      if (size !== 0) throw new Error(`The package directory entry contains data: ${path}`);
+      continue;
+    }
     found.push({ path, compressed, size });
   }
   if (at !== centralOffset + centralSize) throw new Error("The share package ZIP entry count is inconsistent.");

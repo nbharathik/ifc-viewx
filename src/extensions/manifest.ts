@@ -1,9 +1,10 @@
-import type {
+import {
+  EXTENSION_PERMISSIONS,
   ContributionKind,
-  ExtensionContributions,
-  ExtensionManifest,
-  ExtensionPermission,
+  type ExtensionManifest,
+  type ExtensionPermission,
 } from "../sdk/contributions.js";
+import { compareNumericVersion, compatibleUpperBound, parseNumericVersion } from "../sdk/semver.js";
 
 export interface ManifestIssue {
   path: string;
@@ -36,18 +37,8 @@ export const isExtensionId = (value: unknown, installed = false): value is strin
 export const isExtensionVersion = (value: unknown): value is string =>
   typeof value === "string" && VERSION.test(value);
 
-type Version = [number, number, number];
-
-const parseVersion = (value: string): Version | null => {
-  const match = /^(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(value);
-  return match ? [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)] : null;
-};
-
-const compareVersion = (a: Version, b: Version): number =>
-  a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
-
 function sdkCompatibility(range: string): "compatible" | "incompatible" | "invalid" {
-  const current = parseVersion(SDK_VERSION)!;
+  const current = parseNumericVersion(SDK_VERSION)!;
   const tokens = range.trim().split(/\s+/);
   if (!range.trim() || range.includes("||")) return "invalid";
   let compatible = true;
@@ -60,19 +51,17 @@ function sdkCompatibility(range: string): "compatible" | "incompatible" | "inval
     }
     const ranged = /^(\^|~)(\d+(?:\.\d+){0,2})$/.exec(token);
     if (ranged) {
-      const base = parseVersion(ranged[2]);
+      const base = parseNumericVersion(ranged[2]);
       if (!base) return "invalid";
-      const upper: Version = ranged[1] === "^"
-        ? [base[0] + 1, 0, 0]
-        : [base[0], base[1] + 1, 0];
-      compatible &&= compareVersion(current, base) >= 0 && compareVersion(current, upper) < 0;
+      const upper = compatibleUpperBound(ranged[1] as "^" | "~", ranged[2], base);
+      compatible &&= compareNumericVersion(current, base) >= 0 && compareNumericVersion(current, upper) < 0;
       continue;
     }
     const compared = /^(>=|<=|>|<|=)?(\d+(?:\.\d+){0,2})$/.exec(token);
     if (!compared) return "invalid";
-    const target = parseVersion(compared[2]);
+    const target = parseNumericVersion(compared[2]);
     if (!target) return "invalid";
-    const relation = compareVersion(current, target);
+    const relation = compareNumericVersion(current, target);
     const operator = compared[1];
     if (!operator && compared[2].split(".").length === 1) compatible &&= current[0] === target[0];
     else if (!operator) compatible &&= relation === 0;
@@ -85,26 +74,7 @@ function sdkCompatibility(range: string): "compatible" | "incompatible" | "inval
   return compatible ? "compatible" : "incompatible";
 }
 
-export const EXTENSION_PERMISSIONS: readonly ExtensionPermission[] = [
-  "model.summary.read",
-  "model.structure.read",
-  "model.properties.read",
-  "model.index.build",
-  "geometry.query",
-  "geometry.mesh.read",
-  "view.read",
-  "view.control",
-  "view.overlay",
-  "review.issue.create",
-  "edit.propose",
-  "automation.python",
-  "file.open",
-  "file.export",
-  "storage.extension",
-  "assistant.contribute",
-  "local.invoke",
-  "viewport.capture",
-];
+export { EXTENSION_PERMISSIONS };
 
 export const CONTRIBUTION_KINDS: readonly ContributionKind[] = [
   "panels",
@@ -503,8 +473,4 @@ export function assertManifest(
     throw new ManifestValidationError(validation.issues, id);
   }
   return validation.manifest;
-}
-
-export function contributionsOf(manifest: ExtensionManifest): ExtensionContributions {
-  return manifest.contributes;
 }

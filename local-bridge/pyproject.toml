@@ -5,7 +5,7 @@ description = "IFCViewX Local Studio: fast, private IFC viewer with IfcOpenShell
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
-license-files = ["LICENSE", "NOTICE"]
+license-files = ["LICENSE", "LICENSE-MPL-2.0", "NOTICE"]
 authors = [{ name = "Bharathi Kannan" }]
 keywords = ["ifc", "bim", "viewer", "ifcopenshell", "mcp", "openbim"]
 classifiers = [
@@ -55,7 +55,7 @@ build-backend = "hatchling.build"
 packages = ["src/ifcviewx"]
 
 [tool.hatch.build.targets.sdist]
-only-include = ["src/ifcviewx", "hatch_build.py", "README.md", "pyproject.toml", "LICENSE", "NOTICE"]
+only-include = ["src/ifcviewx", "hatch_build.py", "README.md", "pyproject.toml", "LICENSE", "LICENSE-MPL-2.0", "NOTICE"]
 
 # The built viewer is copied into src/ifcviewx/app by hatch_build.py; it is
 # gitignored, so it must be declared an artifact to ship.

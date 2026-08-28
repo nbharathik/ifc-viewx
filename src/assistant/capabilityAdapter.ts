@@ -102,7 +102,16 @@ export class AssistantCapabilityAdapter {
       return capability.source === "core" || Boolean(grant);
     });
     return capabilities.map((capability) => {
-      const name = assistantToolName(capability.id);
+      const preferred = assistantToolName(capability.id);
+      let name = preferred;
+      if (this.entries.has(name)) {
+        const collisionLimit = this.entries.size + 2;
+        for (let attempt = 2; attempt <= collisionLimit; attempt++) {
+          const suffix = `_${attempt}`;
+          name = `${preferred.slice(0, MAX_TOOL_NAME - suffix.length)}${suffix}`;
+          if (!this.entries.has(name)) break;
+        }
+      }
       this.entries.set(name, { name, capability });
       return {
         name,
@@ -120,7 +129,7 @@ export class AssistantCapabilityAdapter {
   }
 
   resolve(name: string): CapabilitySummary | null {
-    return this.entries.get(name)?.capability ?? this.registry.get(name);
+    return this.entries.get(name)?.capability ?? null;
   }
 
   async execute(

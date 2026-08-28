@@ -269,4 +269,12 @@ describe("unit factor resolution", () => {
     expect(lengthUnitFactor({ Units: [ref(91)] }, line(entities), typeName(entities))).toBe(1);
     expect(lengthUnitFactor(null, () => null, () => "")).toBe(1);
   });
+
+  it("does not treat a blank conversion factor as zero", () => {
+    const entities: Record<number, Entity> = {
+      91: { ifcType: "IfcConversionBasedUnit", UnitType: val("LENGTHUNIT"), ConversionFactor: ref(92) },
+      92: { ifcType: "IfcMeasureWithUnit", ValueComponent: val("  ") },
+    };
+    expect(lengthUnitFactor({ Units: [ref(91)] }, line(entities), typeName(entities))).toBe(1);
+  });
 });

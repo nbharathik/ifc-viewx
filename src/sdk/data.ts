@@ -262,7 +262,13 @@ export async function toXlsx(
 
 /** Tab separated, which is what a spreadsheet expects from the clipboard. */
 export function copyTable(headers: string[], rows: Array<Array<Value | undefined>>): void {
-  const text = [headers, ...rows].map((row) => row.map((cell) => String(cell ?? "")).join("\t")).join("\n");
+  // A pasted cell is read as a formula the same way an imported CSV cell is, so
+  // operator-prefixed strings are forced to stay literal text here too.
+  const cell = (value: Value | undefined): string => {
+    const raw = value === null || value === undefined ? "" : String(value);
+    return typeof value === "string" && /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+  };
+  const text = [headers, ...rows].map((row) => row.map(cell).join("\t")).join("\n");
   void navigator.clipboard
     ?.writeText(text)
     .then(() => toast(`${rows.length.toLocaleString()} row(s) copied`, "success"))

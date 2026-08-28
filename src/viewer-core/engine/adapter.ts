@@ -246,8 +246,12 @@ export class WebIfcAdapter implements IfcEngine {
     // The vector is a wasm allocation; only its size is wanted, so it goes
     // straight back rather than sitting in a heap capped at 32 bits.
     const allLines = this.api.GetAllLines(modelID);
-    const totalEntities = allLines.size();
-    (allLines as unknown as Deletable).delete?.();
+    let totalEntities: number;
+    try {
+      totalEntities = allLines.size();
+    } finally {
+      (allLines as unknown as Deletable).delete?.();
+    }
     if (totalEntities === 0) {
       this.dispose(modelID);
       throw new Error('No IFC entities found: the file is empty or not a valid IFC model.');
@@ -345,7 +349,11 @@ export class WebIfcAdapter implements IfcEngine {
     const code = CATEGORY_CODES[category];
     const ids = this.api.GetLineIDsWithType(modelID, code);
     const expressIDs: number[] = [];
-    for (let i = 0; i < ids.size(); i++) expressIDs.push(ids.get(i));
+    try {
+      for (let i = 0; i < ids.size(); i++) expressIDs.push(ids.get(i));
+    } finally {
+      (ids as unknown as Deletable).delete?.();
+    }
     if (expressIDs.length === 0) return [];
 
     const meshes: IfcMesh[] = [];
@@ -419,53 +427,54 @@ export class WebIfcAdapter implements IfcEngine {
     // and the interleaved buffer is then split anyway, so the public call is
     // one full copy of every vertex for nothing. Both views are read below
     // before anything calls back into wasm, which is what could move the heap.
-    const verts = this.heapView(
-      'HEAPF32',
-      geometry.GetVertexData(),
-      geometry.GetVertexDataSize(),
-    ) as Float32Array;
-    const rawIndices = this.heapView(
-      'HEAPU32',
-      geometry.GetIndexData(),
-      geometry.GetIndexDataSize(),
-    ) as Uint32Array;
+    try {
+      const verts = this.heapView(
+        'HEAPF32',
+        geometry.GetVertexData(),
+        geometry.GetVertexDataSize(),
+      ) as Float32Array;
+      const rawIndices = this.heapView(
+        'HEAPU32',
+        geometry.GetIndexData(),
+        geometry.GetIndexDataSize(),
+      ) as Uint32Array;
 
-    const vertexCount = verts.length / 6;
-    const positions = new Float32Array(vertexCount * 3);
-    const normals = new Float32Array(vertexCount * 3);
-    let minX = Infinity, minY = Infinity, minZ = Infinity;
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-    for (let v = 0; v < vertexCount; v++) {
-      const px = verts[v * 6];
-      const py = verts[v * 6 + 1];
-      const pz = verts[v * 6 + 2];
-      positions[v * 3] = px;
-      positions[v * 3 + 1] = py;
-      positions[v * 3 + 2] = pz;
-      normals[v * 3] = verts[v * 6 + 3];
-      normals[v * 3 + 1] = verts[v * 6 + 4];
-      normals[v * 3 + 2] = verts[v * 6 + 5];
-      if (px < minX) minX = px;
-      if (py < minY) minY = py;
-      if (pz < minZ) minZ = pz;
-      if (px > maxX) maxX = px;
-      if (py > maxY) maxY = py;
-      if (pz > maxZ) maxZ = pz;
+      const vertexCount = verts.length / 6;
+      const positions = new Float32Array(vertexCount * 3);
+      const normals = new Float32Array(vertexCount * 3);
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      for (let v = 0; v < vertexCount; v++) {
+        const px = verts[v * 6];
+        const py = verts[v * 6 + 1];
+        const pz = verts[v * 6 + 2];
+        positions[v * 3] = px;
+        positions[v * 3 + 1] = py;
+        positions[v * 3 + 2] = pz;
+        normals[v * 3] = verts[v * 6 + 3];
+        normals[v * 3 + 1] = verts[v * 6 + 4];
+        normals[v * 3 + 2] = verts[v * 6 + 5];
+        if (px < minX) minX = px;
+        if (py < minY) minY = py;
+        if (pz < minZ) minZ = pz;
+        if (px > maxX) maxX = px;
+        if (py > maxY) maxY = py;
+        if (pz > maxZ) maxZ = pz;
+      }
+      const indices = new Uint32Array(rawIndices);
+      const entry: CachedGeometry = {
+        geometry: { positions, normals, indices },
+        localBounds: {
+          min: { x: minX, y: minY, z: minZ },
+          max: { x: maxX, y: maxY, z: maxZ },
+        },
+        triangles: indices.length / 3,
+      };
+      state?.geometryCache.set(geometryID, entry);
+      return entry;
+    } finally {
+      geometry.delete();
     }
-    // One copy out of the heap view, taken before delete() frees it.
-    const indices = new Uint32Array(rawIndices);
-    geometry.delete();
-
-    const entry: CachedGeometry = {
-      geometry: { positions, normals, indices },
-      localBounds: {
-        min: { x: minX, y: minY, z: minZ },
-        max: { x: maxX, y: maxY, z: maxZ },
-      },
-      triangles: indices.length / 3,
-    };
-    state?.geometryCache.set(geometryID, entry);
-    return entry;
   }
 
   getSpatialTree(modelID: number): SpatialNode {
@@ -478,10 +487,13 @@ export class WebIfcAdapter implements IfcEngine {
     );
 
     const projects = this.api.GetLineIDsWithType(modelID, IFCPROJECT);
-    if (projects.size() === 0) {
-      throw new Error('No IfcProject found in model');
+    let rootID: number;
+    try {
+      if (projects.size() === 0) throw new Error('No IfcProject found in model');
+      rootID = projects.get(0);
+    } finally {
+      (projects as unknown as Deletable).delete?.();
     }
-    const rootID = projects.get(0);
     const visited = new Set<number>();
 
     const build = (id: number): SpatialNode => {
@@ -607,16 +619,20 @@ export class WebIfcAdapter implements IfcEngine {
   ): Map<number, number[]> {
     const map = new Map<number, number[]>();
     const rels = this.api.GetLineIDsWithType(modelID, relType);
-    for (let i = 0; i < rels.size(); i++) {
-      const rel: any = this.api.GetLine(modelID, rels.get(i));
-      const parent = rel[fromKey];
-      if (!parent || typeof parent.value !== 'number') continue;
-      const related = rel[toKey];
-      if (!Array.isArray(related)) continue;
-      const ids = related.map((h: any) => h.value).filter((v: unknown) => typeof v === 'number');
-      const existing = map.get(parent.value);
-      if (existing) existing.push(...ids);
-      else map.set(parent.value, ids);
+    try {
+      for (let i = 0; i < rels.size(); i++) {
+        const rel: any = this.api.GetLine(modelID, rels.get(i));
+        const parent = rel[fromKey];
+        if (!parent || typeof parent.value !== 'number') continue;
+        const related = rel[toKey];
+        if (!Array.isArray(related)) continue;
+        const ids = related.map((h: any) => h.value).filter((v: unknown) => typeof v === 'number');
+        const existing = map.get(parent.value);
+        if (existing) existing.push(...ids);
+        else map.set(parent.value, ids);
+      }
+    } finally {
+      (rels as unknown as Deletable).delete?.();
     }
     return map;
   }
@@ -959,38 +975,41 @@ export class WebIfcAdapter implements IfcEngine {
       set.add(productID);
     };
     const products = this.api.GetLineIDsWithType(modelID, IFCPRODUCT, true);
-    for (let i = 0; i < products.size(); i++) {
-      const productID = products.get(i);
-      const product: any = this.api.GetLine(modelID, productID);
-      const shapeID = product?.Representation?.value;
-      if (typeof shapeID !== 'number') continue;
-      const shape: any = this.api.GetLine(modelID, shapeID);
-      if (!Array.isArray(shape?.Representations)) continue;
-      for (const repHandle of shape.Representations) {
-        const repID = repHandle?.value;
-        if (typeof repID !== 'number') continue;
-        record(repID, productID);
-        const rep: any = this.api.GetLine(modelID, repID);
-        if (!Array.isArray(rep?.Items)) continue;
-        for (const itemHandle of rep.Items) {
-          const itemID = itemHandle?.value;
-          if (typeof itemID !== 'number') continue;
-          record(itemID, productID);
-          if (this.typeName(modelID, itemID) !== 'IfcMappedItem') continue;
-          const sourceID = (this.api.GetLine(modelID, itemID) as any)?.MappingSource?.value;
-          if (typeof sourceID !== 'number') continue;
-          const mappedRepID = (this.api.GetLine(modelID, sourceID) as any)?.MappedRepresentation?.value;
-          if (typeof mappedRepID !== 'number') continue;
-          record(mappedRepID, productID);
-          const mappedRep: any = this.api.GetLine(modelID, mappedRepID);
-          if (!Array.isArray(mappedRep?.Items)) continue;
-          for (const inner of mappedRep.Items) {
-            if (typeof inner?.value === 'number') record(inner.value, productID);
+    try {
+      for (let i = 0; i < products.size(); i++) {
+        const productID = products.get(i);
+        const product: any = this.api.GetLine(modelID, productID);
+        const shapeID = product?.Representation?.value;
+        if (typeof shapeID !== 'number') continue;
+        const shape: any = this.api.GetLine(modelID, shapeID);
+        if (!Array.isArray(shape?.Representations)) continue;
+        for (const repHandle of shape.Representations) {
+          const repID = repHandle?.value;
+          if (typeof repID !== 'number') continue;
+          record(repID, productID);
+          const rep: any = this.api.GetLine(modelID, repID);
+          if (!Array.isArray(rep?.Items)) continue;
+          for (const itemHandle of rep.Items) {
+            const itemID = itemHandle?.value;
+            if (typeof itemID !== 'number') continue;
+            record(itemID, productID);
+            if (this.typeName(modelID, itemID) !== 'IfcMappedItem') continue;
+            const sourceID = (this.api.GetLine(modelID, itemID) as any)?.MappingSource?.value;
+            if (typeof sourceID !== 'number') continue;
+            const mappedRepID = (this.api.GetLine(modelID, sourceID) as any)?.MappedRepresentation?.value;
+            if (typeof mappedRepID !== 'number') continue;
+            record(mappedRepID, productID);
+            const mappedRep: any = this.api.GetLine(modelID, mappedRepID);
+            if (!Array.isArray(mappedRep?.Items)) continue;
+            for (const inner of mappedRep.Items) {
+              if (typeof inner?.value === 'number') record(inner.value, productID);
+            }
           }
         }
       }
+    } finally {
+      (products as unknown as Deletable).delete?.();
     }
-    (products as unknown as Deletable).delete?.();
 
     const layerSets = new Map<string, Set<number>>();
     this.scanType(modelID, IFCPRESENTATIONLAYERASSIGNMENT, true, (layerID) => {
@@ -1110,9 +1129,18 @@ export class WebIfcAdapter implements IfcEngine {
     const counts: Record<string, number> = {};
     const types = this.api.GetAllTypesOfModel(modelID) as Array<{ typeID: number; typeName: string }>;
     for (const { typeID, typeName } of types) {
-      counts[typeName] = this.api.GetLineIDsWithType(modelID, typeID).size();
+      const ids = this.api.GetLineIDsWithType(modelID, typeID);
+      try {
+        counts[typeName] = ids.size();
+      } finally {
+        (ids as unknown as Deletable).delete?.();
+      }
     }
     return counts;
+  }
+
+  disposeAll(): void {
+    for (const modelID of [...this.models.keys()]) this.dispose(modelID);
   }
 }
 

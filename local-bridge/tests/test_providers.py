@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import io
 import threading
 import time
 
 import pytest
 
 from ifcviewx import store
+from ifcviewx import provider_jobs
 from ifcviewx.provider_jobs import JobRequestError, ProviderJobManager
 from ifcviewx.providers import (
     CoreProvider,
@@ -126,6 +128,27 @@ def test_provider_manifest_rejects_camel_case_path_inputs() -> None:
         validate_manifest(provider.manifest)
 
 
+def test_provider_manifest_requires_usable_finite_limits() -> None:
+    provider = FakeProvider()
+    provider.manifest = {
+        **provider.manifest,
+        "limits": {**provider.manifest["limits"], "maxConcurrency": 0.5},
+    }
+    with pytest.raises(ProviderValidationError, match="positive integer"):
+        validate_manifest(provider.manifest)
+
+    provider.manifest["limits"]["maxConcurrency"] = 1
+    provider.manifest["limits"]["timeoutSeconds"] = float("inf")
+    with pytest.raises(ProviderValidationError, match="finite"):
+        validate_manifest(provider.manifest)
+
+
+def test_zero_result_ttl_is_a_valid_immediate_expiry_policy(env) -> None:
+    env(IFCVIEWX_RESULT_TTL_S="0")
+    registry = ProviderRegistry.discover()
+    assert registry.get("org.ifcviewx.core") is not None
+
+
 def test_core_provider_declares_precise_ifc_distance() -> None:
     capability = next(
         item for item in CoreProvider().manifest["capabilities"]
@@ -134,6 +157,32 @@ def test_core_provider_declares_precise_ifc_distance() -> None:
     assert capability["modelRequirement"] == "ifc-source"
     assert capability["effect"] == "read"
     assert capability["inputSchema"]["required"] == ["a", "b"]
+
+
+def test_core_python_edit_is_committed_as_a_quota_tracked_result(
+    env, sample_ifc
+) -> None:
+    import hashlib
+
+    sha = hashlib.sha256(sample_ifc.read_bytes()).hexdigest()
+    store.source_path(sha).write_bytes(sample_ifc.read_bytes())
+    outcome = CoreProvider().run(
+        "ifc.python.edit",
+        {"modelPath": str(store.source_path(sha)), "modelSha": sha},
+        {
+            "code": (
+                "def edit(model):\n"
+                "    model.by_type('IfcWall')[0].Name = 'Changed'\n"
+                "    return {'summary': 'changed'}\n"
+            )
+        },
+        lambda _event: None,
+    )
+    assert "error" not in outcome, outcome
+    result = store.result_path(outcome["resultId"])
+    assert result.is_file()
+    assert store.stats()["resultBytes"] == result.stat().st_size
+    assert not list(store.models_dir().glob("*.part"))
 
 
 def test_core_provider_runs_precise_distance(env, monkeypatch, tmp_path) -> None:
@@ -291,6 +340,31 @@ def test_provider_result_must_match_its_declared_schema(env) -> None:
     assert finished["error"]["code"] == "result_schema"
 
 
+def test_provider_input_and_output_must_be_standard_json(env) -> None:
+    manager = ProviderJobManager(
+        _registry(),
+        executor=lambda request, cancel, progress: {"value": {"bad": float("nan")}},
+    )
+    with pytest.raises(JobRequestError, match="valid JSON"):
+        manager.submit("org.example.fake", "*", "example.echo", {"value": float("nan")})
+
+    job = manager.submit("org.example.fake", "*", "example.echo", {"value": "ok"})
+    finished = manager.wait(job["id"], 2)
+    assert finished["status"] == "failed"
+    assert finished["error"]["code"] == "result_schema"
+
+
+def test_nonfinite_provider_progress_is_sanitized(env) -> None:
+    def executor(request, cancel, progress):
+        progress({"done": float("nan"), "total": float("inf")})
+        return {"value": {}}
+
+    manager = ProviderJobManager(_registry(), executor=executor)
+    job = manager.submit("org.example.fake", "*", "example.echo", {"value": "ok"})
+    finished = manager.wait(job["id"], 2)
+    assert finished["status"] == "succeeded"
+
+
 def test_job_input_never_accepts_a_path_value(env) -> None:
     manager = ProviderJobManager(_registry(), executor=lambda request, cancel, progress: {"value": {}})
     with pytest.raises(JobRequestError, match="filesystem path"):
@@ -381,6 +455,36 @@ def test_running_job_can_be_cancelled(env) -> None:
     manager.cancel(job["id"])
     finished = manager.wait(job["id"], 2)
     assert finished and finished["status"] == "cancelled"
+
+
+def test_provider_that_closes_stdout_still_obeys_its_timeout(env, monkeypatch) -> None:
+    class Process:
+        def __init__(self) -> None:
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO("")
+            self.stderr = io.StringIO("")
+            self.killed = False
+
+        def poll(self):
+            return 1 if self.killed else None
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def wait(self, timeout=None):
+            if not self.killed:
+                raise AssertionError("waited without enforcing the provider timeout")
+            return 1
+
+    process = Process()
+    monkeypatch.setattr(provider_jobs.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(provider_jobs, "_terminate", lambda child: child.kill())
+    outcome = provider_jobs.run_provider_process(
+        {"timeoutSeconds": 0.05},
+        threading.Event(),
+        lambda _progress: None,
+    )
+    assert outcome["error"] == "timeout"
 
 
 def test_restart_marks_an_interrupted_job_failed(env) -> None:

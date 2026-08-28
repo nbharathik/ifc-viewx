@@ -121,10 +121,21 @@ export function parseDelimited(text: string, delimiter = ","): string[][] {
 
 /** Guess the delimiter, because a German Excel writes semicolons. */
 export function sniffDelimiter(text: string): string {
-  const line = text.split(/\r?\n/, 1)[0] ?? "";
-  const counts: Array<[string, number]> = [",", ";", "\t"].map((d) => [d, line.split(d).length - 1]);
-  counts.sort((a, b) => b[1] - a[1]);
-  return counts[0][1] > 0 ? counts[0][0] : ",";
+  const counts = new Map<string, number>([[",", 0], [";", 0], ["\t", 0]]);
+  let quoted = false;
+  for (let i = text.charCodeAt(0) === 0xfeff ? 1 : 0; i < text.length; i++) {
+    const char = text[i];
+    if (char === '"') {
+      if (quoted && text[i + 1] === '"') i++;
+      else quoted = !quoted;
+      continue;
+    }
+    if (!quoted && (char === "\r" || char === "\n")) break;
+    if (!quoted && counts.has(char)) counts.set(char, counts.get(char)! + 1);
+  }
+  const ranked = [...counts];
+  ranked.sort((a, b) => b[1] - a[1]);
+  return ranked[0][1] > 0 ? ranked[0][0] : ",";
 }
 
 /** Column list for a set of rows: the fixed ones, then every property seen. */

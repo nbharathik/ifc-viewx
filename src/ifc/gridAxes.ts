@@ -40,6 +40,7 @@ function nullableText(value: unknown): string | null {
 
 function numberValue(value: unknown): number | null {
   const raw = scalar(value);
+  if (raw === null || raw === undefined || (typeof raw === "string" && raw.trim() === "")) return null;
   const numeric = typeof raw === "number" ? raw : Number(raw);
   return Number.isFinite(numeric) ? numeric : null;
 }

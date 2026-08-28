@@ -47,6 +47,31 @@ def test_stage_enforces_store_quota_without_leaving_a_partial(env, sample_ifc) -
     assert not list(store.models_dir().glob("*.part"))
 
 
+def test_stage_streams_the_model_instead_of_loading_it_whole(env, sample_ifc, monkeypatch) -> None:
+    expected = hashlib.sha256(sample_ifc.read_bytes()).hexdigest()
+
+    def no_read_bytes(_path):
+        raise AssertionError("staging must stream the model")
+
+    monkeypatch.setattr(type(sample_ifc), "read_bytes", no_read_bytes)
+    sha, _ = cli._stage(sample_ifc)
+    assert sha == expected
+
+
+def test_readonly_stage_reuses_cached_models_but_writes_nothing_new(
+    env, sample_ifc
+) -> None:
+    sha = hashlib.sha256(sample_ifc.read_bytes()).hexdigest()
+    env(IFCVIEWX_READONLY="1")
+    with pytest.raises(SystemExit, match="read-only mode"):
+        cli._stage(sample_ifc)
+    assert not store.source_path(sha).exists()
+    assert not list(store.models_dir().glob("*.part"))
+
+    store.source_path(sha).write_bytes(sample_ifc.read_bytes())
+    assert cli._stage(sample_ifc)[0] == sha
+
+
 def test_readonly_refuses_the_convert_flag(env, monkeypatch) -> None:
     # Track the CLI's direct environment mutation so pytest restores it.
     monkeypatch.setenv("IFCVIEWX_READONLY", "0")

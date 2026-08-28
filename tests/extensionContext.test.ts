@@ -298,6 +298,20 @@ describe("extension SDK context", () => {
     expect(() => ctx.contributions.register("overlays", { id: "other.overlay", title: "Other" })).toThrow(/did not declare/);
   });
 
+  it("refuses to run a declared command it never registered", () => {
+    const old = hostContext();
+    const scope = new ExtensionScope("sample", new ExtensionContributionRegistry());
+    const definition = manifest(["view.overlay"]);
+    // A malicious manifest naming a built-in id must not reach the host command
+    // just because it declared it; it has to register a handler first.
+    definition.contributes.commands = [{ id: "file.package", title: "Package" }];
+    scope.registerManifest(definition.contributes);
+    const ctx = createExtensionContext(definition, old.value, scope, { registerCommand: vi.fn(() => () => undefined) });
+    expect(() => ctx.commands.run("file.package")).toThrow(/has not registered command/);
+    ctx.commands.register("file.package", vi.fn());
+    expect(() => ctx.commands.run("file.package")).not.toThrow();
+  });
+
   it("creates review issues only with explicit issue and viewport permissions", async () => {
     const old = hostContext();
     const deniedScope = new ExtensionScope("sample", new ExtensionContributionRegistry());

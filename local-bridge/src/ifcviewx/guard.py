@@ -74,9 +74,11 @@ DENIED_ATTRS = frozenset(
         "f_locals",
         "format_map",
         "gi_frame",
+        "ifcopenshell_wrapper",
         "methodcaller",
         "modules",
         "os",
+        "serializers",
         "sys",
         "tb_frame",
         "write",
@@ -89,6 +91,15 @@ def _is_dunder(name: str | None) -> bool:
     return bool(name) and name.startswith("__")  # type: ignore[union-attr]
 
 
+def denied_import(name: str) -> bool:
+    parts = name.split(".")
+    return (
+        not parts
+        or parts[0] not in ALLOWED_IMPORTS
+        or any(part.startswith("_") or part in DENIED_ATTRS for part in parts[1:])
+    )
+
+
 class _Walker(ast.NodeVisitor):
     def __init__(self) -> None:
         self.violations: list[str] = []
@@ -99,18 +110,17 @@ class _Walker(ast.NodeVisitor):
     # -- imports ------------------------------------------------------------
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
-            root = alias.name.split(".")[0]
-            if root not in ALLOWED_IMPORTS:
+            if denied_import(alias.name):
                 self.fail(f'import of "{alias.name}" is not allowed')
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if node.level:
             self.fail("relative imports are not allowed")
-        elif (node.module or "").split(".")[0] not in ALLOWED_IMPORTS:
+        elif denied_import(node.module or ""):
             self.fail(f'import of "{node.module}" is not allowed')
         for alias in node.names:
-            if alias.name in DENIED_ATTRS:
+            if alias.name == "*" or alias.name.startswith("_") or alias.name in DENIED_ATTRS:
                 self.fail(f'import of "{alias.name}" is not allowed')
         self.generic_visit(node)
 
@@ -125,11 +135,15 @@ class _Walker(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
-        if _is_dunder(node.attr):
+        # Any leading underscore is private surface: statistics.random._os and
+        # typing.sys._getframe both walk out of the sandbox through one, so the
+        # attribute check is stricter than the name check above.
+        if node.attr.startswith("_"):
             self.fail(f'access to "{node.attr}" is not allowed')
         elif node.attr in DENIED_ATTRS:
-            # write() reaches the filesystem through C++, under the audit hook
-            # rather than through it. The service saves the edit for you.
+            # write() and the geometry serializers reach the filesystem through
+            # C++, under the audit hook rather than through it. The service
+            # saves the edit for you.
             self.fail(f'access to "{node.attr}" is not allowed')
         self.generic_visit(node)
 

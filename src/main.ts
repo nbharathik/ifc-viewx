@@ -220,8 +220,8 @@ const results = new ResultsDock(shell.viewerHost, {
   frameAt: (point) => viewer.fitToPoint(point, 2),
   frame: (id) => viewer.fitToElement(id),
   showAll: () => viewer.showAll(),
-  raiseIssue: (title, ids, detail, point) =>
-    void raiseIssue(title, ids, { description: detail, point }).catch(reportError),
+  raiseIssue: (title, ids, detail, point, batch) =>
+    void raiseIssue(title, ids, { description: detail, point }, { mutateView: !batch }).catch(reportError),
   log: (message, kind) => shell.log(message, kind),
 });
 shell.statusSlot.appendChild(docketChip(() => results.setOpen(true)));
@@ -479,23 +479,29 @@ async function bcfPanel(): Promise<BcfPanel> {
   return bcfUi;
 }
 
-/** An issue is always raised on a view, so the elements are isolated first. */
+/**
+ * An issue is always raised on a view, so the elements are isolated first.
+ * A batch caller opts out of that: isolating and framing once per row would
+ * stack a filter per issue and leave every snapshot on the last row's view.
+ */
 async function raiseIssue(
   title: string,
   ids: number[],
   input: Omit<ExtensionIssueInput, "title" | "elementIds"> = {},
+  options: { mutateView?: boolean } = {},
 ): Promise<ExtensionIssueResult> {
   if (!activeBytes) {
     toast("Open a model first", "info");
     throw new Error("Open a model before creating an issue");
   }
-  if (ids.length) {
+  const mutateView = options.mutateView ?? true;
+  if (mutateView && ids.length) {
     filters.add({ label: title, mode: "keep", ids });
     viewer.selectMany(ids, "replace");
     const box = viewer.boxAround(ids, 0.35);
     if (box) viewer.setSectionBox(box);
   }
-  if (input.point) viewer.fitToPoint(input.point, 1.2);
+  if (mutateView && input.point) viewer.fitToPoint(input.point, 1.2);
   const panel = await bcfPanel();
   const metadata = Object.entries(input.metadata ?? {}).map(([key, value]) => `${key}: ${String(value)}`);
   const description = [
@@ -504,7 +510,7 @@ async function raiseIssue(
   ].filter(Boolean).join("\n\n");
   const issueId = panel.capture(title, description, { elementIds: ids, priority: input.priority, point: input.point });
   if (!issueId) throw new Error("The issue could not be created");
-  shell.selectTab("bcf");
+  if (mutateView) shell.selectTab("bcf");
   return { id: issueId, title: title || "New issue", status: "Open", snapshot: "pending" };
 }
 
@@ -1121,6 +1127,10 @@ async function openSharePackage(file: File): Promise<void> {
   }
   viewsUi?.refresh();
   computedUi?.refresh();
+  // The BCF panel refreshed on model load, before the state above was written,
+  // so its in-memory list is stale and its next save would erase the restored
+  // topics. Re-read now that localStorage holds the packaged issues.
+  bcfUi?.refresh();
   shell.log(
     `Opened package: ${contents.views.length} view(s), ${contents.properties.length} propert(ies), ${contents.sheets.length} sheet(s)`,
     "success",
@@ -3484,9 +3494,16 @@ window.addEventListener("keydown", (e) => {
     target instanceof HTMLTextAreaElement ||
     target instanceof HTMLSelectElement ||
     target?.isContentEditable === true;
-  const interactive = Boolean(target?.closest(
-    "button, a[href], summary, [role='button'], [role='menu'], [role='listbox'], [role='tree']",
+  // Menus, lists and trees drive themselves with the same keys, so they own
+  // the keyboard entirely.
+  const navSurface = Boolean(target?.closest(
+    "[role='menu'], [role='listbox'], [role='tree'], [role='grid']",
   ));
+  // A focused button or link only needs the keys that activate it; a single
+  // letter shortcut must still reach the registry, or every shortcut dies the
+  // moment a toolbar button keeps focus after a click.
+  const onControl = Boolean(target?.closest("button, a[href], summary, [role='button']"));
+  const activates = e.key === "Enter" || e.key === " " || e.key === "Spacebar";
 
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
@@ -3495,7 +3512,8 @@ window.addEventListener("keydown", (e) => {
   // Esc is handled inside viewer-core (close popover / clear selection / exit
   // measure); this only resyncs the controls that mirror that state.
   if (e.key === "Escape") return syncTools();
-  if (typing || interactive || palette.isOpen()) return;
+  if (typing || navSurface || palette.isOpen()) return;
+  if (onControl && activates) return;
   registry.handleKey(e);
 });
 

@@ -39,35 +39,56 @@ def _health(port: int) -> dict | None:
 def _stage(path: Path) -> tuple[str, str]:
     """Copy a model into the content-addressed store. Returns (sha, name)."""
     from . import store
+    from .config import settings
 
+    digest = hashlib.sha256()
+    staging = store.models_dir() / f"stage-{uuid.uuid4().hex}.part"
+    size = 0
+    kind = ""
     try:
-        data = path.read_bytes()
-    except OSError as exc:
-        sys.exit(f"ifcviewx: cannot read {path}: {exc}")
-    sha = hashlib.sha256(data).hexdigest()
-    if data.startswith(b"IFCX"):
-        from .convert import is_valid_ifcx_bytes
+        with path.open("rb") as source, staging.open("wb") as output:
+            while chunk := source.read(4 * 1024 * 1024):
+                if size == 0:
+                    head = chunk[: store.SNIFF_BYTES]
+                    kind = (
+                        "ifcx"
+                        if head.startswith(b"IFCX")
+                        else "ifc"
+                        if store.looks_like_ifc(head)
+                        else ""
+                    )
+                    if not kind:
+                        raise ValueError(f"{path.name} is not an IFC (STEP) or .ifcx file")
+                projected = size + len(chunk)
+                store.require_space(projected, written=size)
+                digest.update(chunk)
+                output.write(chunk)
+                size = projected
+        if not size:
+            raise ValueError(f"{path.name} is not an IFC (STEP) or .ifcx file")
 
-        if not is_valid_ifcx_bytes(data):
-            sys.exit(f"ifcviewx: {path.name} is a corrupt or unsupported .ifcx file")
-        target = store.converted_path(sha)
-    elif store.looks_like_ifc(data[: store.SNIFF_BYTES]):
-        target = store.source_path(sha)
-    else:
-        sys.exit(f"ifcviewx: {path.name} is not an IFC (STEP) or .ifcx file")
-    if not target.is_file():
-        staging = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
-        try:
-            store.require_space(len(data))
-            staging.write_bytes(data)
+        sha = digest.hexdigest()
+        if kind == "ifcx":
+            from .convert import is_valid_ifcx
+
+            if not is_valid_ifcx(staging):
+                raise ValueError(f"{path.name} is a corrupt or unsupported .ifcx file")
+            target = store.converted_path(sha)
+        else:
+            target = store.source_path(sha)
+        if settings().readonly and not target.is_file():
+            raise ValueError("read-only mode cannot add this model to the store")
+        if not target.is_file():
             store.commit_staging(staging, target, keep={sha})
-        except store.StoreError as exc:
-            sys.exit(f"ifcviewx: {exc.message}")
-        except OSError as exc:
-            sys.exit(f"ifcviewx: cannot stage {path}: {exc}")
-        finally:
-            staging.unlink(missing_ok=True)
-    return sha, path.name
+        return sha, path.name
+    except store.StoreError as exc:
+        sys.exit(f"ifcviewx: {exc.message}")
+    except ValueError as exc:
+        sys.exit(f"ifcviewx: {exc}")
+    except OSError as exc:
+        sys.exit(f"ifcviewx: cannot stage {path}: {exc}")
+    finally:
+        staging.unlink(missing_ok=True)
 
 
 def _convert_now(source: Path, sha: str) -> None:

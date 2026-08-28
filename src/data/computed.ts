@@ -261,13 +261,16 @@ function binary(node: Extract<Node, { t: "bin" }>, lookup: Lookup): Value {
     }
     return null;
   }
+  // Overflow and (-1)^0.5 give Infinity or NaN, which would be stored and
+  // exported as if they were real measurements; a non-finite result is no value.
+  const finite = (value: number): number | null => (Number.isFinite(value) ? value : null);
   switch (node.op) {
-    case "+": return left + right;
-    case "-": return left - right;
-    case "*": return left * right;
-    case "/": return right === 0 ? null : left / right;
-    case "%": return right === 0 ? null : left % right;
-    case "^": return Math.pow(left, right);
+    case "+": return finite(left + right);
+    case "-": return finite(left - right);
+    case "*": return finite(left * right);
+    case "/": return right === 0 ? null : finite(left / right);
+    case "%": return right === 0 ? null : finite(left % right);
+    case "^": return finite(Math.pow(left, right));
     case "<": return left < right;
     case ">": return left > right;
     case "<=": return left <= right;

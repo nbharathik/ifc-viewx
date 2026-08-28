@@ -7,7 +7,7 @@
 // arguments survive far enough for the model to be told about them.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { converse, type ChatMessage, type LlmSettings } from "../src/llm/llmClient.js";
+import { converse, loadSettings, SETTINGS_KEY, type ChatMessage, type LlmSettings } from "../src/llm/llmClient.js";
 import { callToBlock, nativeTools, tierOf, TOOLS } from "../src/llm/tools.js";
 
 const ANTHROPIC: LlmSettings = {
@@ -53,6 +53,7 @@ function eventStream(events: unknown[], newline = "\n"): Response {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  localStorage.removeItem(SETTINGS_KEY);
 });
 
 describe("tool catalog", () => {
@@ -291,6 +292,26 @@ describe("streamed native tool calls", () => {
 });
 
 describe("guards", () => {
+  it("normalizes malformed persisted settings before they reach a provider", () => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      provider: "custom",
+      baseUrl: { href: "https://attacker.invalid" },
+      apiKey: 42,
+      model: ["unexpected"],
+      mode: "edit",
+      verified: false,
+    }));
+
+    expect(loadSettings()).toEqual({
+      provider: "custom",
+      baseUrl: "",
+      apiKey: "",
+      model: "",
+      mode: "edit",
+      verified: "",
+    });
+  });
+
   it("refuses without a model chosen", async () => {
     await expect(converse({ ...ANTHROPIC, model: "" }, ASK, [])).rejects.toThrow(/provider and model/i);
   });

@@ -80,6 +80,16 @@ describe("OpenCDE BCF bridge", () => {
     expect(back?.sections[0]).toMatchObject({ axis: "y", offset: 3.5, flip: true });
   });
 
+  it("rejects malformed remote cameras without poisoning viewer state", () => {
+    const nonFinite = toBcfViewpoint(topic())!;
+    nonFinite.perspective_camera!.camera_view_point.x = Number.POSITIVE_INFINITY;
+    expect(fromBcfViewpoint(nonFinite)).toBeNull();
+
+    const zeroDirection = toBcfViewpoint(topic())!;
+    zeroDirection.perspective_camera!.camera_direction = { x: 0, y: 0, z: 0 };
+    expect(fromBcfViewpoint(zeroDirection)).toBeNull();
+  });
+
   it("normalizes local values to choices advertised by the project", () => {
     const local = topic();
     const write = toBcfTopic(local, {

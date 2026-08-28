@@ -136,17 +136,27 @@ def entries() -> list[Entry]:
 
 def stats() -> dict:
     listing = entries()
-    used = sum(e.bytes for e in listing)
     results = list(models_dir().glob("edit-*.ifc"))
+    model_bytes = sum(e.bytes for e in listing)
+    result_bytes = sum(_size(path) for path in results)
     return {
         "dir": str(models_dir()),
         "files": len(listing),
-        "bytes": used,
+        "bytes": model_bytes + result_bytes,
+        "modelBytes": model_bytes,
+        "resultBytes": result_bytes,
         "quotaBytes": settings().store_quota_bytes,
         "freeBytes": shutil.disk_usage(models_dir()).free,
         "pendingResults": len(results),
         "models": [e.as_dict() for e in listing[:50]],
     }
+
+
+def _size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
 
 
 @contextmanager
@@ -228,7 +238,9 @@ def _sweep_unlocked(keep: set[str] | None = None, reserve: int = 0) -> dict:
     if reserve > limits.store_quota_bytes:
         raise StoreError("quota_exceeded", "this model is larger than the model store quota")
     listing = entries()
-    used = sum(e.bytes for e in listing)
+    used = sum(e.bytes for e in listing) + sum(
+        _size(path) for path in models_dir().glob("edit-*.ifc")
+    )
     evicted: list[str] = []
     # Oldest first, and a converted model outlives its heavier source.
     ordered = sorted(listing, key=lambda e: (e.at, e.kind == "ifcx"))

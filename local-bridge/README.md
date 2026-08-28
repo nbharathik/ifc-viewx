@@ -135,8 +135,8 @@ wrong:
    `compile`, `open`, `globals` and friends are rejected outright.
 2. a throwaway subprocess with curated `__builtins__` (the dangerous names are
    simply absent), an import hook that re-checks the allowlist at runtime, a
-   scrubbed environment, a temporary working directory, and address-space, CPU
-   and file-descriptor limits where the platform provides them.
+   scrubbed environment, a temporary working directory, address-space and
+   file-descriptor limits, and a parent-enforced wall-time limit.
 3. the edit contract: code never touches the stored source. It runs against a
    fresh handle, writes a separate result file, and the change only reaches the
    model after the user clicks Apply in the viewer.

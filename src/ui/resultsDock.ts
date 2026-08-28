@@ -40,7 +40,7 @@ export interface DocketActions {
   frameAt(point: [number, number, number]): void;
   frame(id: number): void;
   showAll(): void;
-  raiseIssue(title: string, ids: number[], detail: string, point?: [number, number, number]): void;
+  raiseIssue(title: string, ids: number[], detail: string, point?: [number, number, number], batch?: boolean): void;
   log(message: string, kind?: "info" | "success" | "error"): void;
 }
 
@@ -393,7 +393,7 @@ export class ResultsDock {
     const rows = this.visible(set).filter((row) => row.severity !== "info" && row.ids.length > 0).slice(0, 25);
     if (rows.length === 0) return void toast("Nothing worth raising in this view", "info");
     for (const row of rows) {
-      this.actions.raiseIssue(`${set.title}: ${row.title}`, row.ids, row.detail ?? "", row.point);
+      this.actions.raiseIssue(`${set.title}: ${row.title}`, row.ids, row.detail ?? "", row.point, true);
     }
     this.actions.log(`Raised ${rows.length} issue(s) from ${set.title}`, "success");
   }

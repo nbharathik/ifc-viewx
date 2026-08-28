@@ -72,5 +72,10 @@ export function evidenceForRows(
 
 export function evidenceFooter(evidence: readonly EvidenceReference[]): string {
   if (evidence.length === 0) return "";
-  return `\nEvidence references: ${evidence.map((entry) => `[${entry.id}] ${entry.label}`).join("; ")}. Cite these ids in the answer.`;
+  // Labels carry element names taken verbatim from the IFC file. The JSON half
+  // of the report escapes them; this footer must too, or a crafted name injects
+  // instructions into the prompt. Collapse control characters, cap, and quote.
+  const quoted = (label: string): string =>
+    JSON.stringify([...label.slice(0, 120)].map((c) => (c < " " ? " " : c)).join(""));
+  return `\nEvidence references: ${evidence.map((entry) => `[${entry.id}] ${quoted(entry.label)}`).join("; ")}. Cite these ids in the answer.`;
 }

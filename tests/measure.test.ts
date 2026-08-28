@@ -5,6 +5,7 @@ import {
   formatAngle,
   formatArea,
   formatLength,
+  formatVolume,
   ringArea,
   ringPerimeter,
 } from "../src/viewer-core/viewer.js";
@@ -158,5 +159,12 @@ describe("formatting", () => {
   it("reports an angle to a tenth of a degree", () => {
     expect(formatAngle(90)).toBe("90.0 deg");
     expect(formatAngle(44.449)).toBe("44.4 deg");
+  });
+
+  it("formats volumes in the requested cubic unit", () => {
+    const precision = { mode: "decimals" as const, value: 2 };
+    expect(formatVolume(1, { unit: "decimal-inches", precision })).toBe("61023.74 in3");
+    expect(formatVolume(0.001, { unit: "centimetres", precision })).toBe("1000.00 cm3");
+    expect(formatVolume(0.000001, { unit: "millimetres", precision })).toBe("1000.00 mm3");
   });
 });

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import uuid
 from dataclasses import dataclass
@@ -219,6 +220,8 @@ def validate_value(value: Any, schema: Mapping[str, Any], path: str = "input") -
         if isinstance(pattern, str) and re.search(pattern, value) is None:
             issues.append(f"{path} does not match the required pattern")
     elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, float) and not math.isfinite(value):
+            return [f"{path} must be finite"]
         if isinstance(schema.get("minimum"), (int, float)) and value < schema["minimum"]:
             issues.append(f"{path} is below the minimum")
         if isinstance(schema.get("maximum"), (int, float)) and value > schema["maximum"]:
@@ -286,9 +289,11 @@ def _validate_schema(
     for name in ("minimum", "maximum"):
         number = value.get(name)
         if number is not None and (
-            not isinstance(number, (int, float)) or isinstance(number, bool)
+            not isinstance(number, (int, float))
+            or isinstance(number, bool)
+            or (isinstance(number, float) and not math.isfinite(number))
         ):
-            issues.append(f"{path}.{name} must be a number")
+            issues.append(f"{path}.{name} must be a finite number")
 
 
 def validate_manifest(raw: Any) -> dict[str, Any]:
@@ -320,10 +325,26 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
         )
         if unknown_limits:
             issues.append(f"manifest.limits has unknown fields: {', '.join(unknown_limits)}")
-        for name in ("maxConcurrency", "timeoutSeconds", "memoryBytes", "resultTtlSeconds"):
+        for name in ("maxConcurrency", "memoryBytes"):
             number = limits.get(name)
-            if not isinstance(number, (int, float)) or isinstance(number, bool) or number <= 0:
-                issues.append(f"manifest.limits.{name} must be positive")
+            if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+                issues.append(f"manifest.limits.{name} must be a positive integer")
+        timeout = limits.get("timeoutSeconds")
+        if (
+            not isinstance(timeout, (int, float))
+            or isinstance(timeout, bool)
+            or (isinstance(timeout, float) and not math.isfinite(timeout))
+            or timeout <= 0
+        ):
+            issues.append("manifest.limits.timeoutSeconds must be positive and finite")
+        ttl = limits.get("resultTtlSeconds")
+        if (
+            not isinstance(ttl, (int, float))
+            or isinstance(ttl, bool)
+            or (isinstance(ttl, float) and not math.isfinite(ttl))
+            or ttl < 0
+        ):
+            issues.append("manifest.limits.resultTtlSeconds must be non-negative and finite")
     capabilities = value.get("capabilities")
     if not isinstance(capabilities, list) or not capabilities:
         issues.append("manifest.capabilities must be a non-empty array")
@@ -371,6 +392,10 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
             if "timeoutSeconds" in cap and (
                 not isinstance(cap["timeoutSeconds"], (int, float))
                 or isinstance(cap["timeoutSeconds"], bool)
+                or (
+                    isinstance(cap["timeoutSeconds"], float)
+                    and not math.isfinite(cap["timeoutSeconds"])
+                )
                 or cap["timeoutSeconds"] <= 0
             ):
                 issues.append(f"{prefix}.timeoutSeconds must be positive")
@@ -543,7 +568,7 @@ class CoreProvider:
         if capability_id == "ifc.convert":
             return self._convert(model_path, model_sha, progress)
         if capability_id in {"ifc.python.query", "ifc.python.edit"}:
-            return self._python(capability_id, model_path, inputs)
+            return self._python(capability_id, model_path, model_sha, inputs)
         if capability_id in {"ifc.validate", "ifc.schedule"}:
             from . import jobs
 
@@ -675,28 +700,42 @@ class CoreProvider:
         self,
         capability_id: str,
         source: Path,
+        sha: str,
         inputs: Mapping[str, Any],
     ) -> Mapping[str, Any]:
         from . import jobs, store
         from .sandbox import _arm_sandbox
 
         mode = "edit" if capability_id.endswith(".edit") else "query"
-        result_id = uuid.uuid4().hex
-        out_path = store.result_path(result_id) if mode == "edit" else None
-        _arm_sandbox()
-        outcome = jobs.python(
-            {
-                "model": str(source),
-                "code": str(inputs.get("code", "")),
-                "mode": mode,
-                "maxOutputChars": settings().max_output_chars,
-                "out": str(out_path) if out_path else None,
-            }
+        result_id = uuid.uuid4().hex if mode == "edit" else ""
+        out_path = store.result_path(result_id) if result_id else None
+        staging = (
+            out_path.with_name(f"{out_path.name}.{uuid.uuid4().hex}.part")
+            if out_path
+            else None
         )
-        if mode == "edit" and "error" not in outcome and out_path and out_path.is_file():
-            outcome["resultId"] = result_id
-            outcome["resultUrl"] = f"/python/result/{result_id}"
-        return outcome
+        _arm_sandbox()
+        try:
+            outcome = jobs.python(
+                {
+                    "model": str(source),
+                    "code": str(inputs.get("code", "")),
+                    "mode": mode,
+                    "maxOutputChars": settings().max_output_chars,
+                    "out": str(staging) if staging else None,
+                }
+            )
+            if "error" not in outcome and out_path and staging and staging.is_file():
+                try:
+                    store.commit_staging(staging, out_path, keep={sha})
+                except store.StoreError as exc:
+                    return {"error": exc.code, "message": exc.message}
+                outcome["resultId"] = result_id
+                outcome["resultUrl"] = f"/python/result/{result_id}"
+            return outcome
+        finally:
+            if staging:
+                staging.unlink(missing_ok=True)
 
 
 def _reason(has_ifc: bool, posture: bool, feature: str) -> str | None:

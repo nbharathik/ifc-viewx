@@ -66,6 +66,12 @@ describe("Local Studio provider version matching", () => {
     expect(satisfiesVersionRange("1.4.2", ">=1.2 <2")).toBe(true);
     expect(satisfiesVersionRange("1.4.2", "^1.3")).toBe(true);
     expect(satisfiesVersionRange("1.4.2", "~1.4")).toBe(true);
+    expect(satisfiesVersionRange("1.8.0", "~1")).toBe(true);
+    expect(satisfiesVersionRange("0.3.0", "^0.2.4")).toBe(false);
+    expect(satisfiesVersionRange("0.2.9", "^0.2.4")).toBe(true);
+    expect(satisfiesVersionRange("0.0.4", "^0.0.3")).toBe(false);
+    expect(satisfiesVersionRange("1.4.2+native.7", "^1.3")).toBe(true);
+    expect(satisfiesVersionRange("1.4.2-rc.1", "~1.4")).toBe(true);
     expect(satisfiesVersionRange("1.4.2", "2.x")).toBe(false);
     expect(satisfiesVersionRange("1.4.2", "latest")).toBeNull();
   });

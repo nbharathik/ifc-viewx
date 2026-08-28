@@ -360,7 +360,7 @@ export class Shell {
     this.status.counts.replaceChildren(
       h("b", { text: entities.toLocaleString() }),
       h("span", { text: "entities" }),
-      h("b", { text: `${(triangles / 1e6).toFixed(2)}M` }),
+      h("b", { text: triangles >= 1e6 ? `${(triangles / 1e6).toFixed(2)}M` : triangles.toLocaleString() }),
       h("span", { text: "triangles" }),
     );
   }

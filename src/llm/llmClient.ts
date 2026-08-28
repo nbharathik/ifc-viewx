@@ -181,19 +181,21 @@ export function loadSettings(): LlmSettings {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
     const saved = JSON.parse(raw) as Partial<Omit<LlmSettings, "provider">> & { provider?: string };
+    const baseUrl = typeof saved.baseUrl === "string" ? saved.baseUrl : "";
     // Settings written before the providers were split named one lumped
     // "openai-compatible" entry; a localhost URL means it was a local model.
     const provider = (
       saved.provider === "openai-compatible"
-        ? /localhost|127\.0\.0\.1/.test(saved.baseUrl ?? "")
+        ? /localhost|127\.0\.0\.1/.test(baseUrl)
           ? "local"
           : "custom"
         : saved.provider
     ) as ProviderId | undefined;
     return {
-      ...DEFAULT_SETTINGS,
-      ...saved,
       provider: provider && PROVIDERS.some((p) => p.id === provider) ? provider : "anthropic",
+      baseUrl,
+      apiKey: typeof saved.apiKey === "string" ? saved.apiKey : "",
+      model: typeof saved.model === "string" ? saved.model : "",
       mode: saved.mode === "edit" ? "edit" : "query",
       verified: typeof saved.verified === "string" ? saved.verified : "",
     };

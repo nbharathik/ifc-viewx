@@ -121,7 +121,9 @@ class _ChunkWriter:
         self.colors = array("f")
         self.types: list[str] = []
 
-    def add(self, geo_id, express_id, ifc_type, verts, normals, faces, color) -> None:
+    def add(
+        self, geo_id, express_id, ifc_type, verts, normals, faces, color
+    ) -> tuple[list[float], list[float]]:
         if verts:
             lo = list(verts[:3])
             hi = list(verts[:3])
@@ -154,6 +156,7 @@ class _ChunkWriter:
         self.matrices.extend((1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1))
         self.colors.extend(color)
         self.types.append(ifc_type)
+        return lo, hi
 
     @property
     def placements(self) -> int:
@@ -341,14 +344,15 @@ def convert(source: Path, target: Path, progress=None) -> dict:
                         )
                         if len(sub[0]) == 0:
                             continue
-                        chunk.add(next_geo, shape.id, ifc_type, sub[0], sub[1], sub[2], color)
+                        local_lo, local_hi = chunk.add(
+                            next_geo, shape.id, ifc_type, sub[0], sub[1], sub[2], color
+                        )
                         next_geo += 1
                         mesh_count += 1
                         triangles += len(sub[2]) // 3
                         for i in range(3):
-                            axis = sub[0][i::3]
-                            world_lo[i] = min(world_lo[i], min(axis))
-                            world_hi[i] = max(world_hi[i], max(axis))
+                            world_lo[i] = min(world_lo[i], local_lo[i])
+                            world_hi[i] = max(world_hi[i], local_hi[i])
                     if chunk.placements >= CHUNK_PLACEMENTS or chunk.pending_bytes >= CHUNK_BYTES:
                         chunk.flush()
                 processed += 1
@@ -403,15 +407,15 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.serve:
-        sha = hashlib.sha256(args.source.read_bytes()).hexdigest()
+        with args.source.open("rb") as handle:
+            sha = hashlib.file_digest(handle, "sha256").hexdigest()
         target = models_dir() / f"{sha}.ifcx"
         if cache_valid(target):
             print(target, file=sys.stderr)
             return
-        staging = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
     else:
         target = args.out or args.source.with_suffix(".ifcx")
-        staging = target
+    staging = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
 
     def report(percent: int, meshes: int) -> None:
         print(json.dumps({"percent": percent, "meshes": meshes}), flush=True)
@@ -423,9 +427,10 @@ def main() -> None:
 
             store.commit_staging(staging, target, keep={sha})
             mark_cache(target)
+        else:
+            staging.replace(target)
     finally:
-        if args.serve:
-            staging.unlink(missing_ok=True)
+        staging.unlink(missing_ok=True)
     print(
         f"{target}\n"
         f"entities {stats['totalEntities']}  meshes {stats['meshCount']}  "

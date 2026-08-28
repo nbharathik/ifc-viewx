@@ -159,10 +159,16 @@ def evaluate(model_path: Path, spec_paths: list[Path]) -> dict[str, Any]:
 
     if not model_path.is_file():
         raise CheckError(f"no such file: {model_path}")
-    data = model_path.read_bytes()
     for spec in spec_paths:
         if not spec.is_file():
             raise CheckError(f"no such file: {spec}")
+
+    try:
+        size = model_path.stat().st_size
+        with model_path.open("rb") as handle:
+            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+    except OSError as exc:
+        raise CheckError(f"cannot read {model_path.name}: {exc}") from exc
 
     try:
         structural = jobs.validate({"model": str(model_path)})
@@ -183,8 +189,8 @@ def evaluate(model_path: Path, spec_paths: list[Path]) -> dict[str, Any]:
         "model": {
             "name": model_path.name,
             "path": str(model_path),
-            "bytes": len(data),
-            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": size,
+            "sha256": digest,
             "schema": structural["schema"],
         },
         "totals": structural["totals"],

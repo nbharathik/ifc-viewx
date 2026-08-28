@@ -132,8 +132,7 @@ Read with `selection()`, `lastPick()`, `measuring()`, `isVisible()`,
 
 Change the view with `select`, `setCategoryVisible`, `isolate`, `hide`,
 `showAll`, `frame`, `frameAt`, `viewFrom`, `setCamera`, `addMeasurement`,
-`removeMeasurement`, `setSections`, `setSectionBox`, and `colorBy`. Use the
-geometry service for `boxAround`.
+`removeMeasurement`, `setSections`, `setSectionBox`, `boxAround`, and `colorBy`.
 
 `ctx.view.pickGuide(true)` shows Vertex, Edge midpoint, Edge, and Face feedback
 for the next extension-owned pick. It cannot run at the same time as the normal

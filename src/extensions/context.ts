@@ -107,6 +107,7 @@ export function createExtensionContext(
   const permissions = new Set<ExtensionPermission>(manifest.permissions);
   const resultBindings = new Map<string, () => void>();
   const overlayBindings = new Map<string, () => void>();
+  const ownCommands = new Set<string>();
   let pickGuideCleanupBound = false;
   const storagePrefix = `ifcviewx.plug.${manifest.id}.`;
   let overlaySequence = 0;
@@ -478,14 +479,24 @@ export function createExtensionContext(
       run: (id) => {
         const declared = manifest.contributes.commands?.some((command) => command.id === id);
         if (!declared) throw new Error(`${manifest.name} did not declare command ${id}`);
+        // Declaring is not enough to reach the shared registry: an extension
+        // could name a built-in id (file.package, edit.delete) it never handles
+        // and drive it. Run only commands this extension actually registered.
+        if (!ownCommands.has(id)) throw new Error(`${manifest.name} has not registered command ${id}`);
         host.run(id);
       },
       register: (id, handler) => {
         const contribution = manifest.contributes.commands?.find((command) => command.id === id);
         if (!contribution) throw new Error(`${manifest.name} did not declare command ${id}`);
         if (!bindings.registerCommand) throw new Error("This host cannot register extension commands");
+        // registerCommand rejects a collision with a built-in or another
+        // extension, so a registered id is provably this extension's own.
         const cleanup = bindings.registerCommand(contribution, handler);
-        return scope.bind("commands", id, cleanup);
+        ownCommands.add(id);
+        return scope.bind("commands", id, () => {
+          ownCommands.delete(id);
+          cleanup();
+        });
       },
     },
     capabilities,
@@ -509,7 +520,9 @@ export function createExtensionContext(
         requirePermission("view.overlay");
         const declared = manifest.contributes.overlays?.find((entry) => entry.id === overlay);
         if (!declared) throw new Error(`${manifest.name} did not declare overlay ${overlay}`);
-        const quota = Math.min(500, Math.max(1, declared.quota ?? 200));
+        // A non-numeric quota from an unvalidated manifest makes Math.min NaN,
+        // and `size >= NaN` is always false, removing the cap entirely.
+        const quota = Math.min(500, Math.max(1, Number.isFinite(declared.quota) ? Number(declared.quota) : 200));
         if (overlayBindings.size >= quota) throw new Error(`${manifest.name} reached its ${quota} overlay primitive limit`);
         if (!bindings.addOverlayLine || !bindings.removeOverlayLine) throw new Error("This host cannot draw extension overlays");
         const measurementId = bindings.addOverlayLine(a, b);

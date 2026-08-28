@@ -1,5 +1,4 @@
-import type { CapabilitySummary } from "../capabilities/types.js";
-import type { ChatMessage, ChatUsage, ToolCall } from "../llm/llmClient.js";
+import type { ChatMessage, ChatUsage } from "../llm/llmClient.js";
 import { extractCode, repairPrompt, stripBlock } from "../llm/prompts.js";
 import type { NativeTool } from "../llm/tools.js";
 import type { StreamView, ToolCallView } from "../ui/sidePanel.js";
@@ -103,6 +102,10 @@ export class AgentRuntime {
     this.controller.abort();
     this.activeViewTransaction?.restore();
     this.activeViewTransaction = null;
+    // The normal end-of-turn discard is skipped once sequence has moved past
+    // this turn, so a stopped turn would keep re-sending its viewport image on
+    // every later request.
+    this.discardImagePayloads();
     this.deps.onTrace?.({ type: "cancel", targets: ["provider", "geometry", "local"] });
     this.controller = null;
     const ui = this.deps.ui();
@@ -379,8 +382,4 @@ export class AgentRuntime {
       message.imageSent = true;
     }
   }
-}
-
-export function capabilityForCall(adapter: AssistantCapabilityAdapter, call: ToolCall): CapabilitySummary | null {
-  return adapter.resolve(call.name);
 }

@@ -161,6 +161,15 @@ def test_json_parses_and_carries_a_schema_version(sample_ifc, tmp_path) -> None:
     assert result["exitCode"] == result["counts"]["error"] and result["ok"] is True
 
 
+def test_model_hashing_does_not_load_the_whole_file(sample_ifc, monkeypatch) -> None:
+    def no_read_bytes(_path):
+        raise AssertionError("evaluate must stream the model hash")
+
+    monkeypatch.setattr(type(sample_ifc), "read_bytes", no_read_bytes)
+    result = check.evaluate(sample_ifc, [])
+    assert result["model"]["bytes"] == sample_ifc.stat().st_size
+
+
 def test_json_to_stdout_is_the_only_output(sample_ifc, capsys) -> None:
     _run(str(sample_ifc), "--json", "-")
     out = capsys.readouterr().out

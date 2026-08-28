@@ -1598,7 +1598,9 @@ class ViewerImpl implements Viewer {
     this.subtreeVisible.clear();
     this.stats = entries.reduce<ModelStats | null>((sum, entry) => {
       if (!entry.stats) return sum;
-      if (!sum) return { ...entry.stats };
+      // The first model's own per-type counts are not the federated total, so
+      // drop the memo and let getCountsByType recompute across every model.
+      if (!sum) return { ...entry.stats, countsByType: undefined };
       return {
         ...sum,
         totalEntities: sum.totalEntities + entry.stats.totalEntities,

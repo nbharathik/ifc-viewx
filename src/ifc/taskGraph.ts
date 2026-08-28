@@ -41,6 +41,7 @@ function nullableText(value: unknown): string | null {
 
 function numberValue(value: unknown): number | null {
   const raw = scalar(value);
+  if (raw === null || raw === undefined || (typeof raw === "string" && raw.trim() === "")) return null;
   const numeric = typeof raw === "number" ? raw : Number(raw);
   return Number.isFinite(numeric) ? numeric : null;
 }
@@ -100,10 +101,12 @@ function lagOf(sequence: Line, source: TaskGraphLines): string | null {
 }
 
 function descendants(root: number, children: Map<number, Set<number>>, found = new Set<number>()): Set<number> {
-  for (const child of children.get(root) ?? []) {
+  const pending = [...(children.get(root) ?? [])];
+  while (pending.length) {
+    const child = pending.pop()!;
     if (found.has(child)) continue;
     found.add(child);
-    descendants(child, children, found);
+    pending.push(...(children.get(child) ?? []));
   }
   return found;
 }

@@ -83,7 +83,13 @@ const point = (value: [number, number, number]): { x: number; y: number; z: numb
   z: value[2],
 });
 
-const tuple = (value: { x: number; y: number; z: number }): [number, number, number] => [value.x, value.y, value.z];
+const tuple = (value: unknown): [number, number, number] | null => {
+  if (!value || typeof value !== "object") return null;
+  const point = value as { x?: unknown; y?: unknown; z?: unknown };
+  return [point.x, point.y, point.z].every((entry) => typeof entry === "number" && Number.isFinite(entry))
+    ? [point.x as number, point.y as number, point.z as number]
+    : null;
+};
 
 function direction(pose: CameraPose): [number, number, number] {
   const vector: [number, number, number] = [
@@ -187,13 +193,15 @@ export function fromBcfViewpoint(value: BcfViewpoint | null | undefined): Review
   if (!camera) return null;
   const position = tuple(camera.camera_view_point);
   const heading = tuple(camera.camera_direction);
+  if (!position || !heading || Math.hypot(...heading) < 1e-9) return null;
   const clipping = (value.clipping_planes ?? []).flatMap((plane) => {
     const location = tuple(plane.location);
     const normal = tuple(plane.direction);
+    if (!location || !normal) return [];
     const values = normal.map(Math.abs);
     const axis = values.indexOf(Math.max(...values));
     const len = Math.hypot(...normal);
-    return len > 1e-9 && location.every(Number.isFinite)
+    return len > 1e-9
       ? [{ axis, location, normal, axisDominant: values[axis] > 0.999 * len }]
       : [];
   });

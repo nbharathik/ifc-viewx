@@ -64,6 +64,9 @@ describe("sniffDelimiter", () => {
   it("finds semicolons", () => expect(sniffDelimiter("a;b;c\n1;2;3")).toBe(";"));
   it("finds tabs", () => expect(sniffDelimiter("a\tb\n1\t2")).toBe("\t"));
   it("falls back to a comma on a single column", () => expect(sniffDelimiter("a\n1")).toBe(","));
+  it("ignores delimiters inside quoted headers", () => {
+    expect(sniffDelimiter('"Name, description";Value\n"Wall, east";1')).toBe(";");
+  });
 });
 
 describe("columns and table build", () => {

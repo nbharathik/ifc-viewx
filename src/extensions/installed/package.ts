@@ -44,6 +44,12 @@ function centralDirectory(bytes: Uint8Array): ZipEntry[] {
     }
   }
   if (end < 0) throw new ExtensionPackageError("The package is not a supported ZIP archive", "zip");
+  // The classic EOCD can sit inside the last entry's comment while a ZIP64
+  // locator hides the real, larger directory that fflate would follow past
+  // every limit checked below.
+  if (end >= 20 && uint32(end - 20) === 0x07064b50) {
+    throw new ExtensionPackageError("Multi-disk and ZIP64 packages are not supported", "zip-profile");
+  }
   const disk = uint16(end + 4);
   const centralDisk = uint16(end + 6);
   const entriesOnDisk = uint16(end + 8);
@@ -83,9 +89,10 @@ function centralDirectory(bytes: Uint8Array): ZipEntry[] {
     if (method !== 0 && method !== 8) throw new ExtensionPackageError("Only stored or deflated ZIP entries are supported", "compression");
     const path = textDecoder.decode(bytes.subarray(at + 46, at + 46 + nameLength));
     at = next;
-    if (path.endsWith("/")) continue;
-    if (!safePath(path)) throw new ExtensionPackageError(`Unsafe package path: ${path}`, "path");
-    const key = path.toLowerCase();
+    const directory = path.endsWith("/");
+    const normalizedPath = directory ? path.slice(0, -1) : path;
+    if (!safePath(normalizedPath)) throw new ExtensionPackageError(`Unsafe package path: ${path}`, "path");
+    const key = normalizedPath.toLowerCase();
     if (paths.has(key)) throw new ExtensionPackageError(`Duplicate package path: ${path}`, "duplicate-path");
     paths.add(key);
     const mode = external >>> 16;
@@ -94,6 +101,10 @@ function centralDirectory(bytes: Uint8Array): ZipEntry[] {
     total += size;
     if (total > PACKAGE_LIMITS.uncompressedBytes) {
       throw new ExtensionPackageError("The unpacked package is too large", "uncompressed-size");
+    }
+    if (directory) {
+      if (size !== 0) throw new ExtensionPackageError(`Directory entries cannot carry data: ${path}`, "directory-data");
+      continue;
     }
     found.push({ path, size });
   }

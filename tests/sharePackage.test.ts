@@ -209,6 +209,12 @@ describe("the share package", () => {
     expect(() => readPackage(new Uint8Array([1, 2, 3]))).toThrow();
   });
 
+  it("rejects directory entries that hide an unpacked payload", async () => {
+    const files = unzipSync(await buildPackage(input()));
+    files["payload/"] = new Uint8Array(32);
+    expect(() => readPackage(zipSync(files))).toThrow(/directory entry contains data/i);
+  });
+
   it("rejects unsupported manifests before restoring any contents", async () => {
     const files = unzipSync(await buildPackage(input()));
     files["manifest.json"] = new TextEncoder().encode(JSON.stringify({

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import queue
 import signal
@@ -45,7 +46,12 @@ def _now() -> float:
 
 
 def _json_bytes(value: Any) -> bytes:
-    return json.dumps(value, default=str, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def _terminate(process: subprocess.Popen) -> None:
@@ -103,7 +109,7 @@ def run_provider_process(
     bootstrap = (
         "import sys;"
         f"sys.path.insert(0,{package_root!r});"
-        "from ifcviewx.provider_runner import _main;_main()"
+        "from ifcviewx.provider_runner import main;main()"
     )
     try:
         process = subprocess.Popen(
@@ -141,11 +147,13 @@ def run_provider_process(
         while chunk := process.stderr.read(4096):
             stderr_tail.append(chunk)
 
-    threading.Thread(target=read_stdout, daemon=True, name="provider-output").start()
-    threading.Thread(target=read_stderr, daemon=True, name="provider-errors").start()
+    stdout_thread = threading.Thread(target=read_stdout, daemon=True, name="provider-output")
+    stderr_thread = threading.Thread(target=read_stderr, daemon=True, name="provider-errors")
+    stdout_thread.start()
+    stderr_thread.start()
     response: dict[str, Any] | None = None
     stream_done = False
-    while not stream_done:
+    while True:
         if cancel.is_set():
             _terminate(process)
             process.wait(timeout=5)
@@ -164,11 +172,13 @@ def run_provider_process(
         try:
             line = lines.get(timeout=0.1)
         except queue.Empty:
-            if process.poll() is not None and lines.empty():
-                stream_done = True
+            if stream_done and process.poll() is not None:
+                break
             continue
         if line is None:
             stream_done = True
+            if process.poll() is not None:
+                break
             continue
         try:
             message = json.loads(line)
@@ -186,6 +196,7 @@ def run_provider_process(
             if isinstance(message.get("details"), dict):
                 response.update(message["details"])
     process.wait()
+    stderr_thread.join(timeout=1)
     if response is not None:
         return response
     detail = "".join(stderr_tail).strip().splitlines()
@@ -302,7 +313,11 @@ class ProviderJobManager:
         self.prune()
         if not isinstance(inputs, dict):
             raise JobRequestError("bad_input", "input must be an object")
-        if len(_json_bytes(inputs)) > settings().max_output_chars:
+        try:
+            input_bytes = _json_bytes(inputs)
+        except (TypeError, ValueError) as exc:
+            raise JobRequestError("bad_input", "input must contain valid JSON") from exc
+        if len(input_bytes) > settings().max_output_chars:
             raise JobRequestError("input_too_large", "provider input exceeds the service limit", 413)
         path_issues = reject_path_inputs(inputs)
         if path_issues:
@@ -482,6 +497,10 @@ class ProviderJobManager:
             return
         value = outcome.get("value")
         result_issues = validate_value(value, capability["resultSchema"], "result")
+        try:
+            encoded = _json_bytes(value)
+        except (TypeError, ValueError):
+            result_issues.append("result must contain valid JSON")
         if result_issues:
             self._update(
                 job_id,
@@ -499,7 +518,6 @@ class ProviderJobManager:
                 elapsedMs=elapsed,
             )
             return
-        encoded = _json_bytes(value)
         if len(encoded) > settings().max_output_chars:
             self._update(
                 job_id,
@@ -555,6 +573,8 @@ class ProviderJobManager:
             done = float(value.get("done", 0))
             total = max(float(value.get("total", 1)), 0.0)
         except (TypeError, ValueError):
+            done, total = 0.0, 1.0
+        if not math.isfinite(done) or not math.isfinite(total):
             done, total = 0.0, 1.0
         progress: dict[str, Any] = {
             "phase": phase,

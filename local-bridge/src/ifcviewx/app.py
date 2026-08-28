@@ -728,8 +728,11 @@ def create_app(hub: BrowserHub) -> FastAPI:
                 html = candidate.read_text(encoding="utf-8")
                 # Only the app this service itself served is handed the token.
                 # Every unguarded path falls back to this shell, so a site that
-                # is merely allowed to call us must never read one out of it.
-                if _same_origin(request.headers.get("origin")):
+                # is merely allowed to call us must never read one out of it, and
+                # a service worker or subresource fetch (Sec-Fetch-Dest other
+                # than document) must never cache one into the browser profile.
+                dest = request.headers.get("sec-fetch-dest", "document")
+                if _same_origin(request.headers.get("origin")) and dest == "document":
                     html = _inject_token(html, hub.token, config.port)
                 return HTMLResponse(
                     html,
@@ -771,19 +774,33 @@ def execute_python(sha: str, code: str, mode: str) -> dict:
     _prune()
     result_id = uuid.uuid4().hex
     out_path = store.result_path(result_id) if mode == "edit" else None
+    staging = (
+        out_path.with_name(f"{out_path.name}.{uuid.uuid4().hex}.part")
+        if out_path
+        else None
+    )
     payload = {
         "model": str(source),
         "code": code,
         "mode": mode,
         "maxOutputChars": config.max_output_chars,
-        "out": str(out_path) if out_path else None,
+        "out": str(staging) if staging else None,
     }
     started = time.time()
-    outcome = run_job("python", payload, config.python_timeout_s, config.memory_bytes)
-    if mode == "edit" and "error" not in outcome and out_path and out_path.is_file():
-        _results[result_id] = out_path
-        outcome["resultId"] = result_id
-        outcome["resultUrl"] = f"/python/result/{result_id}"
+    try:
+        outcome = run_job("python", payload, config.python_timeout_s, config.memory_bytes)
+        if "error" not in outcome and out_path and staging and staging.is_file():
+            try:
+                store.commit_staging(staging, out_path, keep={sha})
+            except store.StoreError as exc:
+                outcome = {"error": exc.code, "message": exc.message}
+            else:
+                _results[result_id] = out_path
+                outcome["resultId"] = result_id
+                outcome["resultUrl"] = f"/python/result/{result_id}"
+    finally:
+        if staging:
+            staging.unlink(missing_ok=True)
     audit.record(
         "python.run",
         sha=sha[:12],

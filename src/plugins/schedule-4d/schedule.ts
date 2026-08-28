@@ -390,6 +390,9 @@ export function formatDay(value: number | string | null): string {
 }
 
 export function csvCell(value: unknown): string {
-  const text = String(value ?? "");
+  let text = String(value ?? "");
+  // Task names and ids come from the IFC file or an imported CSV, so a cell can
+  // arrive already shaped like a spreadsheet formula.
+  if (typeof value === "string" && /^[=+\-@\t\r]/.test(text)) text = `'${text}`;
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }

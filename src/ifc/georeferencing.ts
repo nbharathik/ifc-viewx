@@ -36,9 +36,11 @@ function byType(api: IfcAPI, modelID: number, name: string): number[] {
     const code = api.GetTypeCodeFromName(name.toUpperCase());
     if (!code) return [];
     const vector = api.GetLineIDsWithType(modelID, code, false);
-    const ids = Array.from({ length: vector.size() }, (_, index) => vector.get(index));
-    (vector as unknown as { delete?: () => void }).delete?.();
-    return ids;
+    try {
+      return Array.from({ length: vector.size() }, (_, index) => vector.get(index));
+    } finally {
+      (vector as unknown as { delete?: () => void }).delete?.();
+    }
   } catch {
     return [];
   }

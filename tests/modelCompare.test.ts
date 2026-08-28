@@ -85,6 +85,21 @@ describe("geometry-aware model compare", () => {
     expect(result.entries[0].changes).toEqual([{ key: "Status", from: "Existing", to: "New" }]);
   });
 
+  it("detects relative piece movement that changes the overall size", () => {
+    const geometry = signature(mesh(1, [0, 0, 0, 2, 0, 0, 0, 3, 0]));
+    const after: typeof geometry = {
+      ...geometry,
+      bounds: {
+        min: [...geometry.bounds.min],
+        max: [geometry.bounds.max[0] + 1, geometry.bounds.max[1], geometry.bounds.max[2]],
+      },
+    };
+    const result = compareSnapshots([row({ geometry: after })], [row({ geometry })]);
+
+    expect(result.entries[0]).toMatchObject({ kind: "geometry", categories: ["geometry"] });
+    expect(result.entries[0].geometry?.size[0]).toBeCloseTo(1);
+  });
+
   it("reports additions, removals and missing geometry completeness", () => {
     const result = compareSnapshots(
       [row({ globalId: "added" }), row({ globalId: "same", id: 2 })],

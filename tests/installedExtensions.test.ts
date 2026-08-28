@@ -63,6 +63,16 @@ describe("installed extension package", () => {
     await expect(prepareExtensionPackage(bytes)).rejects.toMatchObject({ code: "path" });
   });
 
+  it("rejects directory entries that hide an unpacked payload", async () => {
+    const encode = (text: string): Uint8Array => new TextEncoder().encode(text);
+    const bytes = zipSync({
+      "extension.json": encode(JSON.stringify(manifest())),
+      "panel.html": encode("<html></html>"),
+      "payload/": new Uint8Array(32),
+    });
+    await expect(prepareExtensionPackage(bytes)).rejects.toMatchObject({ code: "directory-data" });
+  });
+
   it("rejects a forged central-directory entry count before unpacking", async () => {
     const bytes = archive(manifest());
     bytes[bytes.length - 14] = 1;
@@ -141,6 +151,16 @@ describe("installed extension manager", () => {
       .resolves.toMatchObject({ kind: "update" });
     await expect(manager.prepare(archive(manifest("1.0.0"))))
       .resolves.toMatchObject({ kind: "update" });
+  });
+
+  it("rejects an install candidate when the reviewed version is no longer active", async () => {
+    const manager = new InstalledExtensionManager(new MemoryExtensionStore());
+    await manager.install(await manager.prepare(archive(manifest("1.0.0"))));
+    const stale = await manager.prepare(archive(manifest("2.0.0", ["model.structure.read", "view.control"])));
+    await manager.install(await manager.prepare(archive(manifest("1.1.0"))));
+
+    await expect(manager.install(stale)).rejects.toThrow(/changed after its access review/);
+    expect(manager.current("org.example.sandbox")?.version).toBe("1.1.0");
   });
 
   it("does not read or execute package bytes while disabled", async () => {

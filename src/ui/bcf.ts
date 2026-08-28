@@ -105,9 +105,22 @@ function zip(files: Array<{ name: string; data: Uint8Array }>): Blob {
   return new Blob([...body, ...directory, end.buffer], { type: "application/zip" });
 }
 
+const BCF_MAX_ENTRIES = 4096;
+const BCF_MAX_TOTAL = 256 * 1024 * 1024;
+
 async function unzip(buffer: ArrayBuffer): Promise<Map<string, Uint8Array>> {
   const view = new DataView(buffer);
   const bytes = new Uint8Array(buffer);
+  // A hostile or truncated archive must fail with a sentence, not a raw
+  // out-of-range DataView throw, and must never inflate without a ceiling.
+  const u16 = (at: number): number => {
+    if (at < 0 || at + 2 > buffer.byteLength) throw new Error("That BCF file is damaged.");
+    return view.getUint16(at, true);
+  };
+  const u32 = (at: number): number => {
+    if (at < 0 || at + 4 > buffer.byteLength) throw new Error("That BCF file is damaged.");
+    return view.getUint32(at, true);
+  };
   let end = -1;
   for (let i = buffer.byteLength - 22; i >= 0; i--) {
     if (view.getUint32(i, true) === 0x06054b50) {
@@ -116,24 +129,33 @@ async function unzip(buffer: ArrayBuffer): Promise<Map<string, Uint8Array>> {
     }
   }
   if (end < 0) throw new Error("That file is not a zip archive.");
-  const count = view.getUint16(end + 10, true);
+  const count = u16(end + 10);
+  if (count > BCF_MAX_ENTRIES) throw new Error("That BCF file has too many entries.");
   const decoder = new TextDecoder();
   const out = new Map<string, Uint8Array>();
-  let at = view.getUint32(end + 16, true);
+  let at = u32(end + 16);
+  let total = 0;
   for (let i = 0; i < count; i++) {
-    const nameLength = view.getUint16(at + 28, true);
+    const nameLength = u16(at + 28);
     const name = decoder.decode(bytes.subarray(at + 46, at + 46 + nameLength));
-    const method = view.getUint16(at + 10, true);
-    const size = view.getUint32(at + 20, true);
-    const local = view.getUint32(at + 42, true);
-    const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
-    const raw = bytes.subarray(start, start + size);
-    if (method === 0) out.set(name, raw);
-    else if (method === 8) {
+    const method = u16(at + 10);
+    const size = u32(at + 20);
+    const local = u32(at + 42);
+    const start = local + 30 + u16(local + 26) + u16(local + 28);
+    total += size;
+    if (total > BCF_MAX_TOTAL) throw new Error("That BCF file is too large to open.");
+    if (method === 0) {
+      if (start + size > buffer.byteLength) throw new Error("That BCF file is damaged.");
+      out.set(name, bytes.subarray(start, start + size));
+    } else if (method === 8) {
+      const raw = bytes.subarray(start, start + size);
       const stream = new Blob([raw as BlobPart]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-      out.set(name, new Uint8Array(await new Response(stream).arrayBuffer()));
+      const inflated = new Uint8Array(await new Response(stream).arrayBuffer());
+      total += inflated.byteLength - size;
+      if (total > BCF_MAX_TOTAL) throw new Error("That BCF file is too large to open.");
+      out.set(name, inflated);
     }
-    at += 46 + nameLength + view.getUint16(at + 30, true) + view.getUint16(at + 32, true);
+    at += 46 + nameLength + u16(at + 30) + u16(at + 32);
   }
   return out;
 }
@@ -142,6 +164,16 @@ async function unzip(buffer: ArrayBuffer): Promise<Map<string, Uint8Array>> {
 const escape = (text: string): string =>
   text.replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" })[c] ?? c);
 const utf8 = (text: string): Uint8Array => new TextEncoder().encode(text);
+// Stored dates stay ISO/UTC because BCF requires it, but a reviewer reads the
+// clock on their own wall.
+const localDate = (iso: string, withTime: boolean): string => {
+  const time = Date.parse(iso);
+  if (!Number.isFinite(time)) return iso.slice(0, withTime ? 16 : 10).replace("T", " ");
+  const date = new Date(time);
+  return withTime
+    ? `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+    : date.toLocaleDateString();
+};
 const point = (tag: string, v: [number, number, number]): string =>
   `<${tag}><X>${v[0]}</X><Y>${v[1]}</Y><Z>${v[2]}</Z></${tag}>`;
 
@@ -167,7 +199,7 @@ function markupXml(topic: Topic): string {
   const comments = topic.comments
     .map(
       (comment) =>
-        `<Comment Guid="${comment.guid}"><Date>${comment.date}</Date><Author>${escape(comment.author)}</Author>` +
+        `<Comment Guid="${escape(comment.guid)}"><Date>${escape(comment.date)}</Date><Author>${escape(comment.author)}</Author>` +
         `<Comment>${escape(comment.text)}</Comment></Comment>`,
     )
     .join("");
@@ -178,9 +210,9 @@ function markupXml(topic: Topic): string {
     : "";
   return (
     `<?xml version="1.0" encoding="UTF-8"?>\n<Markup>` +
-    `<Topic Guid="${topic.guid}" TopicType="${escape(topic.topicType || "Issue")}" TopicStatus="${escape(topic.status)}">` +
+    `<Topic Guid="${escape(topic.guid)}" TopicType="${escape(topic.topicType || "Issue")}" TopicStatus="${escape(topic.status)}">` +
     `<Title>${escape(topic.title)}</Title><Priority>${escape(topic.priority)}</Priority>` +
-    `<CreationDate>${topic.date}</CreationDate><CreationAuthor>${escape(topic.author)}</CreationAuthor>` +
+    `<CreationDate>${escape(topic.date)}</CreationDate><CreationAuthor>${escape(topic.author)}</CreationAuthor>` +
     `<Description>${escape(topic.description)}</Description>` +
     (topic.assignedTo ? `<AssignedTo>${escape(topic.assignedTo)}</AssignedTo>` : "") +
     `</Topic>` +
@@ -237,7 +269,7 @@ function viewpointXml(topic: Topic): string {
     : "";
   const planes = boxPlanes || sections;
   return (
-    `<?xml version="1.0" encoding="UTF-8"?>\n<VisualizationInfo Guid="${topic.guid}">` +
+    `<?xml version="1.0" encoding="UTF-8"?>\n<VisualizationInfo Guid="${escape(topic.guid)}">` +
     `<Components><Visibility DefaultVisibility="true">${exceptions}</Visibility>${selection}</Components>` +
     `<PerspectiveCamera>${point("CameraViewPoint", view.camera.position)}${point("CameraDirection", d)}` +
     `${point("CameraUpVector", up)}<FieldOfView>60</FieldOfView></PerspectiveCamera>` +
@@ -450,6 +482,24 @@ export class BcfPanel {
     }));
   }
 
+  /** The current viewer state as a viewpoint, so capture and recapture agree. */
+  private viewpointNow(selectedIds: number[]): ReviewTopic["viewpoint"] {
+    const viewer = this.actions.viewer;
+    const counts = viewer.getVisibilityCounts();
+    const hidden =
+      counts.hidden > 0 && counts.hidden <= HIDDEN_LIMIT
+        ? [...viewer.getElementTypes().keys()].filter((id) => !viewer.isElementVisible(id))
+        : [];
+    return {
+      camera: viewer.getCamera(),
+      sections: viewer.getSections(),
+      sectionBox: viewer.getSectionBox(),
+      selections: selectedIds.map((id) => ({ id, guid: null })),
+      hidden,
+      annotations: viewer.getAnnotationStates(),
+    };
+  }
+
   /** Raise an issue on what is on screen now. Empty title opens the editor. */
   capture(title: string, description: string, options: BcfCaptureOptions = {}): string | null {
     if (!this.key()) {
@@ -457,11 +507,6 @@ export class BcfPanel {
       return null;
     }
     const viewer = this.actions.viewer;
-    const counts = viewer.getVisibilityCounts();
-    const hidden =
-      counts.hidden > 0 && counts.hidden <= HIDDEN_LIMIT
-        ? [...viewer.getElementTypes().keys()].filter((id) => !viewer.isElementVisible(id))
-        : [];
     const selectedIds = [...new Set(options.elementIds ?? viewer.getSelectedIds())]
       .filter((id) => Number.isFinite(id) && id > 0);
     const active = this.activeProject();
@@ -483,14 +528,7 @@ export class BcfPanel {
       comments: [],
       modifiedAt: new Date().toISOString(),
       topicType: "Issue",
-      viewpoint: {
-        camera: viewer.getCamera(),
-        sections: viewer.getSections(),
-        sectionBox: viewer.getSectionBox(),
-        selections: selectedIds.map((id) => ({ id, guid: null })),
-        hidden,
-        annotations: viewer.getAnnotationStates(),
-      },
+      viewpoint: this.viewpointNow(selectedIds),
       snapshot: null,
       ...(active ? {
         remote: {
@@ -1187,7 +1225,7 @@ export class BcfPanel {
 
   private comment(entry: ReviewComment): HTMLElement {
     return h("div", { class: "topic-comment" }, [
-      h("span", { class: "who", text: `${entry.author} | ${entry.date.slice(0, 10)}${entry.pending ? " | queued" : ""}` }),
+      h("span", { class: "who", text: `${entry.author} | ${localDate(entry.date, false)}${entry.pending ? " | queued" : ""}` }),
       h("span", { text: entry.text }),
     ]);
   }
@@ -1277,13 +1315,7 @@ export class BcfPanel {
     const recapture = h("button", { class: "btn sm", type: "button", text: "Update view" });
     recapture.addEventListener("click", () => {
       const viewer = this.actions.viewer;
-      topic.viewpoint = {
-        camera: viewer.getCamera(),
-        sections: viewer.getSections(),
-        sectionBox: viewer.getSectionBox(),
-        selections: viewer.getSelectedIds().map((id) => ({ id, guid: null })),
-        hidden: [],
-      };
+      topic.viewpoint = this.viewpointNow(viewer.getSelectedIds());
       this.stageEdit(topic, true);
       void snapshot(viewer).then((shot) => {
         topic.snapshot = shot;
@@ -1360,7 +1392,7 @@ export class BcfPanel {
       title,
       description,
       h("div", { class: "row topic-controls" }, controls),
-      h("div", { class: "note", text: `${topic.author} | ${topic.date.slice(0, 16).replace("T", " ")}${topic.assignedTo ? ` | assigned to ${topic.assignedTo}` : ""}` }),
+      h("div", { class: "note", text: `${topic.author} | ${localDate(topic.date, true)}${topic.assignedTo ? ` | assigned to ${topic.assignedTo}` : ""}` }),
       ...(topic.remote?.error ? [h("div", { class: "topic-sync-error" }, [
         h("span", { class: "grow", text: topic.remote.error }),
         retry,

@@ -161,7 +161,7 @@ function detachElements(model: IfcModel, ids: Set<number>): void {
  */
 export function applyEdits(model: IfcModel, ops: EditOp[]): EditOutcome {
   const before = signatures(model);
-  const entityCountBefore = before.size;
+  const entityCountBefore = model.entityCount();
   const affected: string[] = [];
   const failures: string[] = [];
   const summaries: string[] = [];
@@ -205,7 +205,7 @@ export function applyEdits(model: IfcModel, ops: EditOp[]): EditOutcome {
     summary: failures.length ? `${summary}; ${failures.length} failed` : summary,
     affectedGuids: [...new Set(affected)],
     entityCountBefore,
-    entityCountAfter: model.guidIndex().size,
+    entityCountAfter: model.entityCount(),
     diff,
     failures,
   };
@@ -288,8 +288,13 @@ function writeExistingProperty(
           );
         }
         holder.value = value;
-      } else {
+      } else if (model.isType(handle.value, "IfcPropertySingleValue")) {
         line.NominalValue = { type: 1, value } as never;
+      } else {
+        // Enumerated, list, bounded and table properties keep their value under
+        // other attributes; writing NominalValue would report success while
+        // leaving the real value untouched.
+        throw new Error(`${setName}.${property} is not a single value and cannot be edited here`);
       }
       model.write(line);
       return true;

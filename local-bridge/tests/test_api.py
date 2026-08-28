@@ -113,6 +113,11 @@ def test_the_app_shell_never_hands_its_token_to_another_origin(client) -> None:
         assert "__IFC_SERVICE__" not in cross.text
         assert "access-control-allow-origin" not in cross.headers
 
+    # A service worker or subresource fetch caches the shell into the browser
+    # profile, so it must receive a token-free copy however same-origin it is.
+    worker = client.get("/", headers={"sec-fetch-dest": "empty"})
+    assert "__IFC_SERVICE__" not in worker.text
+
 
 def test_an_extra_origin_is_opt_in_and_exact(env) -> None:
     """Someone hosting the viewer themselves can name their origin, and gets

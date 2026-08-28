@@ -80,4 +80,23 @@ describe("IFC task graph extraction", () => {
 
     expect(graph.tasks[0]).toMatchObject({ name: "Commissioning", isMilestone: true, scheduleIds: [], productIds: [] });
   });
+
+  it("keeps omitted and blank numeric values nullable", () => {
+    const graph = extractTaskGraph({
+      schedules: [],
+      tasks: [
+        { expressID: 7, Priority: null },
+        { expressID: 8, Priority: val("  "), TaskTime: ref(50) },
+      ],
+      controls: [],
+      nests: [],
+      aggregates: [],
+      processAssignments: [],
+      sequences: [],
+      line: (id) => id === 50 ? { expressID: 50, Completion: val("") } : null,
+    });
+
+    expect(graph.tasks.map((task) => task.priority)).toEqual([null, null]);
+    expect(graph.tasks[1].taskTime?.completion).toBeNull();
+  });
 });

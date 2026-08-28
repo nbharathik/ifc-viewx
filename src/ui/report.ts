@@ -180,7 +180,7 @@ function issues(list: ReportIssue[] | null): string | null {
     .map(
       (issue) =>
         `<article class="issue">` +
-        (issue.snapshot ? `<img src="${issue.snapshot}" alt="" />` : "") +
+        (issue.snapshot && /^data:image\//i.test(issue.snapshot) ? `<img src="${esc(issue.snapshot)}" alt="" />` : "") +
         `<div><h3>${esc(issue.title)}</h3>` +
         `<p class="meta">${esc(issue.status)} · ${esc(issue.priority)} · ${esc(issue.author)} · ${esc(issue.date.slice(0, 10))}</p>` +
         (issue.description ? `<p>${esc(issue.description)}</p>` : "") +

@@ -191,6 +191,9 @@ export class InstalledExtensionManager {
   async install(candidate: ExtensionInstallCandidate): Promise<InstalledExtensionView> {
     const { prepared } = candidate;
     const existing = this.records.get(prepared.manifest.id);
+    if (candidate.current?.hash !== existing?.activeHash) {
+      throw new Error(`${prepared.manifest.id} changed after its access review; review the package again`);
+    }
     const version: InstalledVersionRecord = {
       version: prepared.manifest.version,
       hash: prepared.hash,

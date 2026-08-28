@@ -85,7 +85,9 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   const showAll = (): void => {
     active = -1;
     ctx.view.showAll();
-    ctx.view.setSections([]);
+    // Only the ceiling cut belongs to this panel; an X or Z plane the user set
+    // elsewhere stays.
+    ctx.view.setSections(ctx.view.sections().filter((section) => section.axis !== "y"));
     paint();
   };
 

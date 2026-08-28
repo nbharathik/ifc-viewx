@@ -16,7 +16,7 @@ from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from typing import Any, Callable
 
-from .guard import ALLOWED_IMPORTS, DENIED_ATTRS, check
+from .guard import DENIED_ATTRS, check, denied_import
 from .sandbox import guard_untrusted_effects
 
 MAX_SAMPLE = 20
@@ -45,15 +45,22 @@ def _safe_import(name: str, globals_=None, locals_=None, fromlist=(), level: int
     """Runtime twin of the static import allowlist."""
     if level:
         raise ImportError("relative imports are not allowed")
-    if name.split(".")[0] not in ALLOWED_IMPORTS:
+    if denied_import(name):
         raise ImportError(f'import of "{name}" is not allowed')
+    for imported in fromlist or ():
+        if isinstance(imported, str) and (
+            imported == "*" or imported.startswith("_") or imported in DENIED_ATTRS
+        ):
+            raise ImportError(f'import of "{imported}" is not allowed')
     return builtins.__import__(name, globals_, locals_, fromlist, level)
 
 
 def _reject_dunder(name: object, verb: str) -> None:
     # Closes getattr(x, "__cl" + "ass__") and every other computed spelling the
     # static guard cannot see: the check is on the resolved name, not the source.
-    if isinstance(name, str) and name.startswith("__"):
+    # Any leading underscore is private surface (statistics.random._os), so the
+    # runtime rule matches the static attribute rule.
+    if isinstance(name, str) and name.startswith("_"):
         raise AttributeError(f'{verb} "{name}" is not allowed')
     if isinstance(name, str) and name in DENIED_ATTRS:
         raise AttributeError(f'{verb} "{name}" is not allowed')

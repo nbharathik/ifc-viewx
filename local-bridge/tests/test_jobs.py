@@ -47,6 +47,14 @@ def test_runtime_import_hook_blocks_disallowed_modules(env, sample_ifc, monkeypa
 
     with pytest.raises(ImportError):
         jobs._safe_import("socket")
+    with pytest.raises(ImportError):
+        jobs._safe_import("ifcopenshell.ifcopenshell_wrapper", fromlist=["*"])
+    with pytest.raises(ImportError):
+        jobs._safe_import("ifcopenshell.geom", fromlist=["serializers"])
+    with pytest.raises(ImportError):
+        jobs._safe_import("ifcopenshell", fromlist=["*"])
+    with pytest.raises(ImportError):
+        jobs._safe_import("statistics", fromlist=["_sqrt"])
     assert jobs._safe_import("json").__name__ == "json"
 
 
@@ -131,6 +139,41 @@ def test_attrgetter_route_to_a_spawn_is_blocked(env, sample_ifc) -> None:
     )
     outcome = _python(sample_ifc, code)
     assert outcome.get("resultJson") != '"PWNED"'
+    assert outcome["error"] == "rejected_by_guard"
+
+
+def test_private_module_alias_cannot_reach_the_filesystem(env, sample_ifc, tmp_path) -> None:
+    """statistics imports random, whose _os alias is the real os module."""
+    target = tmp_path
+    direct = _python(sample_ifc, f"import statistics\nresult = statistics.random._os.listdir({str(target)!r})")
+    assert direct["error"] == "rejected_by_guard"
+    computed = _python(
+        sample_ifc,
+        f"import statistics\nresult = getattr(statistics.random, '_os').listdir({str(target)!r})",
+    )
+    assert computed["error"] == "exception"
+    assert "_os" in computed["message"]
+
+
+def test_geometry_serializer_cannot_write_arbitrary_paths(env, sample_ifc, tmp_path) -> None:
+    """The C++ serializers create-or-truncate any path, past the audit hook."""
+    target = tmp_path / "keepme.txt"
+    target.write_text("original")
+    code = (
+        "import ifcopenshell\n"
+        f"ser = ifcopenshell.geom.serializers.obj({str(target)!r}, 'x.mtl', None, None)\n"
+        "result = 'wrote'\n"
+    )
+    outcome = _python(sample_ifc, code)
+    assert outcome["error"] == "rejected_by_guard"
+    assert target.read_text() == "original"
+
+
+def test_geometry_serializer_cannot_be_imported_under_an_alias(env, sample_ifc) -> None:
+    outcome = _python(
+        sample_ifc,
+        "import ifcopenshell.geom.serializers as serializer\nresult = serializer",
+    )
     assert outcome["error"] == "rejected_by_guard"
 
 

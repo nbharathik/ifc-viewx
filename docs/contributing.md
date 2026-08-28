@@ -72,7 +72,7 @@ generator instead of editing `docs/plugins/catalog.md` by hand.
 Before submitting a docs change, run:
 
 ```bash
-mkdocs build --strict
+npm run docs:build
 ```
 
 ## Release `ifcviewx`
@@ -87,7 +87,8 @@ git tag -a v0.1.4 -m "IFCViewX 0.1.4"
 git push origin main --follow-tags
 ```
 
-`npm run bump` updates `package.json` and `local-bridge/pyproject.toml`. The tag
-must match the Python package version. Review every staged path before committing;
+`npm run bump` updates `package.json`, `package-lock.json`, and
+`local-bridge/pyproject.toml`. The tag must match the Python package version.
+Review every staged path before committing;
 `git commit -am` omits newly added release files. A tag builds the viewer, creates
 the wheel and source archive, publishes to PyPI, and creates a GitHub release.

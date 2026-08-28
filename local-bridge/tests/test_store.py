@@ -119,10 +119,24 @@ def test_lease_prevents_eviction_while_a_worker_reads(env) -> None:
 
 def test_stats_reports_quota_and_contents(env) -> None:
     store.source_path(SHA).write_bytes(b"x" * 10)
+    store.result_path("deadbeef").write_bytes(b"y" * 5)
     stats = store.stats()
     assert stats["files"] == 1
-    assert stats["bytes"] == 10
+    assert stats["bytes"] == 15
+    assert stats["modelBytes"] == 10
+    assert stats["resultBytes"] == 5
     assert stats["models"][0]["sha"] == SHA
+
+
+def test_unexpired_edit_results_count_toward_the_store_quota(env) -> None:
+    env(IFCVIEWX_STORE_GB=str(100 / 1024**3))
+    store.result_path("deadbeef").write_bytes(b"x" * 80)
+    staging = store.models_dir() / "new-result.part"
+    staging.write_bytes(b"y" * 30)
+    with pytest.raises(store.StoreError, match="quota is full"):
+        store.commit_staging(staging, store.result_path("feedbeef"))
+    assert store.result_path("deadbeef").is_file()
+    assert not store.result_path("feedbeef").exists()
 
 
 def test_concurrent_commits_cannot_claim_the_same_quota(env) -> None:

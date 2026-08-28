@@ -11,6 +11,7 @@
 
 import type { ChatMessage, ChatOptions, TurnResult } from "../llm/llmClient.js";
 import type { NativeTool } from "../llm/tools.js";
+import { compareNumericVersion, compatibleUpperBound, parseNumericVersion } from "../sdk/semver.js";
 
 export interface StoreStats {
   dir: string;
@@ -114,19 +115,8 @@ export type LocalCompanionMatch =
   | { status: "available"; provider: LocalProvider }
   | { status: "offline" | "missing" | "incompatible"; provider?: LocalProvider };
 
-type Version = [number, number, number];
-
-function parseVersion(value: string): Version | null {
-  const match = /^(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec(value);
-  return match ? [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)] : null;
-}
-
-function compareVersion(a: Version, b: Version): number {
-  return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
-}
-
 export function satisfiesVersionRange(version: string, range: string): boolean | null {
-  const current = parseVersion(version);
+  const current = parseNumericVersion(version.split(/[+-]/, 1)[0]);
   if (!current || !range.trim() || range.includes("||")) return null;
   for (const token of range.replaceAll(",", " ").trim().split(/\s+/)) {
     if (token === "*" || token.toLowerCase() === "x") continue;
@@ -137,17 +127,17 @@ export function satisfiesVersionRange(version: string, range: string): boolean |
     }
     const ranged = /^(\^|~)(\d+(?:\.\d+){0,2})$/.exec(token);
     if (ranged) {
-      const base = parseVersion(ranged[2]);
+      const base = parseNumericVersion(ranged[2]);
       if (!base) return null;
-      const upper: Version = ranged[1] === "^" ? [base[0] + 1, 0, 0] : [base[0], base[1] + 1, 0];
-      if (compareVersion(current, base) < 0 || compareVersion(current, upper) >= 0) return false;
+      const upper = compatibleUpperBound(ranged[1] as "^" | "~", ranged[2], base);
+      if (compareNumericVersion(current, base) < 0 || compareNumericVersion(current, upper) >= 0) return false;
       continue;
     }
     const compared = /^(>=|<=|>|<|=)?(\d+(?:\.\d+){0,2})$/.exec(token);
     if (!compared) return null;
-    const target = parseVersion(compared[2]);
+    const target = parseNumericVersion(compared[2]);
     if (!target) return null;
-    const relation = compareVersion(current, target);
+    const relation = compareNumericVersion(current, target);
     const operator = compared[1];
     const matches = !operator && compared[2].split(".").length === 1
       ? current[0] === target[0]

@@ -202,7 +202,7 @@ export class GeometryIndex {
       if (!geometry) continue;
       if (geometry.localVolume === undefined) {
         geometry.localVolume = signedLocalVolume(geometry.positions, geometry.indices);
-        geometry.localClosed = edgeManifold(geometry.indices);
+        geometry.localClosed = edgeManifold(geometry.positions, geometry.indices);
       }
       out.push({
         volume: geometry.localVolume,
@@ -384,16 +384,30 @@ function signedLocalVolume(positions: Float32Array, indices: Uint32Array): numbe
 }
 
 /** Closed iff every directed edge appears once and its reverse once, so inconsistent winding fails too. */
-function edgeManifold(indices: Uint32Array): boolean {
+function edgeManifold(positions: Float32Array, indices: Uint32Array): boolean {
   if (indices.length === 0 || indices.length % 3 !== 0) return false;
+  // web-ifc emits flat-shaded vertices duplicated at every crease, so weld by
+  // quantized position first or a shared edge counts once under two different
+  // indices and every real element reads as open.
+  const scale = 1e5;
+  const canonical = new Map<string, number>();
+  const remap = new Uint32Array(positions.length / 3);
+  for (let v = 0; v < remap.length; v++) {
+    const key = `${Math.round(positions[v * 3] * scale)}:` +
+      `${Math.round(positions[v * 3 + 1] * scale)}:${Math.round(positions[v * 3 + 2] * scale)}`;
+    let welded = canonical.get(key);
+    if (welded === undefined) canonical.set(key, (welded = v));
+    remap[v] = welded;
+  }
   const edges = new Map<string, number>();
   for (let t = 0; t < indices.length; t += 3) {
-    const a = indices[t], b = indices[t + 1], c = indices[t + 2];
-    if (a === b || b === c || c === a) return false;
+    const a = remap[indices[t]], b = remap[indices[t + 1]], c = remap[indices[t + 2]];
+    if (a === b || b === c || c === a) continue;
     for (const key of [`${a}:${b}`, `${b}:${c}`, `${c}:${a}`]) {
       edges.set(key, (edges.get(key) ?? 0) + 1);
     }
   }
+  if (edges.size === 0) return false;
   for (const [key, count] of edges) {
     if (count !== 1) return false;
     const colon = key.indexOf(":");

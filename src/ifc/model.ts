@@ -28,6 +28,24 @@ export const ref = (v: unknown): number | null => {
   return typeof id === "number" ? id : null;
 };
 
+/**
+ * A property carries its value under NominalValue only when it is single valued.
+ * Enumerated, list and bounded properties keep it elsewhere, so those read as
+ * blank without this fallback.
+ */
+const propertyValue = (property: Record<string, unknown>): string | number | boolean | null => {
+  const single = val(property.NominalValue);
+  if (single !== null) return single;
+  for (const listKey of ["EnumerationValues", "ListValues"]) {
+    const list = property[listKey];
+    if (Array.isArray(list)) {
+      const parts = list.map((item) => val(item)).filter((item) => item !== null);
+      if (parts.length) return parts.join(", ");
+    }
+  }
+  return val(property.SetPointValue) ?? val(property.UpperBoundValue) ?? val(property.LowerBoundValue);
+};
+
 const refs = (v: unknown): number[] =>
   Array.isArray(v) ? v.map(ref).filter((id): id is number => id !== null) : [];
 
@@ -73,9 +91,23 @@ export class IfcModel {
     const code = this.typeCode(name);
     if (!code) return [];
     const vector = this.api.GetLineIDsWithType(this.id, code, inherited);
-    const out = new Array<number>(vector.size());
-    for (let i = 0; i < out.length; i++) out[i] = vector.get(i);
-    return out;
+    try {
+      const out = new Array<number>(vector.size());
+      for (let i = 0; i < out.length; i++) out[i] = vector.get(i);
+      return out;
+    } finally {
+      (vector as unknown as { delete?: () => void }).delete?.();
+    }
+  }
+
+  /** Total STEP entities, including non-rooted relationships and resources. */
+  entityCount(): number {
+    const vector = this.api.GetAllLines(this.id);
+    try {
+      return vector.size();
+    } finally {
+      (vector as unknown as { delete?: () => void }).delete?.();
+    }
   }
 
   line(expressID: number): Record<string, unknown> | null {
@@ -222,7 +254,7 @@ export class IfcModel {
       const property = this.line(pid);
       if (!property) continue;
       const key = String(val(property.Name) ?? "");
-      if (key) out[key] = val(property.NominalValue);
+      if (key) out[key] = propertyValue(property);
     }
     // Qto_* sets carry quantities instead, each with its own value attribute.
     for (const qid of refs(set.Quantities)) {

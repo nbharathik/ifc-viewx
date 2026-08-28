@@ -194,7 +194,10 @@ function writeSelectionSets(key: string, sets: SelectionSet[]): boolean {
 
 export function readViewpoints(key: string): Viewpoint[] {
   try {
-    return JSON.parse(safeStorageGet(key) ?? "[]") as Viewpoint[];
+    const parsed = JSON.parse(safeStorageGet(key) ?? "[]") as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((view) => !!view && typeof view === "object" && typeof (view as Viewpoint).name === "string") as Viewpoint[]
+      : [];
   } catch {
     return [];
   }

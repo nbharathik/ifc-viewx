@@ -74,7 +74,7 @@ describe("assistant capability adapter", () => {
     )).rejects.toThrow(/earlier model revision/);
   });
 
-  it("keeps contributed assistant tools disabled until the user approves them", () => {
+  it("keeps contributed assistant tools disabled until the user approves them", async () => {
     const registry = createViewerCapabilityRegistry();
     registry.register({
       id: "sample.inspect",
@@ -91,9 +91,58 @@ describe("assistant capability adapter", () => {
     });
     const adapter = new AssistantCapabilityAdapter(registry, { viewer });
     expect(adapter.tools("query").map((tool) => tool.name)).not.toContain(assistantToolName("sample.inspect"));
+    await expect(adapter.execute(
+      "sample.inspect",
+      {},
+      "query",
+      new AbortController().signal,
+    )).rejects.toThrow(/unknown or unapproved/i);
+    await expect(adapter.execute(
+      "issue.stage",
+      {},
+      "query",
+      new AbortController().signal,
+    )).rejects.toThrow(/unknown or unapproved/i);
     expect(adapter.tools("query", {
       approvals: [{ owner: "org.example.sample", capability: "sample.inspect", enabled: true }],
     }).map((tool) => tool.name)).toContain(assistantToolName("sample.inspect"));
+  });
+
+  it("keeps normalized tool names unique", async () => {
+    const registry = createViewerCapabilityRegistry();
+    const longId = `sample${"a".repeat(70)}`;
+    const collidingId = assistantToolName(longId);
+    const register = (id: string): void => {
+      registry.register({
+        id,
+        title: id,
+        description: id,
+        input: { type: "object", properties: {}, additionalProperties: false },
+        effect: "read",
+        permissions: [],
+        cost: "instant",
+        parallelSafe: true,
+        exposure: { assistant: true },
+        source: "core",
+        execute: () => ({ id }),
+      });
+    };
+    register(longId);
+    register(collidingId);
+    const adapter = new AssistantCapabilityAdapter(registry, { viewer });
+    const alternateId = adapter.tools("query").find((tool) => tool.description === collidingId)!.name;
+    register(alternateId);
+    const names = adapter.tools("query")
+      .filter((tool) => [longId, collidingId, alternateId].includes(tool.description))
+      .map((tool) => tool.name);
+
+    expect(new Set(names).size).toBe(3);
+    await expect(Promise.all(names.map((name) => adapter.execute(
+      name,
+      {},
+      "query",
+      new AbortController().signal,
+    )))).resolves.toHaveLength(3);
   });
 
   it("keeps clash rows connected through open, isolate and staged issue steps", async () => {

@@ -91,19 +91,21 @@ function geometryDelta(before: GeometrySignature, after: GeometrySignature): Geo
   ));
   const beforeSize = sizeOf(before);
   const afterSize = sizeOf(after);
+  const size: [number, number, number] = [
+    afterSize[0] - beforeSize[0],
+    afterSize[1] - beforeSize[1],
+    afterSize[2] - beforeSize[2],
+  ];
   return {
     shapeChanged: before.shapeHash !== after.shapeHash
       || before.vertices !== after.vertices
       || before.triangles !== after.triangles
-      || before.pieces !== after.pieces,
+      || before.pieces !== after.pieces
+      || size.some((delta) => Math.abs(delta) > EPSILON),
     translation,
     translationDistance: Math.hypot(...translation),
     rotationDegrees: 2 * Math.acos(dot) * 180 / Math.PI,
-    size: [
-      afterSize[0] - beforeSize[0],
-      afterSize[1] - beforeSize[1],
-      afterSize[2] - beforeSize[2],
-    ],
+    size,
     beforeTriangles: before.triangles,
     afterTriangles: after.triangles,
   };

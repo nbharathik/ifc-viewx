@@ -123,7 +123,11 @@ function matcher(node: Element | null): Matcher | null {
     if (patterns.length && !patterns.some((pattern) => pattern.test(text))) return false;
     if (options.length && !options.includes(text.toLowerCase())) return false;
     const number = Number(text);
-    if (Number.isFinite(number)) {
+    const bounded = min !== null || max !== null || above !== null || below !== null;
+    if (bounded) {
+      // A numeric bound cannot be met by a value that is not a number, so
+      // "REI 60" must fail minInclusive 90 rather than slip through unchecked.
+      if (!Number.isFinite(number)) return false;
       if (min !== null && number < min) return false;
       if (max !== null && number > max) return false;
       if (above !== null && number <= above) return false;

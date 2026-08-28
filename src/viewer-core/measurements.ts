@@ -221,19 +221,25 @@ export function formatArea(squareMetres: number, value?: Partial<MeasurementForm
 export function formatVolume(cubicMetres: number, value?: Partial<MeasurementFormat>): string {
   if (!Number.isFinite(cubicMetres)) return "-";
   const format = cleanFormat(value);
-  const imperial =
-    format.unit === "decimal-feet" ||
-    format.unit === "decimal-inches" ||
-    format.unit === "engineering" ||
-    format.unit === "architectural";
-  if (imperial) {
+  if (format.unit === "decimal-feet" || format.unit === "engineering" || format.unit === "architectural") {
     return `${decimal(cubicMetres / 0.3048 ** 3, format.precision, format.zeroSuppression)} ft3`;
+  }
+  if (format.unit === "decimal-inches") {
+    return `${decimal(cubicMetres / 0.0254 ** 3, format.precision, format.zeroSuppression)} in3`;
   }
   if (format.unit === "auto" && Math.abs(cubicMetres) < 0.001) {
     return `${Math.round(cubicMetres * 1_000_000)} cm3`;
   }
+  if (format.unit === "millimetres") {
+    return `${decimal(cubicMetres * 1_000_000_000, format.precision, format.zeroSuppression)} mm3`;
+  }
+  if (format.unit === "centimetres") {
+    return `${decimal(cubicMetres * 1_000_000, format.precision, format.zeroSuppression)} cm3`;
+  }
   const digits = Math.abs(cubicMetres) >= 100 ? 1 : 3;
-  return `${cubicMetres.toFixed(digits)} m3`;
+  return format.unit === "metres"
+    ? `${decimal(cubicMetres, format.precision, format.zeroSuppression)} m3`
+    : `${cubicMetres.toFixed(digits)} m3`;
 }
 
 export function formatWeight(kilograms: number, value?: Partial<MeasurementFormat>): string {

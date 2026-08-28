@@ -119,9 +119,11 @@ export class InlineEngine implements AsyncIfcEngine {
   /** Only the download can be aborted inline; wasm work runs to completion. */
   cancel(): void {
     this.abort?.abort();
+    this.adapter.disposeAll();
   }
 
   terminate(): void {
     this.abort?.abort();
+    this.adapter.disposeAll();
   }
 }
