@@ -81,8 +81,7 @@ const hex = (buffer: ArrayBuffer): string =>
   [...new Uint8Array(buffer)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const view = new Uint8Array(bytes);
-  const digest = await crypto.subtle.digest("SHA-256", view.buffer as ArrayBuffer);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
   return hex(digest);
 }
 
@@ -114,12 +113,11 @@ export async function verifyIndex(
       false,
       ["verify"],
     );
-    const view = new Uint8Array(bytes);
     const ok = await crypto.subtle.verify(
       { name: "ECDSA", hash: "SHA-256" },
       key,
-      base64ToBytes(signature).buffer as ArrayBuffer,
-      view.buffer as ArrayBuffer,
+      base64ToBytes(signature),
+      bytes,
     );
     return ok ? "signed" : "invalid";
   } catch {
