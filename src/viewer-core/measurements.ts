@@ -1,0 +1,396 @@
+/**
+ * Measurement arithmetic stays in metres. This module is the display edge:
+ * unit choices and rounding never flow back into geometry calculations.
+ */
+import type { SnapKind } from "./scene/scene.js";
+
+export type MeasurementUnit =
+  | "auto"
+  | "millimetres"
+  | "centimetres"
+  | "metres"
+  | "decimal-feet"
+  | "decimal-inches"
+  | "engineering"
+  | "architectural";
+
+export interface MeasurementPrecision {
+  mode: "decimals" | "denominator" | "increment";
+  value: number;
+}
+
+export interface MeasurementFormat {
+  unit: MeasurementUnit;
+  precision: MeasurementPrecision;
+  /** AutoCAD-style component/decimal suppression flags described in the roadmap. */
+  zeroSuppression: 0 | 1 | 2 | 3 | 4 | 8 | 12;
+}
+
+export const DEFAULT_MEASUREMENT_FORMAT: Readonly<MeasurementFormat> = Object.freeze({
+  unit: "auto",
+  precision: Object.freeze({ mode: "decimals", value: 2 }),
+  zeroSuppression: 0,
+});
+
+export type MeasurementSemantic =
+  | "point-to-point"
+  | "point-to-line"
+  | "point-to-face"
+  | "line-to-line"
+  | "line-to-face"
+  | "face-to-face";
+
+export type MeasurementEndKind = "vertex" | "midpoint" | "edge" | "surface";
+export type MeasureConstraint = "free" | "x" | "y" | "z" | "perpendicular" | "parallel";
+export type Point3 = [number, number, number];
+export type SnapMode = "auto" | "vertex" | "off";
+export type MeasureMode = "distance" | "path" | "angle" | "area" | "coordinate" | "count";
+
+export interface Measurement {
+  kind: "distance";
+  id: number;
+  label: string;
+  visible: boolean;
+  semantic: MeasurementSemantic;
+  a: Point3;
+  b: Point3 | null;
+  distance: number;
+  horizontal: number;
+  vertical: number;
+  slopePercent: number | null;
+  slopeAngle: number;
+  complete: boolean;
+  ends: [SnapKind, SnapKind | null];
+}
+
+export interface DistanceMeasurementState {
+  kind?: "distance";
+  id?: number;
+  label?: string;
+  visible?: boolean;
+  a: Point3;
+  b: Point3;
+  ends: [SnapKind, SnapKind];
+}
+
+export interface ShapeMeasure {
+  id: number;
+  kind: Exclude<MeasureMode, "distance">;
+  label: string;
+  visible: boolean;
+  points: Point3[];
+  angle?: number;
+  area?: number;
+  perimeter: number;
+}
+
+export interface ShapeMeasurementState {
+  kind: ShapeMeasure["kind"];
+  id?: number;
+  label?: string;
+  visible?: boolean;
+  points: Point3[];
+}
+
+export type MeasurementState = DistanceMeasurementState | ShapeMeasurementState;
+export type MeasurementObject = Measurement | ShapeMeasure;
+
+export interface MeasurementUpdate {
+  label?: string;
+  visible?: boolean;
+}
+
+export interface MeasureLabelBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+const END_CLASS: Record<MeasurementEndKind, "point" | "line" | "face"> = {
+  vertex: "point",
+  midpoint: "line",
+  edge: "line",
+  surface: "face",
+};
+
+/** A stable, order-independent name for what the two endpoints landed on. */
+export function measurementSemantic(
+  ends: [MeasurementEndKind, MeasurementEndKind],
+): MeasurementSemantic {
+  const rank = { point: 0, line: 1, face: 2 } as const;
+  const pair = ends.map((end) => END_CLASS[end]).sort((a, b) => rank[a] - rank[b]);
+  return `${pair[0]}-to-${pair[1]}` as MeasurementSemantic;
+}
+
+/** Apply an orthographic world-axis lock without mutating either input point. */
+export function constrainMeasurementPoint(
+  origin: Point3,
+  point: Point3,
+  lock: MeasureConstraint,
+  surfaceNormal?: Point3 | null,
+): Point3 {
+  if (lock === "x") return [point[0], origin[1], origin[2]];
+  if (lock === "y") return [origin[0], point[1], origin[2]];
+  if (lock === "z") return [origin[0], origin[1], point[2]];
+  if ((lock === "perpendicular" || lock === "parallel") && surfaceNormal) {
+    const length = Math.hypot(...surfaceNormal);
+    if (length > 1e-12) {
+      const normal: Point3 = surfaceNormal.map((value) => value / length) as Point3;
+      const delta: Point3 = [point[0] - origin[0], point[1] - origin[1], point[2] - origin[2]];
+      const along = delta[0] * normal[0] + delta[1] * normal[1] + delta[2] * normal[2];
+      if (lock === "perpendicular") {
+        return [origin[0] + normal[0] * along, origin[1] + normal[1] * along, origin[2] + normal[2] * along];
+      }
+      return [
+        point[0] - normal[0] * along,
+        point[1] - normal[1] * along,
+        point[2] - normal[2] * along,
+      ];
+    }
+  }
+  return [...point];
+}
+
+const subtract = (a: Point3, b: Point3): Point3 => [
+  a[0] - b[0],
+  a[1] - b[1],
+  a[2] - b[2],
+];
+
+const vectorLength = (value: Point3): number => Math.hypot(value[0], value[1], value[2]);
+
+export const pointDistance = (first: Point3, second: Point3): number =>
+  vectorLength(subtract(first, second));
+
+/** Newell area of the best-fit plane containing the ring. */
+export function ringArea(points: Point3[]): number {
+  if (points.length < 3) return 0;
+  let x = 0;
+  let y = 0;
+  let z = 0;
+  for (let index = 0; index < points.length; index++) {
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    x += current[1] * next[2] - current[2] * next[1];
+    y += current[2] * next[0] - current[0] * next[2];
+    z += current[0] * next[1] - current[1] * next[0];
+  }
+  return Math.hypot(x, y, z) / 2;
+}
+
+/** Angle at the middle point in degrees. */
+export function angleAt(a: Point3, b: Point3, c: Point3): number {
+  const first = subtract(a, b);
+  const second = subtract(c, b);
+  const firstLength = vectorLength(first);
+  const secondLength = vectorLength(second);
+  if (firstLength === 0 || secondLength === 0) return 0;
+  const cosine = (
+    first[0] * second[0] + first[1] * second[1] + first[2] * second[2]
+  ) / (firstLength * secondLength);
+  return (Math.acos(Math.min(1, Math.max(-1, cosine))) * 180) / Math.PI;
+}
+
+export function ringPerimeter(points: Point3[], closed: boolean): number {
+  let total = 0;
+  const last = closed ? points.length : points.length - 1;
+  for (let index = 0; index < last; index++) {
+    total += vectorLength(subtract(points[(index + 1) % points.length], points[index]));
+  }
+  return total;
+}
+
+export function formatAngle(degrees: number): string {
+  return `${degrees.toFixed(1)} deg`;
+}
+
+export function selectMeasureLabels<T extends MeasureLabelBox>(
+  items: T[],
+  limit = 80,
+  gap = 5,
+): T[] {
+  const kept: T[] = [];
+  for (const item of items) {
+    if (kept.length >= limit) break;
+    if (!Number.isFinite(item.x) || !Number.isFinite(item.y)) continue;
+    const overlaps = kept.some((other) =>
+      Math.abs(item.x - other.x) < (item.width + other.width) / 2 + gap
+      && Math.abs(item.y - other.y) < (item.height + other.height) / 2 + gap,
+    );
+    if (!overlaps) kept.push(item);
+  }
+  return kept;
+}
+
+function cleanFormat(value: Partial<MeasurementFormat> | undefined): MeasurementFormat {
+  const unit = value?.unit ?? DEFAULT_MEASUREMENT_FORMAT.unit;
+  const mode = value?.precision?.mode ?? DEFAULT_MEASUREMENT_FORMAT.precision.mode;
+  const raw = value?.precision?.value ?? DEFAULT_MEASUREMENT_FORMAT.precision.value;
+  const valid = Number.isFinite(raw) && (mode === "decimals" ? raw >= 0 : raw > 0);
+  const precision = valid ? raw : DEFAULT_MEASUREMENT_FORMAT.precision.value;
+  const zeroSuppression = value?.zeroSuppression ?? DEFAULT_MEASUREMENT_FORMAT.zeroSuppression;
+  return { unit, precision: { mode, value: precision }, zeroSuppression };
+}
+
+function rounded(value: number, precision: MeasurementPrecision): number {
+  if (precision.mode === "increment") return Math.round(value / precision.value) * precision.value;
+  if (precision.mode === "denominator") return Math.round(value * precision.value) / precision.value;
+  const scale = 10 ** Math.min(8, Math.max(0, Math.round(precision.value)));
+  return Math.round(value * scale) / scale;
+}
+
+function decimal(value: number, precision: MeasurementPrecision, flags: number): string {
+  const places = precision.mode === "decimals" ? Math.min(8, Math.max(0, Math.round(precision.value))) : 6;
+  let out = rounded(value, precision).toFixed(places);
+  if (flags & 8) out = out.replace(/(\.\d*?[1-9])0+$|\.0+$/, "$1");
+  if ((flags & 4) && Math.abs(Number(out)) < 1) out = out.replace(/^(-?)0\./, "$1.");
+  return out === "-0" ? "0" : out;
+}
+
+function fraction(inches: number, denominator: number): { whole: number; numerator: number; denominator: number } {
+  const safe = Math.max(1, Math.round(denominator));
+  let whole = Math.floor(inches);
+  let numerator = Math.round((inches - whole) * safe);
+  if (numerator === safe) {
+    whole += 1;
+    numerator = 0;
+  }
+  if (numerator === 0) return { whole, numerator, denominator: 1 };
+  let a = numerator;
+  let b = safe;
+  while (b) [a, b] = [b, a % b];
+  return { whole, numerator: numerator / a, denominator: safe / a };
+}
+
+function feetAndInches(metres: number, format: MeasurementFormat, architectural: boolean): string {
+  const negative = metres < 0 ? "-" : "";
+  const totalInches = Math.abs(metres) / 0.0254;
+  let feet = Math.floor(totalInches / 12);
+  let inches = totalInches - feet * 12;
+  let inchText: string;
+  if (architectural) {
+    const denominator = format.precision.mode === "denominator" ? format.precision.value : 16;
+    const part = fraction(inches, denominator);
+    inches = part.whole;
+    if (inches >= 12) {
+      feet += 1;
+      inches -= 12;
+    }
+    inchText = part.numerator
+      ? `${inches} ${part.numerator}/${part.denominator}`
+      : String(inches);
+  } else {
+    inches = rounded(inches, format.precision);
+    if (inches >= 12) {
+      feet += 1;
+      inches -= 12;
+    }
+    inchText = decimal(inches, format.precision, format.zeroSuppression);
+  }
+
+  // The low two bits select component suppression. 0 is the compact default,
+  // 1 includes both, 2 includes zero feet, 3 includes zero inches.
+  const componentMode = format.zeroSuppression & 3;
+  const showFeet = feet !== 0 || componentMode === 1 || componentMode === 2;
+  const showInches = inches !== 0 || componentMode === 1 || componentMode === 3;
+  const feetPart = showFeet ? `${feet}'` : "";
+  const inchPart = showInches ? `${inchText}\"` : "";
+  return `${negative}${feetPart}${showFeet && showInches ? "-" : ""}${inchPart || (!feetPart ? '0"' : "")}`;
+}
+
+/** Format metres using the requested display convention. */
+export function formatLength(metres: number, value?: Partial<MeasurementFormat>): string {
+  if (!Number.isFinite(metres)) return "-";
+  const format = cleanFormat(value);
+  if (format.unit === "auto") {
+    if (Math.abs(metres) >= 1) return `${metres.toFixed(Math.abs(metres) >= 100 ? 1 : 2)} m`;
+    return `${Math.round(metres * 1000)} mm`;
+  }
+  if (format.unit === "engineering") return feetAndInches(metres, format, false);
+  if (format.unit === "architectural") return feetAndInches(metres, format, true);
+  const scale = {
+    millimetres: 1000,
+    centimetres: 100,
+    metres: 1,
+    "decimal-feet": 1 / 0.3048,
+    "decimal-inches": 1 / 0.0254,
+  }[format.unit];
+  const suffix = {
+    millimetres: "mm",
+    centimetres: "cm",
+    metres: "m",
+    "decimal-feet": "ft",
+    "decimal-inches": "in",
+  }[format.unit];
+  return `${decimal(metres * scale, format.precision, format.zeroSuppression)} ${suffix}`;
+}
+
+/** Area follows the chosen length unit squared while arithmetic stays in m2. */
+export function formatArea(squareMetres: number, value?: Partial<MeasurementFormat>): string {
+  if (!Number.isFinite(squareMetres)) return "-";
+  const format = cleanFormat(value);
+  if (format.unit === "auto") {
+    if (Math.abs(squareMetres) >= 1) {
+      return `${squareMetres.toFixed(Math.abs(squareMetres) >= 100 ? 1 : 2)} m2`;
+    }
+    return `${Math.round(squareMetres * 10000)} cm2`;
+  }
+  const unit = format.unit === "engineering" || format.unit === "architectural" ? "decimal-feet" : format.unit;
+  const scale = {
+    millimetres: 1_000_000,
+    centimetres: 10_000,
+    metres: 1,
+    "decimal-feet": 1 / (0.3048 ** 2),
+    "decimal-inches": 1 / (0.0254 ** 2),
+  }[unit];
+  const suffix = {
+    millimetres: "mm2",
+    centimetres: "cm2",
+    metres: "m2",
+    "decimal-feet": "ft2",
+    "decimal-inches": "in2",
+  }[unit];
+  return `${decimal(squareMetres * scale, format.precision, format.zeroSuppression)} ${suffix}`;
+}
+
+export function formatVolume(cubicMetres: number, value?: Partial<MeasurementFormat>): string {
+  if (!Number.isFinite(cubicMetres)) return "-";
+  const format = cleanFormat(value);
+  if (format.unit === "decimal-feet" || format.unit === "engineering" || format.unit === "architectural") {
+    return `${decimal(cubicMetres / 0.3048 ** 3, format.precision, format.zeroSuppression)} ft3`;
+  }
+  if (format.unit === "decimal-inches") {
+    return `${decimal(cubicMetres / 0.0254 ** 3, format.precision, format.zeroSuppression)} in3`;
+  }
+  if (format.unit === "auto" && Math.abs(cubicMetres) < 0.001) {
+    return `${Math.round(cubicMetres * 1_000_000)} cm3`;
+  }
+  if (format.unit === "millimetres") {
+    return `${decimal(cubicMetres * 1_000_000_000, format.precision, format.zeroSuppression)} mm3`;
+  }
+  if (format.unit === "centimetres") {
+    return `${decimal(cubicMetres * 1_000_000, format.precision, format.zeroSuppression)} cm3`;
+  }
+  const digits = Math.abs(cubicMetres) >= 100 ? 1 : 3;
+  return format.unit === "metres"
+    ? `${decimal(cubicMetres, format.precision, format.zeroSuppression)} m3`
+    : `${cubicMetres.toFixed(digits)} m3`;
+}
+
+export function formatWeight(kilograms: number, value?: Partial<MeasurementFormat>): string {
+  if (!Number.isFinite(kilograms)) return "-";
+  const format = cleanFormat(value);
+  const imperial =
+    format.unit === "decimal-feet" ||
+    format.unit === "decimal-inches" ||
+    format.unit === "engineering" ||
+    format.unit === "architectural";
+  if (imperial) return `${(kilograms * 2.20462).toFixed(1)} lb`;
+  if (Math.abs(kilograms) >= 1000) return `${(kilograms / 1000).toFixed(2)} t`;
+  return `${kilograms.toFixed(1)} kg`;
+}
+
+export function formatCoordinate(point: Point3, value?: Partial<MeasurementFormat>): string {
+  return `X ${formatLength(point[0], value)}  Y ${formatLength(point[1], value)}  Z ${formatLength(point[2], value)}`;
+}

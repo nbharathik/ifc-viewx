@@ -1,7 +1,8 @@
 // App chrome around the ribbon: the top bar, the status bar, panel switching
 // and the activity log. Pure presentation. Everything it can do is passed in
 // as actions, so this module never reaches into the viewer or the service.
-import { h, icon, iconButton, iconLink, makeResizer, toast } from "./kit.js";
+import { h, icon, iconButton, iconLink, makeResizer, slidingPill, swapText, toast } from "./kit.js";
+import { releaseUi } from "../app/release.js";
 
 export interface ShellActions {
   toggleTheme(): void;
@@ -16,26 +17,42 @@ export interface ShellActions {
 
 export type TabId =
   | "properties"
+  | "views"
+  | "computed"
   | "filters"
+  | "geo"
   | "ids"
   | "bcf"
   | "assistant"
-  | "schedule"
   | "plugins"
   | "activity";
-export type PaneId = "tree" | "types" | "summary";
+export type PaneId = "tree" | "types" | "organize" | "summary";
 
-const PANES: Array<[string, PaneId]> = [["Structure", "tree"], ["Types", "types"], ["Summary", "summary"]];
+const PANES: Array<[string, PaneId]> = [
+  ["Structure", "tree"],
+  ["Types", "types"],
+  ["Organize", "organize"],
+  ["Summary", "summary"],
+];
 
-const TABS: Array<{ id: TabId; label: string; icon: string; key: string }> = [
+/**
+ * A `handoff` tab owns no pane: the rail button asks the app to open the thing
+ * it names, which lands somewhere else. Switching panes first would leave an
+ * empty panel behind and light the wrong rail button.
+ */
+const TABS: Array<{ id: TabId; label: string; icon: string; key: string; handoff?: boolean }> = [
   { id: "properties", label: "Properties", icon: "info", key: "P" },
+  { id: "views", label: "Views", icon: "bookmark", key: "W" },
+  { id: "computed", label: "Computed", icon: "sliders", key: "" },
   { id: "filters", label: "Filters", icon: "funnel", key: "R" },
-  { id: "ids", label: "IDS checks", icon: "clipboard", key: "" },
+  { id: "ids", label: "IDS", icon: "clipboard", key: "" },
   { id: "bcf", label: "Issues", icon: "flag", key: "" },
-  { id: "schedule", label: "Schedule", icon: "table", key: "" },
   { id: "assistant", label: "Assistant", icon: "sparkle", key: "C" },
   { id: "plugins", label: "Plugins", icon: "blocks", key: "" },
   { id: "activity", label: "Activity", icon: "activity", key: "L" },
+  ...(releaseUi.geoContext
+    ? [{ id: "geo" as const, label: "Geo Context", icon: "globe", key: "" }]
+    : []),
 ];
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -50,10 +67,11 @@ export class Shell {
   readonly viewerHost = $("viewer-host");
   /** Where main.ts mounts the Web Studio / Local Studio chip. */
   readonly barSlot = h("span", { class: "sb-item" });
+  /** Status-bar slot on the right, for the results-dock chip. */
+  readonly statusSlot = h("span", { class: "sb-item" });
   /** Top bar icon cluster; main.ts mounts the plugins button here. */
   readonly topSlot = h("span", { class: "top-slot" });
   private readonly tabButtons = new Map<TabId, HTMLButtonElement>();
-  private readonly tabBadges = new Map<TabId, HTMLElement>();
   private readonly panes = new Map<string, HTMLElement>();
   private readonly paneButtons = new Map<PaneId, HTMLButtonElement>();
   private readonly status: Record<string, HTMLElement> = {};
@@ -63,10 +81,14 @@ export class Shell {
   private readonly projectName: HTMLElement;
   private readonly projectDot: HTMLElement;
   private readonly selection: HTMLElement;
+  /** Every modifier currently narrowing or recolouring the view. */
+  private readonly viewState = h("span", { class: "sb-view-state" });
   private readonly themeButton: HTMLButtonElement;
+  private readonly compactQuery = typeof window.matchMedia === "function"
+    ? window.matchMedia("(max-width: 900px)")
+    : null;
   private readonly mounted = new Set<TabId>();
   private activeTab: TabId = "properties";
-  private activityCount = 0;
 
   constructor(private readonly actions: ShellActions) {
     const bar = $("topbar");
@@ -79,6 +101,8 @@ export class Shell {
     this.project = h("span", { class: "model-chip blank" }, [this.projectDot, this.projectName]);
 
     this.themeButton = iconButton("moon", "Switch theme", actions.toggleTheme);
+    const sourceLink = iconLink("github", "Source on GitHub", "https://github.com/nbharathik/ifc-viewx");
+    sourceLink.classList.add("topbar-optional");
     // Panel collapse lives in each panel, not up here: the control belongs
     // next to the thing it hides.
     $("topbar-right").append(
@@ -90,7 +114,7 @@ export class Shell {
       this.themeButton,
       iconButton("settings", "Settings  Ctrl+,", actions.openSettings),
       iconButton("help", "Keyboard shortcuts  ?", actions.openHelp),
-      iconLink("github", "Source on GitHub", "https://github.com/nbharathik/ifc-viewx"),
+      sourceLink,
     );
     $("outliner-actions").appendChild(
       iconButton("panel-left-close", "Collapse  Ctrl+B", () => this.togglePanel("outliner"), "icon-btn sm"),
@@ -104,8 +128,30 @@ export class Shell {
     this.buildOutlinerSwitch();
     this.buildTabs();
 
+    // The organize pane and IDS tab bodies are created here, so index.html
+    // stays as shipped.
+    if (!document.getElementById("pane-organize")) {
+      $("pane-types").insertAdjacentElement("afterend", h("div", { class: "panel-body hidden", id: "pane-organize" }));
+    }
+    if (!document.getElementById("tab-views")) {
+      $("tab-filters").insertAdjacentElement("beforebegin", h("div", {
+        class: "panel-body hidden", id: "tab-views", role: "tabpanel", tabindex: "0", "aria-labelledby": "rail-views",
+      }));
+    }
+    if (!document.getElementById("tab-computed")) {
+      $("tab-filters").insertAdjacentElement("beforebegin", h("div", {
+        class: "panel-body hidden", id: "tab-computed", role: "tabpanel", tabindex: "0", "aria-labelledby": "rail-computed",
+      }));
+    }
+    if (!document.getElementById("tab-ids")) {
+      $("tab-bcf").insertAdjacentElement("beforebegin", h("div", {
+        class: "panel-body hidden", id: "tab-ids", role: "tabpanel", tabindex: "0", "aria-labelledby": "rail-ids",
+      }));
+    }
     for (const [, id] of PANES) this.panes.set(id, $(`pane-${id}`));
-    for (const tab of TABS) this.panes.set(tab.id, $(`tab-${tab.id}`));
+    for (const tab of TABS) {
+      if (!tab.handoff) this.panes.set(tab.id, $(`tab-${tab.id}`));
+    }
 
     this.activityList = h("div", { class: "msgs log", id: "activity-list" });
     this.activityEmpty = emptyState("list", "Nothing yet", "Loads, edits and errors are recorded here.");
@@ -114,8 +160,6 @@ export class Shell {
       this.activityList.replaceChildren();
       this.activityList.classList.add("hidden");
       this.activityEmpty.classList.remove("hidden");
-      this.activityCount = 0;
-      this.setTabBadge("activity", 0);
     });
     $("tab-activity").appendChild(
       h("div", { class: "page" }, [
@@ -128,6 +172,18 @@ export class Shell {
 
     makeResizer({ host: this.outliner, side: "left", cssVar: "--w-outliner", storageKey: "ifcviewx.w.outliner", min: 200, max: 520 });
     makeResizer({ host: this.inspector, side: "right", cssVar: "--w-inspector", storageKey: "ifcviewx.w.inspector", min: 280, max: 680 });
+
+    // Two fixed overlays obscure one another on a phone-sized viewport. Start
+    // with the model unobstructed; either persistent edge control opens one.
+    if (this.isCompactLayout()) {
+      if (this.isPanelOpen("outliner")) this.togglePanel("outliner");
+      if (this.isPanelOpen("inspector")) this.togglePanel("inspector");
+    }
+    this.compactQuery?.addEventListener("change", (event) => {
+      if (event.matches && this.isPanelOpen("outliner") && this.isPanelOpen("inspector")) {
+        this.togglePanel("outliner");
+      }
+    });
   }
 
   // -- chrome ---------------------------------------------------------------
@@ -142,7 +198,9 @@ export class Shell {
       h("span", { class: "sb-item" }, [dot, state]),
       h("span", { class: "sb-sep" }),
       counts,
+      this.viewState,
       h("span", { class: "grow" }),
+      this.statusSlot,
       this.selection,
       hint,
       h("span", { class: "sb-sep" }),
@@ -159,6 +217,7 @@ export class Shell {
       this.paneButtons.set(pane, button);
       target.appendChild(button);
     }
+    slidingPill(target);
   }
 
   /** Vertical rail on the outer edge: always visible, so it doubles as the
@@ -166,28 +225,26 @@ export class Shell {
   private buildTabs(): void {
     const rail = $("rail");
     for (const tab of TABS) {
-      const badge = h("span", { class: "tab-badge hidden" });
       const first = tab.id === "properties";
       const button = h("button", {
         class: `rail-btn${first ? " active" : ""}`,
         id: `rail-${tab.id}`,
         type: "button",
-        role: "tab",
-        "aria-selected": String(first),
-        "aria-controls": `tab-${tab.id}`,
+        role: tab.handoff ? undefined : "tab",
+        "aria-selected": tab.handoff ? undefined : String(first),
+        "aria-controls": tab.handoff ? undefined : `tab-${tab.id}`,
         // Roving focus: one stop for the whole rail, arrows walk it.
         tabindex: first ? "0" : "-1",
         title: tab.key ? `${tab.label}  ${tab.key}` : tab.label,
         "aria-label": tab.label,
-      }, [icon(tab.icon, 16), badge]);
+      }, [icon(tab.icon, 16)]);
       button.addEventListener("click", () => {
         // Clicking the panel you are already on closes it, like a toggle.
-        if (this.activeTab === tab.id && this.isPanelOpen("inspector")) this.togglePanel("inspector");
+        if (!tab.handoff && this.activeTab === tab.id && this.isPanelOpen("inspector")) this.togglePanel("inspector");
         else this.selectTab(tab.id);
       });
       button.addEventListener("keydown", (e) => this.railKey(e));
       this.tabButtons.set(tab.id, button);
-      this.tabBadges.set(tab.id, badge);
       rail.appendChild(button);
     }
   }
@@ -211,23 +268,26 @@ export class Shell {
   // -- state ----------------------------------------------------------------
   /** Switch tabs; the first time a tab is shown the host gets to build it. */
   selectTab(tab: TabId): void {
+    const meta = TABS.find((item) => item.id === tab);
+    if (!meta) return;
+    if (meta?.handoff) return this.actions.tabShown(tab);
     this.activeTab = tab;
     if (this.inspector.classList.contains("collapsed")) this.togglePanel("inspector");
-    $("inspector-title").textContent = TABS.find((item) => item.id === tab)?.label ?? "";
+    $("inspector-title").textContent = meta?.label ?? "";
     for (const [id, button] of this.tabButtons) {
       button.classList.toggle("active", id === tab);
       button.setAttribute("aria-selected", String(id === tab));
       button.tabIndex = id === tab ? 0 : -1;
     }
     for (const item of TABS) this.panes.get(item.id)?.classList.toggle("hidden", item.id !== tab);
-    if (tab === "activity") {
-      this.activityCount = 0;
-      this.setTabBadge("activity", 0);
-    }
     if (!this.mounted.has(tab)) {
       this.mounted.add(tab);
       this.actions.tabShown(tab);
     }
+  }
+
+  currentTab(): TabId {
+    return this.activeTab;
   }
 
   /** A panel whose lazy build failed is not mounted, so it can be retried. */
@@ -243,11 +303,18 @@ export class Shell {
 
   togglePanel(which: "outliner" | "inspector"): void {
     const host = which === "outliner" ? this.outliner : this.inspector;
+    if (host.classList.contains("collapsed") && this.isCompactLayout()) {
+      const otherWhich = which === "outliner" ? "inspector" : "outliner";
+      const other = otherWhich === "outliner" ? this.outliner : this.inspector;
+      if (!other.classList.contains("collapsed")) this.togglePanel(otherWhich);
+    }
     const collapsed = host.classList.toggle("collapsed");
+    host.setAttribute("aria-hidden", String(collapsed));
     if (which === "inspector") {
       // The rail is always on screen and reopens the panel, so no pull tab.
       for (const [id, button] of this.tabButtons) {
         button.classList.toggle("active", !collapsed && id === this.activeTab);
+        button.setAttribute("aria-selected", String(!collapsed && id === this.activeTab));
       }
       return;
     }
@@ -258,6 +325,7 @@ export class Shell {
         id: "pull-outliner",
         type: "button",
         title: "Show structure panel  Ctrl+B",
+        "aria-label": "Show structure panel",
       }, [icon("panel-left-open", 12)]);
       tab.addEventListener("click", () => this.togglePanel("outliner"));
       $("workspace").appendChild(tab);
@@ -269,15 +337,12 @@ export class Shell {
     return !host.classList.contains("collapsed");
   }
 
-  setTheme(dark: boolean): void {
-    this.themeButton.replaceChildren(icon(dark ? "moon" : "sun"));
+  private isCompactLayout(): boolean {
+    return this.compactQuery?.matches ?? false;
   }
 
-  setTabBadge(tab: TabId, value: number): void {
-    const badge = this.tabBadges.get(tab);
-    if (!badge) return;
-    badge.textContent = value > 99 ? "99+" : String(value);
-    badge.classList.toggle("hidden", !value);
+  setTheme(dark: boolean): void {
+    this.themeButton.replaceChildren(icon(dark ? "moon" : "sun"));
   }
 
   setProject(name: string, schema: string | null): void {
@@ -288,7 +353,7 @@ export class Shell {
   }
 
   setStatus(state: string, kind: "idle" | "live" | "busy" = "idle"): void {
-    this.status.state.textContent = state;
+    swapText(this.status.state, state);
     this.status.dot.className = `dot${kind === "live" ? " on" : kind === "busy" ? " busy" : ""}`;
     this.projectDot.className = this.status.dot.className;
   }
@@ -298,17 +363,49 @@ export class Shell {
     this.status.counts.replaceChildren(
       h("b", { text: entities.toLocaleString() }),
       h("span", { text: "entities" }),
-      h("b", { text: `${(triangles / 1e6).toFixed(2)}M` }),
+      h("b", { text: triangles >= 1e6 ? `${(triangles / 1e6).toFixed(2)}M` : triangles.toLocaleString() }),
       h("span", { text: "triangles" }),
     );
   }
 
   setHint(text: string): void {
-    this.status.hint.textContent = text;
+    swapText(this.status.hint, text);
   }
 
   setFrameTime(text: string): void {
     this.status.frame.textContent = text;
+  }
+
+  /**
+   * The view-state bar: one chip per active modifier, each clearing exactly
+   * itself. This is the permanent answer to "why can't I see anything?", so
+   * it lives on the status bar rather than inside a panel nobody has open.
+   */
+  setViewState(entries: Array<{ label: string; detail?: string; icon?: string; clear?: () => void }>): void {
+    if (entries.length === 0) {
+      this.viewState.replaceChildren();
+      return;
+    }
+    const nodes: HTMLElement[] = [h("span", { class: "sb-sep" })];
+    for (const entry of entries) {
+      const title = entry.detail ? `${entry.label}: ${entry.detail}` : entry.label;
+      const chip = h("span", { class: "sb-state", title }, [
+        icon(entry.icon ?? "funnel", 11),
+        h("b", { text: entry.label }),
+      ]);
+      if (entry.clear) {
+        const clear = h("button", {
+          class: "sb-state-x",
+          type: "button",
+          title: `Clear ${entry.label.toLowerCase()}`,
+          "aria-label": `Clear ${entry.label.toLowerCase()}`,
+        }, [icon("x", 10)]);
+        clear.addEventListener("click", entry.clear);
+        chip.appendChild(clear);
+      }
+      nodes.push(chip);
+    }
+    this.viewState.replaceChildren(...nodes);
   }
 
   /** Selected element readout in the status bar, with a clear affordance. */
@@ -324,7 +421,11 @@ export class Shell {
     this.selection.replaceChildren(open, clear, h("span", { class: "sb-sep" }));
   }
 
-  /** Append to the activity log and badge the tab when it is not visible. */
+  /**
+   * Append to the activity log. The tab carries no count: the app logs
+   * something on nearly every action, so a number there is always high and
+   * never means anything. Errors already raise a toast.
+   */
   log(message: string, kind: "info" | "success" | "error" = "info", notify = false): void {
     const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     const mark = { info: "info", success: "check-circle", error: "alert" }[kind];
@@ -341,7 +442,6 @@ export class Shell {
       ]),
     );
     if (follow) list.scrollTop = list.scrollHeight;
-    if (this.activeTab !== "activity") this.setTabBadge("activity", ++this.activityCount);
     if (notify) toast(message, kind);
   }
 }

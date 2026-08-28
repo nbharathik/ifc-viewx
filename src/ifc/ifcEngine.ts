@@ -2,11 +2,15 @@
 // wires it the same way, but there is nothing to download: web-ifc is already
 // in the bundle, so checks, schedules and edits are available on first paint.
 import type { ValidationReport } from "./checks.js";
+import type { ConformanceReport } from "./conformance.js";
+import type { AlignmentReport } from "./alignment.js";
 import type { ScheduleReport } from "./schedule.js";
 import type { EditOp, EditOutcome } from "./edits.js";
 import type { IfcRequest, IfcResponse } from "./ifc.worker.js";
 
 export type { ValidationReport, Check, Severity } from "./checks.js";
+export type { ConformanceCheck, ConformanceReport } from "./conformance.js";
+export type { AlignmentReport, SampledAlignment } from "./alignment.js";
 export type { ScheduleReport } from "./schedule.js";
 export type { EditOp, EditDiff, EditOutcome } from "./edits.js";
 
@@ -29,7 +33,8 @@ export class IfcEngine {
   private readonly pending = new Map<number, Pending>();
   private bytes: Uint8Array | null = null;
   private pushed = false;
-  private pushing: Promise<void> | null = null;
+  private revision = 0;
+  private pushing: { revision: number; promise: Promise<void> } | null = null;
 
   constructor(private readonly wasmPath: string) {}
 
@@ -89,58 +94,102 @@ export class IfcEngine {
    *  the worker is only loaded when first used. */
   setModel(bytes: Uint8Array | null): void {
     this.bytes = bytes;
+    this.revision += 1;
     this.pushed = false;
     this.pushing = null;
   }
 
-  private ready(): Promise<void> {
+  private async ready(): Promise<number> {
     // Single-flight: checks and schedules both call this, and without the
     // shared promise each would copy and transfer the whole model on its own.
-    this.pushing ??= this.push().catch((err: unknown) => {
-      this.pushing = null;
-      throw err;
-    });
-    return this.pushing;
+    const revision = this.revision;
+    if (!this.pushing || this.pushing.revision !== revision) {
+      const promise = this.push(revision, this.bytes).catch((err: unknown) => {
+        if (this.pushing?.revision === revision) this.pushing = null;
+        throw err;
+      });
+      this.pushing = { revision, promise };
+    }
+    await this.pushing.promise;
+    this.assertRevision(revision);
+    return revision;
   }
 
-  private async push(): Promise<void> {
+  private assertRevision(revision: number): void {
+    if (revision !== this.revision) {
+      throw new Error("The active model changed while the IFC engine was working; run the action again.");
+    }
+  }
+
+  private async push(revision: number, bytes: Uint8Array | null): Promise<void> {
     if (this.pushed) return;
-    if (!this.bytes) {
+    if (!bytes) {
       throw new Error(
         "No readable .ifc source. Open an .ifc file; a converted .ifcx carries no STEP source for checks, schedules and edits.",
       );
     }
-    if (this.bytes.byteLength === 0) {
+    if (bytes.byteLength === 0) {
       throw new Error("The model bytes were released before the engine could read them.");
     }
     this.spawn();
     await this.booted;
-    const copy = this.bytes.slice();
+    this.assertRevision(revision);
+    const copy = bytes.slice();
     await this.send({ type: "setModel", id: 0, bytes: copy.buffer as ArrayBuffer }, [copy.buffer]);
+    this.assertRevision(revision);
     this.pushed = true;
   }
 
   async validate(): Promise<ValidationReport> {
-    await this.ready();
+    const revision = await this.ready();
     const message = await this.send({ type: "validate", id: 0 });
+    this.assertRevision(revision);
     return (message as { payload: ValidationReport }).payload;
   }
 
+  /**
+   * The offline conformance pass. Same worker, same parsed model, and the
+   * file never leaves the machine, which is the whole point of running it
+   * here rather than sending it to a service.
+   */
+  async conformance(): Promise<ConformanceReport> {
+    const revision = await this.ready();
+    const message = await this.send({ type: "conformance", id: 0 });
+    this.assertRevision(revision);
+    return (message as { payload: ConformanceReport }).payload;
+  }
+
+  /** IFC 4.3 alignments, sampled into drivable paths with their chainage. */
+  async alignments(): Promise<AlignmentReport> {
+    const revision = await this.ready();
+    const message = await this.send({ type: "alignments", id: 0 });
+    this.assertRevision(revision);
+    return (message as { payload: AlignmentReport }).payload;
+  }
+
   async schedule(ifcType: string, properties: string[] = [], limit = 500): Promise<ScheduleReport> {
-    await this.ready();
+    const revision = await this.ready();
     const message = await this.send({ type: "schedule", id: 0, ifcType, properties, limit });
+    this.assertRevision(revision);
     return (message as { payload: ScheduleReport }).payload;
   }
 
   async elementTypes(): Promise<Record<string, number>> {
-    await this.ready();
+    const revision = await this.ready();
     const message = await this.send({ type: "types", id: 0 });
+    this.assertRevision(revision);
     return (message as { payload: Record<string, number> }).payload;
   }
 
   async propose(op: EditOp): Promise<ProposedEdit> {
-    await this.ready();
-    const message = await this.send({ type: "propose", id: 0, op });
+    return this.proposeBatch([op]);
+  }
+
+  /** Several ops against one copy, staged as one approval. */
+  async proposeBatch(ops: EditOp[]): Promise<ProposedEdit> {
+    const revision = await this.ready();
+    const message = await this.send({ type: "proposeBatch", id: 0, ops });
+    this.assertRevision(revision);
     if (message.type !== "proposed") throw new Error("unexpected response");
     return { ...(message.payload as EditOutcome), bytes: new Uint8Array(message.bytes) };
   }

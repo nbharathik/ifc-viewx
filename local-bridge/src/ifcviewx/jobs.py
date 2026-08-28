@@ -1,21 +1,23 @@
 """Child-side jobs. Everything here runs inside sandbox.py's subprocess and is
 the only code in the service that imports ifcopenshell.
 
-Three jobs: run guarded user code, validate a model, and extract an element
-schedule. The last two exist so the common questions ("is this model sound?",
-"list every door with its fire rating") never need generated code at all.
+Four jobs: run guarded user code, validate a model, extract an element schedule,
+and convert IFC. Validation and schedules keep common questions out of generated
+code, while conversion shares the same constrained child-process boundary.
 """
 
 from __future__ import annotations
 
 import builtins
+import hashlib
 import io
 import json
-import zlib
 from contextlib import contextmanager, redirect_stdout
+from pathlib import Path
 from typing import Any, Callable
 
-from .guard import ALLOWED_IMPORTS, check
+from .guard import DENIED_ATTRS, check, denied_import
+from .sandbox import guard_untrusted_effects
 
 MAX_SAMPLE = 20
 MAX_ROWS = 20_000
@@ -43,15 +45,24 @@ def _safe_import(name: str, globals_=None, locals_=None, fromlist=(), level: int
     """Runtime twin of the static import allowlist."""
     if level:
         raise ImportError("relative imports are not allowed")
-    if name.split(".")[0] not in ALLOWED_IMPORTS:
+    if denied_import(name):
         raise ImportError(f'import of "{name}" is not allowed')
+    for imported in fromlist or ():
+        if isinstance(imported, str) and (
+            imported == "*" or imported.startswith("_") or imported in DENIED_ATTRS
+        ):
+            raise ImportError(f'import of "{imported}" is not allowed')
     return builtins.__import__(name, globals_, locals_, fromlist, level)
 
 
 def _reject_dunder(name: object, verb: str) -> None:
     # Closes getattr(x, "__cl" + "ass__") and every other computed spelling the
     # static guard cannot see: the check is on the resolved name, not the source.
-    if isinstance(name, str) and name.startswith("__"):
+    # Any leading underscore is private surface (statistics.random._os), so the
+    # runtime rule matches the static attribute rule.
+    if isinstance(name, str) and name.startswith("_"):
+        raise AttributeError(f'{verb} "{name}" is not allowed')
+    if isinstance(name, str) and name in DENIED_ATTRS:
         raise AttributeError(f'{verb} "{name}" is not allowed')
 
 
@@ -102,16 +113,46 @@ def _no_model_writes():
 # Diff: what actually changed, independent of what the code claims
 
 
-def _signatures(model) -> dict[str, int]:
-    """GlobalId -> checksum of the entity's STEP line, ignoring its id."""
-    out: dict[str, int] = {}
+def _signatures(model) -> dict[str, str]:
+    """GlobalId -> digest of a root and the non-root data it owns."""
+    memo: dict[int, bytes] = {}
+
+    def digest_value(value: Any, owner_id: int, visiting: set[int]) -> bytes:
+        if hasattr(value, "is_a") and callable(value.is_a):
+            entity_id = int(value.id())
+            if entity_id != owner_id and value.is_a("IfcRoot"):
+                guid = getattr(value, "GlobalId", "")
+                return f"root:{value.is_a()}:{guid}".encode()
+            return digest_entity(value, owner_id, visiting)
+        if isinstance(value, (tuple, list)):
+            return b"[" + b";".join(digest_value(item, owner_id, visiting) for item in value) + b"]"
+        return repr(value).encode("utf-8", "replace")
+
+    def digest_entity(entity: Any, owner_id: int, visiting: set[int]) -> bytes:
+        entity_id = int(entity.id())
+        cacheable = entity_id > 0 and entity_id != owner_id
+        if cacheable and entity_id in memo:
+            return memo[entity_id]
+        # IfcOpenShell inline/select values all report id 0. They are distinct
+        # values, so neither memoization nor cycle detection may collapse them.
+        visit_key = entity_id if entity_id > 0 else -id(entity)
+        if visit_key in visiting:
+            return f"cycle:{entity.is_a()}".encode()
+        visiting.add(visit_key)
+        payload = [str(entity.is_a()).encode()]
+        payload.extend(digest_value(entity[index], owner_id, visiting) for index in range(len(entity)))
+        visiting.remove(visit_key)
+        result = hashlib.sha256(b"\0".join(payload)).digest()
+        if cacheable:
+            memo[entity_id] = result
+        return result
+
+    out: dict[str, str] = {}
     for entity in model.by_type("IfcRoot"):
         guid = getattr(entity, "GlobalId", None)
         if not guid:
             continue
-        # str(entity) is "#12=IFCWALL(...)"; the id shifts on rewrite, the
-        # payload does not, so only the payload is hashed.
-        out[str(guid)] = zlib.crc32(str(entity).partition("=")[2].encode("utf-8", "replace"))
+        out[str(guid)] = digest_entity(entity, int(entity.id()), set()).hex()
     return out
 
 
@@ -128,7 +169,7 @@ def _label(model, guid: str) -> dict:
     }
 
 
-def _diff(before: dict[str, int], after: dict[str, int], model) -> dict:
+def _diff(before: dict[str, str], after: dict[str, str], model) -> dict:
     added = sorted(set(after) - set(before))
     removed = sorted(set(before) - set(after))
     modified = sorted(g for g in set(before) & set(after) if before[g] != after[g])
@@ -167,11 +208,15 @@ def python(job: dict) -> dict:
     }
     buffer = io.StringIO()
     try:
-        with redirect_stdout(buffer), _no_model_writes():
+        with redirect_stdout(buffer), _no_model_writes(), guard_untrusted_effects():
             exec(code, namespace)  # noqa: S102 - guarded source, isolated process
-            result = namespace.get("result")
-            if mode == "edit" and result is None and callable(namespace.get("edit")):
-                result = namespace["edit"](model)
+            if mode == "edit":
+                edit = namespace.get("edit")
+                if not callable(edit):
+                    raise TypeError("edit must remain callable")
+                result = edit(model)
+            else:
+                result = namespace.get("result")
     except Exception as exc:  # noqa: BLE001 - fed back for self-repair
         return {
             "error": "exception",
@@ -372,7 +417,16 @@ def _resolve(psets: dict, key: str) -> Any:
     return None
 
 
+def convert_model(job: dict) -> dict:
+    """Trusted IFCX conversion inside the bounded worker process."""
+    from .convert import convert
+
+    stats = convert(Path(str(job["model"])), Path(str(job["out"])))
+    return {"stats": stats}
+
+
 HANDLERS: dict[str, Callable[[dict], dict]] = {
+    "convert": convert_model,
     "python": python,
     "validate": validate,
     "schedule": schedule,

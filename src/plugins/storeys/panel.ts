@@ -3,8 +3,8 @@
 // One click isolates a level and leaves the camera alone, which is what makes
 // stepping up and down readable. The ceiling cut puts a horizontal section at
 // the level above so you look down into the storey instead of at its slab.
-import { bar, button, emptyState, h, iconButton, note, page } from "@ifcviewx/sdk";
-import type { PluginContext, PluginInstance, SpatialNode } from "@ifcviewx/sdk";
+import { bar, button, emptyState, h, header, iconButton, note, page } from "@ifcviewx/sdk";
+import type { ExtensionContext, ExtensionInstance, SpatialNode } from "@ifcviewx/sdk";
 
 interface Storey {
   id: number;
@@ -14,17 +14,21 @@ interface Storey {
   top: number;
 }
 
-export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
+export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstance {
   let storeys: Storey[] = [];
   let active = -1;
-  let cut = ctx.read("cut", false);
+  let cut = ctx.storage.read("cut", false);
 
   const list = h("div", { class: "plug-results" });
   const head = h("div", {});
-  const root = page(head, list);
+  const root = page(
+    header("Storey navigator", "Walk the building one level at a time. The camera stays put."),
+    head,
+    list,
+  );
 
   const collect = (): Storey[] => {
-    const tree = ctx.tree();
+    const tree = ctx.model.tree();
     if (!tree) return [];
     const nodes: SpatialNode[] = [];
     const walk = (node: SpatialNode): void => {
@@ -33,11 +37,11 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
     };
     walk(tree);
     const found = nodes.map((node) => {
-      const ids = ctx.subtree(node.expressID);
+      const ids = ctx.model.subtree(node.expressID);
       let base = Infinity;
       let top = -Infinity;
       for (const id of ids) {
-        const bounds = ctx.bounds(id);
+        const bounds = ctx.model.bounds(id);
         if (!bounds) continue;
         base = Math.min(base, bounds.min.y);
         top = Math.max(top, bounds.max.y);
@@ -57,7 +61,7 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
     const storey = storeys[index];
     if (!storey) return;
     active = index;
-    ctx.isolate(storey.ids);
+    ctx.view.isolate(storey.ids);
     applyCut();
     paint();
   };
@@ -68,20 +72,22 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
     if (!cut || !storey) {
       // Only the plugin's own horizontal cut goes; planes the user set with the
       // section tool are not this plugin's to throw away.
-      const kept = ctx.sections().filter((section) => section.axis !== "y");
-      if (kept.length !== ctx.sections().length) ctx.setSections(kept);
+      const kept = ctx.view.sections().filter((section) => section.axis !== "y");
+      if (kept.length !== ctx.view.sections().length) ctx.view.setSections(kept);
       return;
     }
     const above = storeys[active - 1];
     const offset = above ? (above.base + storey.top) / 2 : storey.top;
-    const others = ctx.sections().filter((section) => section.axis !== "y");
-    ctx.setSections([...others, { axis: "y", offset, flip: false }]);
+    const others = ctx.view.sections().filter((section) => section.axis !== "y");
+    ctx.view.setSections([...others, { axis: "y", offset, flip: false }]);
   };
 
   const showAll = (): void => {
     active = -1;
-    ctx.showAll();
-    ctx.viewer.clearSection();
+    ctx.view.showAll();
+    // Only the ceiling cut belongs to this panel; an X or Z plane the user set
+    // elsewhere stays.
+    ctx.view.setSections(ctx.view.sections().filter((section) => section.axis !== "y"));
     paint();
   };
 
@@ -101,7 +107,7 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
     }
     const cutButton = button(cut ? "Ceiling cut on" : "Ceiling cut", () => {
       cut = !cut;
-      ctx.write("cut", cut);
+      ctx.storage.write("cut", cut);
       applyCut();
       paint();
     }, cut ? "accent" : "");
@@ -145,11 +151,11 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
 
   host.appendChild(root);
   rebuild();
-  ctx.on("model", () => rebuild());
+  ctx.events.on("model", () => rebuild());
 
   return {
     dispose: () => {
-      if (active >= 0) ctx.viewer.clearSection();
+      if (active >= 0) ctx.view.setSections([]);
     },
   };
 }

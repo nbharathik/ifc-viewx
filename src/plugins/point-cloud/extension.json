@@ -1,0 +1,41 @@
+{
+  "manifestVersion": 2,
+  "id": "point-cloud",
+  "name": "Point Cloud",
+  "version": "1.0.0",
+  "sdk": ">=2.0.0 <3",
+  "description": "Overlay a laser scan on the model and colour it by its deviation from the as-designed surface.",
+  "runtime": { "kind": "bundled", "entry": "panel.ts" },
+  "activationEvents": ["onPanel:point-cloud"],
+  "permissions": [
+    "model.summary.read",
+    "model.structure.read",
+    "geometry.query",
+    "geometry.mesh.read",
+    "view.read",
+    "view.control",
+    "view.overlay",
+    "storage.extension",
+    "file.open",
+    "file.export"
+  ],
+  "contributes": {
+    "panels": [{ "id": "point-cloud", "title": "Point Cloud", "icon": "cube" }],
+    "importers": [{ "id": "point-cloud.open", "title": "Point cloud", "accepts": [".las", ".xyz", ".pts", ".txt", ".asc", ".csv"] }],
+    "exporters": [{ "id": "point-cloud.csv", "title": "Deviation CSV", "mimeTypes": ["text/csv"] }],
+    "overlays": [{ "id": "point-cloud.scan", "title": "Scan points" }]
+  },
+  "catalog": {
+    "tagline": "As-built scan over the model, coloured by deviation",
+    "about": "Reads an uncompressed LAS or a plain XYZ export in the tab, places it on the model, and asks the same BVHs the clash engine uses how far every point is from the nearest surface. That is the as-built comparison people currently buy a separate platform for, and nothing leaves the machine to do it.",
+    "icon": "cube",
+    "category": "Analysis",
+    "keywords": "point cloud scan las xyz pts e57 as-built deviation survey laser scanner reality capture",
+    "does": [
+      "Read LAS 1.2 to 1.4 and plain X Y Z exports, subsampled to what a viewport can draw",
+      "Place the scan by the model's own georeferencing, or centre it and nudge",
+      "Colour every point by its distance to the nearest model surface",
+      "Report the deviation distribution and export every measured point as CSV"
+    ]
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "manifestVersion": 2,
+  "id": "sheets",
+  "name": "Sheets",
+  "version": "1.0.0",
+  "sdk": ">=2.0.0 <3",
+  "description": "The issued drawing set inside the viewer: import PDF or image sheets, calibrate, measure, mark up, overlay the model and click through to 3D.",
+  "runtime": { "kind": "bundled", "entry": "panel.ts" },
+  "activationEvents": ["onPanel:sheets"],
+  "permissions": [
+    "model.summary.read",
+    "model.structure.read",
+    "model.index.build",
+    "geometry.query",
+    "geometry.mesh.read",
+    "view.read",
+    "view.control",
+    "viewport.capture",
+    "review.issue.create",
+    "storage.extension",
+    "file.open",
+    "file.export"
+  ],
+  "contributes": {
+    "panels": [{ "id": "sheets", "title": "Sheets", "icon": "layers" }],
+    "importers": [{ "id": "sheets.open", "title": "Drawing sheet", "accepts": [".pdf", ".png", ".jpg", ".jpeg", ".webp"] }],
+    "exporters": [{ "id": "sheets.markup", "title": "Sheet markup", "mimeTypes": ["image/svg+xml"] }]
+  },
+  "catalog": {
+    "tagline": "The issued drawings, calibrated and linked to the model",
+    "about": "Every coordination platform pairs 2D with 3D, because 2D is what gets issued and what site actually holds. Import the PDF, calibrate it from two points, and the sheet measures in real units, overlays the model's own plan cut, selects elements in 3D when you click it, and raises BCF topics from a markup.",
+    "icon": "layers",
+    "category": "Review",
+    "keywords": "2d drawing sheet pdf plan gA calibrate scale markup overlay revizto dalux issued drawings",
+    "does": [
+      "Import PDF pages or images as sheets, one per storey",
+      "Calibrate from two points and a known distance, then measure in real units",
+      "Overlay the model's plan cut on the sheet, and the sheet under the model",
+      "Click the sheet to select the element in 3D",
+      "Mark up and raise a BCF topic from the drawing"
+    ]
+  }
+}

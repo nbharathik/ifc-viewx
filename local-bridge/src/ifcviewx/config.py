@@ -7,6 +7,7 @@ posture it actually runs with.
 
 from __future__ import annotations
 
+import math
 import os
 import secrets
 from dataclasses import dataclass, field
@@ -27,9 +28,22 @@ def _flag(name: str, default: bool) -> bool:
 
 def _num(name: str, default: float) -> float:
     try:
-        return float(env(name) or default)
+        value = float(env(name) or default)
     except ValueError:
         return default
+    return value if math.isfinite(value) else default
+
+
+def _positive(
+    name: str,
+    default: float,
+    *,
+    zero: bool = False,
+    maximum: float = 1_000_000_000,
+) -> float:
+    value = _num(name, default)
+    lower_ok = value > 0 or (zero and value == 0)
+    return value if lower_ok and value <= maximum else default
 
 
 def _origins() -> frozenset[str]:
@@ -64,6 +78,10 @@ class Settings:
     store_quota_bytes: int
     result_ttl_s: float
     max_output_chars: int
+    provider_timeout_s: float
+    job_ttl_s: float
+    job_concurrency: int
+    max_queued_jobs: int
     # Paths
     store_dir: Path
     state_dir: Path
@@ -79,7 +97,7 @@ class Settings:
 
 def _dir(name: str, default: Path) -> Path:
     raw = env(name)
-    path = Path(raw).expanduser() if raw else default
+    path = (Path(raw).expanduser() if raw else default).resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -92,21 +110,40 @@ def load() -> Settings:
         for p in (env("ROOTS") or "").split(os.pathsep)
         if p.strip()
     )
+    port = int(_positive("PORT", 8765))
+    if not 1 <= port <= 65535:
+        port = 8765
     return Settings(
         # 128 bits: the token is what stands between anything else on this
         # machine and code execution, so it must not be guessable.
         token=env("TOKEN") or secrets.token_hex(16),
-        port=int(_num("PORT", 8765)),
+        port=port,
         allow_python=_flag("ALLOW_PYTHON", True),
         readonly=_flag("READONLY", False),
-        python_timeout_s=_num("PYTHON_TIMEOUT", 120),
-        convert_timeout_s=_num("CONVERT_TIMEOUT", 900),
-        analyze_timeout_s=_num("ANALYZE_TIMEOUT", 300),
-        memory_bytes=int(_num("MEMORY_GB", 4) * 1024**3),
-        max_upload_bytes=int(_num("MAX_UPLOAD_MB", 2048) * 1024**2),
-        store_quota_bytes=int(_num("STORE_GB", 20) * 1024**3),
-        result_ttl_s=_num("RESULT_TTL_S", 3600),
-        max_output_chars=int(_num("MAX_OUTPUT_CHARS", 200_000)),
+        python_timeout_s=_positive("PYTHON_TIMEOUT", 120, maximum=604_800),
+        convert_timeout_s=_positive("CONVERT_TIMEOUT", 900, maximum=604_800),
+        analyze_timeout_s=_positive("ANALYZE_TIMEOUT", 300, maximum=604_800),
+        memory_bytes=max(
+            64 * 1024**2,
+            int(_positive("MEMORY_GB", 4, maximum=1024) * 1024**3),
+        ),
+        max_upload_bytes=max(
+            1,
+            int(_positive("MAX_UPLOAD_MB", 2048, maximum=1_000_000) * 1024**2),
+        ),
+        store_quota_bytes=max(
+            1,
+            int(_positive("STORE_GB", 20, maximum=1_000_000) * 1024**3),
+        ),
+        result_ttl_s=_positive("RESULT_TTL_S", 3600, zero=True, maximum=31_536_000),
+        max_output_chars=max(
+            1024,
+            int(_positive("MAX_OUTPUT_CHARS", 200_000, maximum=10_000_000)),
+        ),
+        provider_timeout_s=_positive("PROVIDER_TIMEOUT", 900, maximum=604_800),
+        job_ttl_s=_positive("JOB_TTL_S", 86_400, zero=True, maximum=31_536_000),
+        job_concurrency=max(1, min(int(_positive("JOB_CONCURRENCY", 4)), 32)),
+        max_queued_jobs=max(1, min(int(_positive("JOB_QUEUE", 64)), 1024)),
         store_dir=store,
         state_dir=_dir("STATE", store.parent),
         extra_origins=_origins(),

@@ -32,6 +32,17 @@ ESCAPES = [
     "async def go():\n    pass",
     "def f():\n    global model",
     "def __init__(self):\n    pass",
+    "import uuid\nuuid.os.mkdir('outside')",
+    "from uuid import os as helper\nhelper.mkdir('outside')",
+    "import typing\nframe = typing.sys._getframe(1)\nresult = frame.f_builtins",
+    "import typing\nresult = typing.sys.modules",
+    "import statistics\nresult = statistics.random._os.listdir('C:/')",
+    "import ifcopenshell\nresult = ifcopenshell.geom.serializers.obj('a', 'b', None, None)",
+    "import ifcopenshell\nresult = ifcopenshell.ifcopenshell_wrapper",
+    "import ifcopenshell.geom.serializers as serializer\nresult = serializer",
+    "import ifcopenshell.ifcopenshell_wrapper as wrapper\nresult = wrapper",
+    "from ifcopenshell import *\nresult = ifcopenshell_wrapper",
+    "from statistics import _sqrt\nresult = _sqrt(4)",
 ]
 
 ALLOWED = [

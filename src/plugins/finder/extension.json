@@ -1,0 +1,34 @@
+{
+  "manifestVersion": 2,
+  "id": "finder",
+  "name": "Model Finder",
+  "version": "1.0.0",
+  "sdk": ">=2.0.0 <3",
+  "description": "Search the whole model in plain words and act on ranked results.",
+  "runtime": { "kind": "bundled", "entry": "panel.ts" },
+  "activationEvents": ["onPanel:finder"],
+  "permissions": [
+    "model.structure.read",
+    "model.index.build",
+    "geometry.query",
+    "view.control",
+    "file.export"
+  ],
+  "contributes": {
+    "panels": [{ "id": "finder", "title": "Model Finder", "icon": "search" }],
+    "exporters": [{ "id": "finder.csv", "title": "Search results CSV", "mimeTypes": ["text/csv"] }]
+  },
+  "catalog": {
+    "tagline": "Search the whole model in plain words, then act on what comes back",
+    "about": "Ranked search over every element's class, name and storey, and over its property values once the property index has been built. Words may come in any order, so \"external fire door level 2\" finds what a substring filter cannot. The results are a working set: select them, isolate them, colour them, or clip a section box around them. It runs the same BM25 index the assistant searches with, so the panel and the assistant always agree about what is in the model.",
+    "icon": "search",
+    "category": "Data",
+    "keywords": "search find bm25 rank query text lookup filter locate element name property",
+    "does": [
+      "Ranked full-text search over class, name, storey and property values",
+      "Words in any order, and camel-case class names split so Wall finds IfcWallStandardCase",
+      "Select, isolate, colour or box the results in one click",
+      "Property values are included once the index has been built, on request"
+    ]
+  }
+}

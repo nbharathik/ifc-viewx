@@ -1,0 +1,36 @@
+{
+  "manifestVersion": 2,
+  "id": "spaces",
+  "name": "Room Book",
+  "version": "1.0.0",
+  "sdk": ">=2.0.0 <3",
+  "description": "Review spaces, authored areas, occupancy, and geometry estimates.",
+  "runtime": { "kind": "bundled", "entry": "panel.ts" },
+  "activationEvents": ["onPanel:spaces"],
+  "permissions": [
+    "model.summary.read",
+    "model.index.build",
+    "geometry.query",
+    "view.read",
+    "view.control",
+    "storage.extension",
+    "file.export"
+  ],
+  "contributes": {
+    "panels": [{ "id": "spaces", "title": "Room Book", "icon": "layers" }],
+    "exporters": [{ "id": "spaces.csv", "title": "Space book CSV", "mimeTypes": ["text/csv"] }]
+  },
+  "catalog": {
+    "tagline": "Every space with its area, volume and occupancy",
+    "about": "Lists every IfcSpace with the areas and volumes the file authored, rolled up by storey. Where a space carries no quantities the footprint of its bounding box fills the gap, and each row says which it is, so a schedule is never quoted from an estimate by accident. Spaces are excluded from the default geometry stream, so the panel loads them on demand when you ask to see one.",
+    "icon": "layers",
+    "category": "Data",
+    "keywords": "space room area gross net occupancy schedule room book gfa nfa boma",
+    "does": [
+      "Net and gross floor area, volume, height and perimeter per space",
+      "Rolled up by storey, with the storey totals a schedule needs",
+      "Occupancy and category read from Pset_SpaceCommon where present",
+      "Click a room to isolate it; CSV export of the whole book"
+    ]
+  }
+}

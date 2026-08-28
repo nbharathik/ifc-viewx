@@ -3,33 +3,65 @@
 // App-level state lives here: active model bytes, checkpoints, and the
 // pending-edit lifecycle. Edits only land on an explicit Apply.
 import "./styles.css";
-import { createViewer } from "./viewer-core/viewer.js";
-import { listCachedModels, loadCachedSource, storeSourceBytes, type CachedModel } from "./viewer-core/engine/cache.js";
+import { createViewer, type FederatedModel } from "./viewer-core/viewer.js";
+import { isFormatBytes, listCachedModels, loadCachedSource, storeSourceBytes, type CachedModel } from "./viewer-core/engine/cache.js";
 import type { LoadProgress } from "./viewer-core/engine/types.js";
 import { PythonEngine, type ProposedEdit } from "./python/pythonEngine.js";
 import { IfcEngine, type EditOp, type ValidationReport } from "./ifc/ifcEngine.js";
-import { chat, findProvider, isConfigured, isVerified, loadSettings, type ChatMessage } from "./llm/llmClient.js";
-import { systemPrompt, repairPrompt, extractCode, stripBlock } from "./llm/prompts.js";
-import { buildModelBrief, elementCounts, elementsByType, runViewerAction, type SemanticActions } from "./llm/actions.js";
+import { clashReport } from "./ifc/clash.js";
+import { isCompleteStepAsync, isStep, sniffSchema, worthConvertingAsync } from "./ifc/format.js";
+import { findProvider, isConfigured, isVerified, loadSettings, type ChatMessage } from "./llm/llmClient.js";
+import { systemPrompt } from "./llm/prompts.js";
+import { buildModelBrief, elementCounts, elementsByType, type SemanticActions } from "./llm/actions.js";
 import type { ToolAvailability } from "./llm/tools.js";
+import { createViewerCapabilityRegistry } from "./capabilities/viewer.js";
+import { VIEWER_POLICY } from "./capabilities/policy.js";
+import { AgentRuntime } from "./assistant/agentRuntime.js";
+import { AssistantCapabilityAdapter } from "./assistant/capabilityAdapter.js";
+import { buildViewerContext, modelRevision } from "./assistant/context.js";
+import { ExtensionToolApprovals } from "./assistant/extensionTools.js";
+import { browserProviderTransport, localProviderTransport } from "./assistant/providerTransport.js";
+import type { AssistantTraceEvent, EvidenceReference, ViewImageAttachment } from "./assistant/types.js";
+import { ViewTransactionManager } from "./assistant/viewTransactions.js";
 import { AssistantPanel, type PendingEditView } from "./ui/sidePanel.js";
 import { TypesPane } from "./ui/typesPane.js";
+import { OrganizePane } from "./ui/organizePane.js";
 import { FilterChip, FilterPanel, FilterStore } from "./ui/filters.js";
-import type { IdsPanel } from "./ui/ids.js";
+import { docketChip, ResultsDock } from "./ui/resultsDock.js";
+import { clearDocket, publishDocket, type DocketRow } from "./results/docket.js";
+import { clearFindings } from "./results/findings.js";
+import { FieldMode } from "./ui/fieldMode.js";
+import { PrivacyPanel } from "./ui/privacy.js";
+import { DrivePanel } from "./ui/drivePanel.js";
+import { buildPackage, carriesState, isPackageName, readPackage, PACKAGE_EXTENSION } from "./share/package.js";
+import type { ComputedPane, ViewsPane } from "./ui/viewsPane.js";
+import { ViewStore, type ViewDefinition } from "./views/definition.js";
+import { ComputedStore, type ComputedProperty } from "./data/computed.js";
 import type { BcfPanel } from "./ui/bcf.js";
+import type { GeoContextPanel } from "./ui/geo.js";
 import { Shell, emptyState, type PaneId, type TabId } from "./ui/shell.js";
 import { Dock, saveViewpoint as storeViewpoint } from "./ui/dock.js";
 import { Connection } from "./ui/connection.js";
 import { CommandRegistry } from "./ui/commands.js";
 import { Ribbon, type RibbonControl, type RibbonTab } from "./ui/ribbon.js";
 import type { SchedulePanel } from "./ui/schedules.js";
-import { busyRow, CommandPalette, confirmAction, h, icon, lightDismiss, promptForm, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
-import { download } from "./sdk/data.js";
-import type { PluginPython } from "./sdk/types.js";
+import { buildMenu, busyRow, CommandPalette, confirmAction, copyText, h, icon, iconButton, lightDismiss, menuKeys, openLayer, promptForm, safeStorageSet, showContextMenu, toast, type MenuItem } from "./ui/kit.js";
+import { ageLabel, clearChats, readChats, saveChat, type Conversation } from "./llm/chatStore.js";
+import { sampleModel, SAMPLE_NAME } from "./ui/sample.js";
+import { download, elementsOf } from "./data/model.js";
+import { buildIndex } from "./llm/retrieval.js";
+import { saveMesh, type MeshFormat } from "./export/mesh.js";
+import type { ExtensionIssueInput, ExtensionIssueResult } from "./extensions/api.js";
+import type { PythonRunner } from "./extensions/hostContext.js";
 import { PluginHost } from "./plugins/runtime/host.js";
 import { PluginBrowser } from "./plugins/runtime/browser.js";
+import { CATALOG, setInstalledExtensions } from "./plugins/registry.js";
+import { InstalledExtensionManager, activeInstalledVersion } from "./extensions/installed/manager.js";
 import { ServiceClient, type EditDiff } from "./bridge/serviceClient.js";
-import { BridgeClient } from "./bridge/bridgeClient.js";
+import { loadAppSettings, LOD_PIXELS, saveAppSettings } from "./app/settings.js";
+import { createBrowserBridge } from "./app/browserBridge.js";
+import { bindAppInput } from "./app/input.js";
+import { isReleaseCommandVisible, isReleasePluginVisible, releaseUi } from "./app/release.js";
 
 const $ = <T extends HTMLElement>(id: string): T => {
   const node = document.getElementById(id);
@@ -47,10 +79,22 @@ const bootFailed = (message: string): void => {
   document.getElementById("splash")?.remove();
   const card = document.querySelector("#dropzone .dz-card");
   if (!card) return;
+  document.getElementById("btn-open-first")?.classList.add("hidden");
+  card.querySelector(".dz-hint")?.classList.add("hidden");
   const note = document.createElement("p");
   note.className = "dz-fatal";
+  note.setAttribute("role", "alert");
   note.textContent = `IFCViewX could not start: ${message || "unknown error"}`;
   card.appendChild(note);
+  const actions = document.createElement("div");
+  actions.className = "dz-fatal-actions";
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "btn primary";
+  retry.textContent = /webgl|3d graphics|gpu context/i.test(message) ? "Retry 3D viewer" : "Retry";
+  retry.addEventListener("click", () => window.location.reload());
+  actions.appendChild(retry);
+  card.appendChild(actions);
 };
 window.addEventListener("error", (e) => bootFailed(e.message));
 window.addEventListener("unhandledrejection", (e) =>
@@ -59,6 +103,7 @@ window.addEventListener("unhandledrejection", (e) =>
 
 const dropzone = $("dropzone");
 const fileInput = $<HTMLInputElement>("file-input");
+const attachInput = $<HTMLInputElement>("attach-input");
 const settingsDialog = $<HTMLDialogElement>("settings-dialog");
 const helpDialog = $<HTMLDialogElement>("help-dialog");
 
@@ -69,31 +114,10 @@ const openDialog = (dialog: HTMLDialogElement): void => {
 
 // ---------------------------------------------------------------------------
 // Settings
-interface Settings {
-  scale: number;
-  adaptive: boolean;
-  doubleSided: boolean;
-  antialias: boolean;
-  hud: boolean;
-  /** Say when Local Studio's IfcOpenShell conversion would pay off. */
-  offerConvert: boolean;
-}
-const SETTINGS_KEY = "ifcviewx.settings";
-const DEFAULTS: Settings = {
-  scale: 1,
-  adaptive: true,
-  doubleSided: true,
-  antialias: true,
-  hud: false,
-  offerConvert: true,
+const settings = loadAppSettings();
+const persistSettings = (): void => {
+  saveAppSettings(settings);
 };
-let settings: Settings = DEFAULTS;
-try {
-  settings = { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") as Partial<Settings>) };
-} catch {
-  settings = DEFAULTS;
-}
-const persistSettings = (): void => localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 
 // ---------------------------------------------------------------------------
 // App state
@@ -102,14 +126,16 @@ interface PendingEdit extends ProposedEdit {
   diff?: EditDiff;
 }
 const MAX_CHECKPOINTS = 10;
-/** Above this, IfcOpenShell wins on threads and has no 4 GB wasm ceiling. */
-const BIG_MODEL_BYTES = 50e6;
 /** Past this, browser Python is worth a warning before the first boot. */
 const PY_BROWSER_WARN_BYTES = 100e6;
 
 let activeBytes: Uint8Array | null = null;
 /** An IDS document is loaded, so the assistant's `ids` action has a target. */
 let idsLoaded = false;
+window.addEventListener("ifcviewx:ids-loaded", () => {
+  idsLoaded = true;
+  refreshAssistantEngine();
+});
 let fileName = "";
 let schemaName: string | null = null;
 let checkpoints: Uint8Array[] = [];
@@ -148,16 +174,43 @@ const viewer = createViewer(shell.viewerHost, {
 viewer.warmup();
 viewer.setRenderScale(settings.scale);
 viewer.setAdaptiveResolution(settings.adaptive);
+viewer.setLodThreshold(settings.lod ? LOD_PIXELS : 0);
 viewer.setDoubleSided(settings.doubleSided);
 viewer.setPerfHud(settings.hud);
 applyTheme();
 
 const dock = new Dock(shell.viewerHost, viewer);
+// The dock lists the federated models; picking a file to add is the app's job.
+dock.onAddModel = () => attachInput.click();
 
 // Filters own the visible set; the pill in the bottom-right corner is where
 // the user sees what is applied and drops it, one filter or all at once.
 const filters = new FilterStore(viewer);
 new FilterChip(shell.viewerHost, filters);
+
+// One dock for every producer of results. Panels keep their setup; the list,
+// the grouping, the assignment and the BCF handoff are shared.
+const results = new ResultsDock(shell.viewerHost, {
+  isolate: (ids, label) => viewer.isolate(ids, label),
+  select: (ids) => viewer.selectMany(ids, "replace"),
+  frameAt: (point) => viewer.fitToPoint(point, 2),
+  frame: (id) => viewer.fitToElement(id),
+  showAll: () => viewer.showAll(),
+  raiseIssue: (title, ids, detail, point, batch) =>
+    void raiseIssue(title, ids, { description: detail, point }, { mutateView: !batch }).catch(reportError),
+  log: (message, kind) => shell.log(message, kind),
+});
+shell.statusSlot.appendChild(docketChip(() => results.setOpen(true)));
+
+// Roads and rail: the alignment, driven, with the file's own chainage.
+const drive = new DrivePanel(shell.viewerHost, viewer, { log: (message, kind) => shell.log(message, kind) });
+
+// Field mode: installed, touch-sized and working with the radio off. The
+// worker is registered only for a built site; a cached shell in development
+// would hide the change that was just made.
+const field = new FieldMode((message, kind) => shell.log(message, kind));
+field.register(import.meta.env.BASE_URL, import.meta.env.PROD);
+shell.statusSlot.appendChild(field.chip());
 
 // Web Studio or Local Studio: a badge in the top bar saying which app this is,
 // and one dialog explaining the difference. There is nothing to connect.
@@ -182,21 +235,49 @@ const ifc = new IfcEngine(`${import.meta.env.BASE_URL}wasm/`);
 // no work for panels nobody opened.
 let assistantUi: AssistantPanel | null = null;
 let scheduleUi: SchedulePanel | null = null;
+let scheduleDialog: HTMLDialogElement | null = null;
+let scheduleMount: HTMLElement | null = null;
 let filterUi: FilterPanel | null = null;
-let idsUi: IdsPanel | null = null;
+let viewsUi: ViewsPane | null = null;
+let computedUi: ComputedPane | null = null;
 let bcfUi: BcfPanel | null = null;
+let geoUi: GeoContextPanel | null = null;
+let idsUi: unknown = null;
+let assistantAgent: AgentRuntime | null = null;
+
+function agent(): AgentRuntime {
+  if (!assistantAgent) throw new Error("The assistant runtime is still starting");
+  return assistantAgent;
+}
 
 function assistant(): AssistantPanel {
   if (!assistantUi) {
     assistantUi = new AssistantPanel($("tab-assistant"), {
-      onSend: (text) => void handleChat(text),
+      onSend: (text) => void agent().run(text),
       onNewChat: () => newChat(),
-      onStop: () => stopChat(),
+      onStop: () => agent().stop(),
       onSettingsChange: () => refreshAssistantEngine(),
+      onRetry: () => retryChat(),
+      onHistory: (anchor) => showChatHistory(anchor),
+      onAttachmentChange: () => syncAttachment(),
+      onViewAttachmentChange: () => syncAttachment(),
+      onEvidence: (references, action) => openEvidence(references, action),
+      onIssueProposal: (payload) => void acceptIssueProposal(payload),
+      onDefinitionProposal: (payload) => void acceptDefinitionProposal(payload).catch(reportError),
+      extensionTools: () => plugins.assistantToolContributions().map(({ owner, contribution }) => ({
+        owner,
+        id: contribution.id,
+        capability: contribution.capability,
+        enabled: extensionToolApprovals.isEnabled(owner, contribution.id),
+      })),
+      onExtensionToolChange: (owner, id, enabled) => extensionToolApprovals.set(owner, id, enabled),
       openConsole: (code) => void plugins.open("python", true, code),
       openLocal: () => connection.open(),
     });
     refreshAssistantEngine();
+    assistantUi.setSuggestions(modelSuggestions());
+    assistantUi.setUsage(null, tokenTotals);
+    syncAttachment();
   }
   return assistantUi;
 }
@@ -238,8 +319,8 @@ function refreshAssistantEngine(): void {
   assistantUi.setTools(
     editing ? "Tools + edits" : "Tools only",
     editing
-      ? "Reads, checks, schedules, IDS, clash and property edits, all in this tab. Generated Python is never run for it."
-      : "Reads, checks, schedules, IDS and clash, all in this tab. Switch to Edit for property changes.",
+      ? "Reads, checks, schedules, IDS and property edits, all in this tab. Generated Python is never run for it."
+      : "Reads, checks, schedules and IDS, all in this tab. Switch to Edit for property changes.",
   );
   assistantUi.setToolState(toolAvailability());
 }
@@ -254,20 +335,64 @@ function toolAvailability(): ToolAvailability {
   };
 }
 
-/** The schedule panel only exists in Local Studio, so it loads on demand. */
+function ensureScheduleWorkspace(): HTMLElement {
+  if (scheduleDialog && scheduleMount) return scheduleMount;
+  scheduleMount = h("div", { class: "plug-expanded-body schedule-workspace-body" });
+  const close = iconButton("x", "Close element schedules", () => scheduleDialog?.close(), "icon-btn");
+  scheduleDialog = h("dialog", {
+    class: "plug-expanded schedule-workspace hidden",
+    "aria-label": "Element schedules",
+  }, [
+    h("div", { class: "plug-expanded-card" }, [
+      h("div", { class: "plug-expanded-head" }, [
+        h("div", { class: "plug-expanded-title" }, [
+          icon("table", 16),
+          h("span", { class: "grow" }, [
+            h("b", { text: "Element schedules" }),
+            h("small", { text: "Opened from Plugins" }),
+          ]),
+        ]),
+        h("span", { class: "grow" }),
+        h("kbd", { class: "plug-expanded-key", text: "Esc" }),
+        close,
+      ]),
+      scheduleMount,
+    ]),
+  ]) as HTMLDialogElement;
+  lightDismiss(scheduleDialog);
+  scheduleDialog.addEventListener("close", () => scheduleDialog?.classList.add("hidden"));
+  document.body.appendChild(scheduleDialog);
+  return scheduleMount;
+}
+
+/** Element schedules are an occasional Plugins workspace, loaded on demand. */
 async function schedulePanel(): Promise<SchedulePanel> {
   if (!scheduleUi) {
     const { SchedulePanel } = await import("./ui/schedules.js");
-    scheduleUi = new SchedulePanel($("tab-schedule"), {
+    scheduleUi = new SchedulePanel(ensureScheduleWorkspace(), {
       types: () => Object.entries(elementCounts(viewer)).sort((a, b) => b[1] - a[1]).map(([name]) => name),
       run: (type, properties) => ifc.schedule(type, properties),
       select: (id) => {
         viewer.select(id);
         viewer.fitToElement(id);
       },
+      // An imported sheet stages like any other edit: one approval for the
+      // whole batch, and the pending bar is what applies it.
+      stageEdits: async (ops) => {
+        await proposeIfcEdits(ops, "user");
+        shell.selectTab("properties");
+      },
     });
   }
   return scheduleUi;
+}
+
+async function openScheduleWorkspace(): Promise<void> {
+  await schedulePanel();
+  if (scheduleDialog) {
+    scheduleDialog.classList.remove("hidden");
+    openDialog(scheduleDialog);
+  }
 }
 
 function filterPanel(): FilterPanel {
@@ -275,24 +400,33 @@ function filterPanel(): FilterPanel {
   return filterUi;
 }
 
-/** IDS and BCF are dead weight until asked for, so they arrive on demand. */
-async function idsPanel(): Promise<IdsPanel> {
-  if (!idsUi) {
-    const { IdsPanel } = await import("./ui/ids.js");
-    idsUi = new IdsPanel($("tab-ids"), {
-      viewer,
-      isolate: (label, ids) => void filters.add({ label, mode: "keep", ids }),
-      report: (title, ids) => void raiseIssue(title, ids).catch(reportError),
+/**
+ * Saved views are built lazily like every other panel. Their store can still
+ * be read by commands before the pane itself has opened.
+ */
+async function viewsPane(): Promise<ViewsPane> {
+  if (!viewsUi) {
+    const { ViewsPane } = await import("./ui/viewsPane.js");
+    viewsUi = new ViewsPane($("tab-views"), viewer, plugins.index(), {
+      colorRule: () => dock.getColorRule(),
+      setColorRule: (rule) => dock.setColorRule(rule),
+      selectors: () => filters.selectors(),
       log: (message, kind) => shell.log(message, kind),
-      // The assistant's `ids` action checks whatever is loaded here, so the
-      // tool list has to learn about it the moment the file lands.
-      changed: () => {
-        idsLoaded = true;
-        refreshAssistantEngine();
-      },
+      applied: (name) => setActiveViewName(name),
+      raiseIssue: (title, ids) => void raiseIssue(title, ids).catch(reportError),
     });
   }
-  return idsUi;
+  return viewsUi;
+}
+
+async function computedPane(): Promise<ComputedPane> {
+  if (!computedUi) {
+    const { ComputedPane } = await import("./ui/viewsPane.js");
+    computedUi = new ComputedPane($("tab-computed"), viewer, plugins.index(), {
+      log: (message, kind) => shell.log(message, kind),
+    });
+  }
+  return computedUi;
 }
 
 async function bcfPanel(): Promise<BcfPanel> {
@@ -302,18 +436,102 @@ async function bcfPanel(): Promise<BcfPanel> {
       viewer,
       modelName: () => fileName,
       log: (message, kind) => shell.log(message, kind),
+      compareDocuments: isReleasePluginVisible("compare"),
+      // A revision pulled from the CDE lands in the viewer, not in a folder.
+      openDocument: async (name, bytes, intent) => {
+        if (intent === "compare") {
+          const added = await viewer.addModel(bytes, { name });
+          shell.log(`Added ${name} from the CDE as model ${added.index + 1}`, "success", true);
+          summaryDirty = true;
+          updateModelChrome();
+          void plugins.open("compare");
+          return;
+        }
+        if (!(await loadBytes(bytes, name, false, { attempt: beginLoadAttempt() }))) return;
+        void storeSourceBytes(bytes, name).then(renderRecents);
+        shell.log(`Opened ${name} from the CDE`, "success", true);
+      },
     });
   }
   return bcfUi;
 }
 
-/** An issue is always raised on a view, so the elements are isolated first. */
-async function raiseIssue(title: string, ids: number[]): Promise<void> {
-  if (!activeBytes) return toast("Open a model first", "info");
-  if (ids.length) filters.add({ label: title, mode: "keep", ids });
+/**
+ * An issue is always raised on a view, so the elements are isolated first.
+ * A batch caller opts out of that: isolating and framing once per row would
+ * stack a filter per issue and leave every snapshot on the last row's view.
+ */
+async function raiseIssue(
+  title: string,
+  ids: number[],
+  input: Omit<ExtensionIssueInput, "title" | "elementIds"> = {},
+  options: { mutateView?: boolean } = {},
+): Promise<ExtensionIssueResult> {
+  if (!activeBytes) {
+    toast("Open a model first", "info");
+    throw new Error("Open a model before creating an issue");
+  }
+  const mutateView = options.mutateView ?? true;
+  if (mutateView && ids.length) {
+    filters.add({ label: title, mode: "keep", ids });
+    viewer.selectMany(ids, "replace");
+    const box = viewer.boxAround(ids, 0.35);
+    if (box) viewer.setSectionBox(box);
+  }
+  if (mutateView && input.point) viewer.fitToPoint(input.point, 1.2);
   const panel = await bcfPanel();
-  shell.selectTab("bcf");
-  panel.capture(title, ids.length ? `${ids.length} elements do not meet this specification.` : "");
+  const metadata = Object.entries(input.metadata ?? {}).map(([key, value]) => `${key}: ${String(value)}`);
+  const description = [
+    input.description ?? (ids.length ? `${ids.length} elements do not meet this specification.` : ""),
+    metadata.length ? metadata.join("\n") : "",
+  ].filter(Boolean).join("\n\n");
+  const issueId = panel.capture(title, description, { elementIds: ids, priority: input.priority, point: input.point });
+  if (!issueId) throw new Error("The issue could not be created");
+  if (mutateView) shell.selectTab("bcf");
+  return { id: issueId, title: title || "New issue", status: "Open", snapshot: "pending" };
+}
+
+/**
+ * IDS lives in its own panel: open a file, validate, walk the failures. The
+ * authoring studio stays a plugin, one click away, for the rarer job of
+ * writing the requirements in the first place.
+ */
+async function idsPanel(): Promise<unknown> {
+  if (!idsUi) {
+    const { IdsPanel } = await import("./ui/ids.js");
+    idsUi = new IdsPanel($("tab-ids"), {
+      viewer,
+      isolate: (label, ids) => {
+        viewer.isolate(ids, label);
+        shell.log(`Isolated ${ids.length} element(s) from ${label}`, "info", true);
+      },
+      report: (title, ids) => void raiseIssue(title, ids).catch(reportError),
+      log: (message, kind) => shell.log(message, kind),
+      changed: () => ribbon.sync(),
+      ...(isReleasePluginVisible("ids-studio")
+        ? { openStudio: () => void plugins.open("ids-studio") }
+        : {}),
+    });
+  }
+  return idsUi;
+}
+
+async function geoPanel(): Promise<GeoContextPanel> {
+  if (!geoUi) {
+    const { GeoContextPanel } = await import("./ui/geo.js");
+    geoUi = new GeoContextPanel($("tab-geo"), {
+      viewer,
+      log: (message, kind) => shell.log(message, kind),
+      createIssue: async (input) => {
+        await raiseIssue(input.title, [], {
+          description: input.description,
+          point: input.point,
+          metadata: input.metadata,
+        });
+      },
+    });
+  }
+  return geoUi;
 }
 
 /** A panel that fails to arrive is not mounted, so opening the tab retries. */
@@ -332,9 +550,11 @@ function mountLazy(tab: TabId, build: () => Promise<unknown>): void {
 function mountTab(tab: TabId): void {
   if (tab === "assistant") assistant();
   else if (tab === "filters") filterPanel();
+  else if (tab === "views") mountLazy(tab, viewsPane);
+  else if (tab === "computed") mountLazy(tab, computedPane);
+  else if (tab === "geo") mountLazy(tab, geoPanel);
   else if (tab === "ids") mountLazy(tab, idsPanel);
   else if (tab === "bcf") mountLazy(tab, bcfPanel);
-  else if (tab === "schedule") mountLazy(tab, schedulePanel);
 }
 
 /** The type list is built the first time it is shown, like the tabs above. */
@@ -345,12 +565,21 @@ function types(): TypesPane {
   return typesUi;
 }
 
+/** The organize pane follows the same lazy build as the type list. */
+let organizeUi: OrganizePane | null = null;
+
+function organize(): OrganizePane {
+  if (!organizeUi) organizeUi = new OrganizePane($("pane-organize"), viewer);
+  return organizeUi;
+}
+
 const paneVisible = (pane: PaneId): boolean => !$(`pane-${pane}`).classList.contains("hidden");
 
 function showPane(pane: PaneId): void {
   shell.setOutlinerPane(pane);
   if (pane === "summary") renderSummary();
   else if (pane === "types") types().render();
+  else if (pane === "organize") organize().render();
 }
 
 // ---------------------------------------------------------------------------
@@ -364,45 +593,12 @@ function applyTheme(): void {
 function toggleTheme(): void {
   const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
   document.documentElement.dataset.theme = next;
-  localStorage.setItem("ifcviewx.theme", next);
+  safeStorageSet("ifcviewx.theme", next);
   applyTheme();
 }
 
 // ---------------------------------------------------------------------------
 // Model lifecycle
-function sniffSchema(bytes: Uint8Array): string | null {
-  const head = new TextDecoder("latin1").decode(bytes.subarray(0, 4096));
-  return /FILE_SCHEMA\s*\(\s*\(\s*'([^']+)'/i.exec(head)?.[1] ?? null;
-}
-
-/**
- * STEP or the converted container, read from the bytes. The name lies: an edit
- * made through Local Studio comes back as real STEP under a .ifcx file name,
- * and trusting the extension there silently disarms the semantic engine.
- */
-function isStep(bytes: Uint8Array): boolean {
-  return new TextDecoder("latin1").decode(bytes.subarray(0, 512)).includes("ISO-10303-21");
-}
-
-/** Byte-level substring search: a 50 MB file is never decoded just to find one token. */
-function containsAscii(bytes: Uint8Array, needle: string): boolean {
-  const first = needle.charCodeAt(0);
-  const limit = bytes.length - needle.length;
-  for (let i = 0; i <= limit; i++) {
-    if (bytes[i] !== first) continue;
-    let k = 1;
-    while (k < needle.length && bytes[i + k] === needle.charCodeAt(k)) k++;
-    if (k === needle.length) return true;
-  }
-  return false;
-}
-
-/** Plan §5.1: threads and exact solids win on big or brep-heavy files. */
-function worthConverting(bytes: Uint8Array, name: string): boolean {
-  if (name.toLowerCase().endsWith(".ifcx")) return false;
-  return bytes.length > BIG_MODEL_BYTES || containsAscii(bytes, "IFCADVANCEDBREP");
-}
-
 /**
  * One loading screen for anything the viewport waits on: opening a file,
  * replaying a cached model, fetching one from Local Studio, or a conversion.
@@ -498,51 +694,110 @@ function dropModelState(): void {
   ifc.setModel(null);
   if (pendingEdit) discardPending();
   service.forgetModel();
+  assistantCapabilities.results.clear();
+  clearDocket();
+  clearFindings();
+  void import("./ui/ids.js").then(({ clearLastIdsReport }) => clearLastIdsReport());
+  activeAssistantResult = "";
+  focusedAssistantRow = undefined;
   showDropzone();
 }
 
 /** A second open supersedes the first; only the newest one owns the chrome. */
 let loadSeq = 0;
-/** applyPending reloads with its own edit staged; every other load drops it. */
-let applying = false;
+/** Preflight also yields for large STEP files, so it needs its own ordering. */
+let loadAttemptSeq = 0;
+const beginLoadAttempt = (): number => ++loadAttemptSeq;
+interface LoadRequestOptions {
+  adoptSha?: string;
+  attempt?: number;
+  /** Only applyPending may keep the proposal while its own reload runs. */
+  preservePending?: boolean;
+}
 
-async function loadBytes(bytes: Uint8Array, name: string, preserveCamera = false, adoptSha?: string): Promise<void> {
+async function loadBytes(
+  bytes: Uint8Array,
+  name: string,
+  preserveCamera = false,
+  options: LoadRequestOptions = {},
+): Promise<boolean> {
+  // Claim the attempt before the asynchronous STEP scan. Keep this separate
+  // from load ownership: an invalid later file must not orphan a valid load
+  // that is already inside the viewer.
+  const attempt = options.attempt ?? beginLoadAttempt();
+  const step = isStep(bytes);
+  if (!step && !isFormatBytes(bytes)) {
+    throw new Error("This file is not an IFC STEP model or an IFCViewX .ifcx file.");
+  }
+  if (step) {
+    const complete = await isCompleteStepAsync(bytes);
+    if (attempt !== loadAttemptSeq) return false;
+    if (!complete) {
+      throw new Error("This IFC STEP file is incomplete (the closing STEP marker is missing).");
+    }
+  }
+  if (attempt !== loadAttemptSeq) return false;
   const mine = ++loadSeq;
-  // An edit staged against the model being replaced can never be applied to
-  // the one arriving, so it goes with the model it was written for.
-  if (pendingEdit && !applying) discardPending();
+  const previousBytes = activeBytes;
+  const previousName = fileName;
+  const previousPose = previousBytes ? viewer.getCamera() : null;
   const pose = preserveCamera ? viewer.getCamera() : null;
   shell.setStatus("Loading", "busy");
   loadingUi.show(name, () => viewer.cancelLoad());
   // Taken before the parser runs: viewer.load hands these bytes to a worker,
   // and a transferred buffer would leave the semantic engine with nothing.
-  const step = isStep(bytes);
   const semanticCopy = step ? bytes.slice() : null;
   try {
-    await viewer.load(bytes, { onProgress: (progress) => loadingUi.update(progress) });
+    await viewer.load(bytes, { name, onProgress: (progress) => loadingUi.update(progress) });
   } catch (err) {
-    // viewer.load drops whatever was on screen before it parses, so a failure
-    // leaves an empty viewport. App state has to follow it down instead of
-    // going on describing a model nobody can see any more.
-    if (mine === loadSeq) {
+    // A newer viewer load owns the viewport and its progress UI. Its expected
+    // cancellation of this one is not an error to surface or roll back.
+    if (mine !== loadSeq) return false;
+    if (previousBytes && previousName) {
+      try {
+        loadingUi.step(`Restoring ${previousName}`);
+        await viewer.load(previousBytes, { name: previousName, onProgress: (progress) => loadingUi.update(progress) });
+        if (mine === loadSeq) {
+          if (previousPose) viewer.setCamera(previousPose);
+          updateModelChrome();
+        }
+      } catch {
+        if (mine === loadSeq) {
+          dropModelState();
+          viewer.unload({ keepError: true });
+          updateModelChrome();
+        }
+      }
+    } else {
       dropModelState();
-      // The panels read the viewer, so they only follow the model down if the
-      // viewer says it is gone. The error card is the one thing kept.
       viewer.unload({ keepError: true });
       updateModelChrome();
     }
+    if (mine !== loadSeq) return false;
     throw err;
   } finally {
     if (mine === loadSeq) loadingUi.hide();
   }
-  if (mine !== loadSeq) return;
+  if (mine !== loadSeq) return false;
   if (pose) viewer.setCamera(pose);
+  if (pendingEdit && !options.preservePending) discardPending();
   activeBytes = bytes;
   fileName = name;
   schemaName = sniffSchema(bytes);
+  if (checkingLoad !== null && checkingLoad !== mine) checking = false;
   pythonSynced = false;
   summaryDirty = true;
   lastReport = null;
+  assistantCapabilities.results.clear();
+  // Every docket row points at element ids from one model revision. Keeping
+  // it after a load would let an old finding select an unrelated new element.
+  clearDocket();
+  clearFindings();
+  void import("./ui/ids.js").then(({ clearLastIdsReport }) => {
+    if (mine === loadSeq) clearLastIdsReport();
+  });
+  activeAssistantResult = "";
+  focusedAssistantRow = undefined;
   // .ifcx is our converted container, not STEP, so the semantic engine gets
   // the original bytes or nothing: it must never answer from a previous model.
   ifc.setModel(semanticCopy);
@@ -550,6 +805,8 @@ async function loadBytes(bytes: Uint8Array, name: string, preserveCamera = false
   if (!preserveCamera) { checkpoints = []; redoStack = []; }
   hideDropzone(true);
   updateModelChrome();
+  const primaryGeo = viewer.getModels()[0];
+  if (primaryGeo) reportGeoStatus(primaryGeo);
   // The tool catalog is gated on a model being open, so it has to be told.
   refreshAssistantEngine();
   if (python.isReady()) void syncPython().catch(() => undefined);
@@ -557,41 +814,55 @@ async function loadBytes(bytes: Uint8Array, name: string, preserveCamera = false
   // edit or an undo, so the hand-over lives on the single load path. A model
   // the service already stores (CLI-opened) is adopted instead of re-uploaded.
   service.forgetModel();
-  if (adoptSha) {
-    service.adoptModel(adoptSha);
+  if (options.adoptSha) {
+    service.adoptModel(options.adoptSha);
     plugins.refresh();
   } else {
     void handOverModel();
   }
+  return true;
 }
 
 /** `ifcviewx model.ifc` stages the file and opens the viewer at ?open=<sha>. */
 async function openFromParam(): Promise<void> {
-  if (pendingEdit) discardPending();
   const params = new URLSearchParams(location.search);
   const sha = params.get("open");
   if (!sha || !/^[0-9a-f]{64}$/.test(sha)) return;
+  const attempt = beginLoadAttempt();
   const given = params.get("name") ?? "model.ifc";
   shell.setStatus("Loading", "busy");
   loadingUi.show(given);
   loadingUi.step("Reading it from Local Studio");
   try {
-    const wasIfcx = given.toLowerCase().endsWith(".ifcx");
+    const sourceFlag = params.get("source");
+    // v0.1.3 and older CLI links had no source flag. Preserve their filename
+    // convention while new links use an explicit byte-classified 1/0 value.
+    const hasSource = sourceFlag === "1"
+      || (sourceFlag === null && !given.toLowerCase().endsWith(".ifcx"));
     let res = await fetch(`${service.origin}/models/${sha}.ifcx`);
+    if (attempt !== loadAttemptSeq) return;
     const gotIfcx = res.ok;
     if (!res.ok) res = await fetch(`${service.origin}/models/${sha}.ifc`);
+    if (attempt !== loadAttemptSeq) return;
     if (!res.ok) throw new Error("Local Studio no longer holds that model. Open it from disk instead.");
     const bytes = new Uint8Array(await res.arrayBuffer());
-    const name = gotIfcx && !wasIfcx ? given.replace(/\.[^.]*$/, ".ifcx") : given;
+    if (attempt !== loadAttemptSeq) return;
+    const name = gotIfcx && !given.toLowerCase().endsWith(".ifcx") ? given.replace(/\.[^.]*$/, ".ifcx") : given;
     // The .ifc source in the store backs native Python and checks; a bare
     // .ifcx has no source, so nothing is adopted and the tier stays browser.
-    await loadBytes(bytes, name, false, wasIfcx ? undefined : sha);
-    shell.log(`Opened ${given} from Local Studio`, "success");
+    if (await loadBytes(bytes, name, false, {
+      adoptSha: hasSource || !gotIfcx ? sha : undefined,
+      attempt,
+    })) {
+      shell.log(`Opened ${given} from Local Studio`, "success");
+    }
   } catch (err) {
-    updateModelChrome();
-    reportError(err);
+    if (attempt === loadAttemptSeq) {
+      updateModelChrome();
+      reportError(err);
+    }
   } finally {
-    loadingUi.hide();
+    if (attempt === loadAttemptSeq) loadingUi.hide();
   }
 }
 
@@ -603,20 +874,77 @@ function updateModelChrome(): void {
   syncTools();
 }
 
-async function openFile(file: File): Promise<void> {
-  if (pendingEdit) discardPending();
+/**
+ * The generated sample. It is not stored in recents: it is not the user's file
+ * and it costs nothing to make again.
+ */
+async function openSample(): Promise<void> {
+  if (await loadBytes(sampleModel(), SAMPLE_NAME)) {
+    shell.log("Opened the sample building. Open your own file any time.", "success");
+  }
+}
+
+/**
+ * Add a file beside the open model instead of replacing it. The semantic
+ * engine, the edit staging and the Python bridge all address one model, so
+ * they stay pointed at the first one; everything the viewer owns (geometry,
+ * tree, selection, properties, filters) is federated.
+ */
+async function attachFile(file: File): Promise<void> {
+  // Adding during a load would land in a viewer that is about to be cleared,
+  // and "no model yet" would silently turn the add into a replace.
+  if (viewer.isLoading()) {
+    toast("Wait for the current load to finish", "info");
+    return;
+  }
+  if (!hasModel()) return void openFile(file);
+  const targetLoad = loadSeq;
+  const targetBytes = activeBytes;
   const bytes = new Uint8Array(await file.arrayBuffer());
-  await loadBytes(bytes, file.name);
+  if (loadSeq !== targetLoad || activeBytes !== targetBytes) {
+    toast("The open model changed while the attachment was being read. Add it again.", "info");
+    return;
+  }
+  shell.setStatus("Loading", "busy");
+  loadingUi.show(file.name, () => viewer.cancelLoad());
+  try {
+    const added = await viewer.addModel(bytes, {
+      name: file.name,
+      onProgress: (progress) => loadingUi.update(progress),
+    });
+    shell.log(`Added ${file.name} as model ${added.index + 1}`, "success");
+    reportGeoStatus(added);
+    summaryDirty = true;
+    updateModelChrome();
+  } finally {
+    loadingUi.hide();
+    updateModelChrome();
+  }
+}
+
+async function openFile(file: File): Promise<void> {
+  if (isPackageName(file.name)) return openSharePackage(file);
+  const attempt = beginLoadAttempt();
+  // A startup/cache read may own the pre-load overlay; this request supersedes it.
+  loadingUi.hide();
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (attempt !== loadAttemptSeq) return;
+  if (!(await loadBytes(bytes, file.name, false, { attempt }))) return;
   void storeSourceBytes(bytes, file.name).then(renderRecents);
   shell.log(`Opened ${file.name}`, "success");
   // web-ifc draws every file here, so a multi-minute IfcOpenShell conversion
   // never blocks a load: the log only says when one would pay off.
-  if (!settings.offerConvert || !worthConverting(bytes, file.name)) return;
-  shell.log(
-    canLocal("convert")
-      ? "Large or brep-heavy model: Model ▸ Convert makes every reopen instant."
-      : "Large or brep-heavy model: Local Studio converts it with IfcOpenShell for instant reopens.",
-  );
+  if (settings.offerConvert) {
+    const openedLoad = loadSeq;
+    void worthConvertingAsync(bytes, file.name).then((worthIt) => {
+      if (!worthIt || activeBytes !== bytes || loadSeq !== openedLoad) return;
+      shell.log(
+        canLocal("convert")
+          ? "Large or brep-heavy model: Model ▸ Convert makes every reopen instant."
+          : "Large or brep-heavy model: Local Studio converts it with IfcOpenShell for instant reopens.",
+      );
+    });
+  }
 }
 
 /**
@@ -649,6 +977,12 @@ function handOverModel(): Promise<void> {
 }
 
 function closeModel(): void {
+  // Closing is itself the newest model decision. Pending reads/preflights must
+  // not reopen it, and a cancelled viewer load must not restore its snapshot.
+  beginLoadAttempt();
+  loadSeq += 1;
+  viewer.cancelLoad();
+  loadingUi.hide();
   dropModelState();
   // The viewer holds the scene, the tree, the properties and every cache keyed
   // to the model, so closing has to reach it or the panels keep describing a
@@ -663,14 +997,27 @@ function closeModel(): void {
 /** Closing throws away edits that only live in this tab, so it asks first. */
 function closeOrConfirm(): void {
   const staged = pendingEdit !== null;
-  if (!staged && checkpoints.length === 0) return closeModel();
+  if (!staged && checkpoints.length === 0 && redoStack.length === 0) return closeModel();
   confirmAction(
     "Close this model?",
     staged
-      ? "The staged edit and the undo history are dropped. Export first to keep them."
-      : "The undo history is dropped. Export first to keep the edits you applied.",
+      ? "The staged edit and the undo/redo history are dropped. Export first to keep them."
+      : "The undo/redo history is dropped. Export first to keep the edits you applied.",
     "Close",
     closeModel,
+  );
+}
+
+function replaceOrConfirm(run: () => void): void {
+  const staged = pendingEdit !== null;
+  if (!staged && checkpoints.length === 0 && redoStack.length === 0) return run();
+  confirmAction(
+    "Open another model?",
+    staged
+      ? "The staged edit and undo/redo history belong to this model. Export first to keep applied edits."
+      : "The undo/redo history belongs to this model. Export first to keep applied edits.",
+    "Open model",
+    run,
   );
 }
 
@@ -680,7 +1027,7 @@ async function undo(): Promise<void> {
   const previous = checkpoints[checkpoints.length - 1];
   const current = activeBytes;
   if (!previous || !current) return;
-  await loadBytes(previous, fileName, true);
+  if (!(await loadBytes(previous, fileName, true))) return;
   checkpoints.pop();
   redoStack.push(current);
   shell.log("Reverted to previous checkpoint", "info", true);
@@ -690,16 +1037,257 @@ async function redo(): Promise<void> {
   const next = redoStack[redoStack.length - 1];
   const current = activeBytes;
   if (!next || !current) return;
-  await loadBytes(next, fileName, true);
+  if (!(await loadBytes(next, fileName, true))) return;
   redoStack.pop();
   checkpoints.push(current);
   shell.log("Redid the edit", "info", true);
+}
+
+/**
+ * Handover as one file: the model, the views authored on it, the properties
+ * those views read, the drawings they were checked against and the issues
+ * raised. Everything in it is readable without this application.
+ */
+async function exportSharePackage(): Promise<void> {
+  if (!activeBytes) return void toast("Open a model first", "info");
+  shell.setStatus("Building the share package", "busy");
+  try {
+    const { sheetStore } = await import("./sheets/sheet.js");
+    const state: Record<string, string> = {};
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (!key || !carriesState(key)) continue;
+      const value = localStorage.getItem(key);
+      if (value !== null) state[key] = value;
+    }
+    const preview = await viewer.captureImage(900, "image/png").catch(() => null);
+    const bytes = await buildPackage({
+      project: fileName || "model",
+      app: `IFCViewX ${__APP_VERSION__}`,
+      model: { name: fileName || "model.ifc", bytes: activeBytes },
+      views: new ViewStore().list(),
+      properties: new ComputedStore().list(),
+      sheets: await sheetStore.all(),
+      state,
+      preview: preview ? new Uint8Array(await preview.arrayBuffer()) : null,
+    });
+    download(`${(fileName || "model").replace(/\.[^.]+$/, "")}${PACKAGE_EXTENSION}`, bytes as BlobPart, "application/zip");
+    shell.log(`Share package written: ${(bytes.length / 1e6).toFixed(1)} MB`, "success", true);
+  } finally {
+    shell.setStatus(activeBytes ? "Ready" : "No model");
+  }
+}
+
+/** Restore a package only after its model has loaded successfully. */
+async function openSharePackage(file: File): Promise<void> {
+  const contents = readPackage(new Uint8Array(await file.arrayBuffer()));
+  const { sheetStore } = await import("./sheets/sheet.js");
+  if (contents.model) {
+    const loaded = await loadBytes(contents.model.bytes, contents.model.name, false, { attempt: beginLoadAttempt() });
+    if (!loaded) throw new Error("The packaged model load was cancelled; no package state was restored.");
+    void storeSourceBytes(contents.model.bytes, contents.model.name).then(renderRecents);
+  }
+  for (const [key, value] of Object.entries(contents.state)) {
+    if (!carriesState(key)) continue;
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      shell.log(`No room left to restore ${key}`, "error");
+    }
+  }
+  if (contents.views.length) {
+    new ViewStore().merge(contents.views);
+  }
+  if (contents.properties.length) {
+    new ComputedStore().merge(contents.properties);
+  }
+  for (const sheet of contents.sheets) {
+    await sheetStore.put({ ...sheet.record, image: new Blob([sheet.image as BlobPart], { type: "image/png" }) });
+  }
+  viewsUi?.refresh();
+  computedUi?.refresh();
+  // The BCF panel refreshed on model load, before the state above was written,
+  // so its in-memory list is stale and its next save would erase the restored
+  // topics. Re-read now that localStorage holds the packaged issues.
+  bcfUi?.refresh();
+  shell.log(
+    `Opened package: ${contents.views.length} view(s), ${contents.properties.length} propert(ies), ${contents.sheets.length} sheet(s)`,
+    "success",
+    true,
+  );
 }
 
 function exportModel(): void {
   if (!activeBytes) return;
   download(fileName || "model.ifc", activeBytes as BlobPart, "application/x-step");
   shell.log(`Exported ${fileName}`, "success", true);
+}
+
+/** The plan sheet, whether or not the inset is currently showing. */
+async function savePlanImage(): Promise<void> {
+  const saved = await viewer.downloadPlan(fileName).catch(reportError);
+  if (saved) shell.log("Plan saved as PNG", "success", true);
+  else if (saved === false) toast("No plan to save yet", "info");
+}
+
+/**
+ * Mesh export. The format and the scope are one question, so they are one
+ * prompt; the exporters themselves only load once a format is chosen.
+ */
+function exportMeshFile(): void {
+  const selected = viewer.getSelectedIds().length;
+  promptForm(
+    "Export mesh",
+    [
+      { key: "format", label: "Format", value: "glb", options: ["glb", "gltf", "stl", "obj"] },
+      {
+        key: "scope",
+        label: "Scope",
+        value: selected ? "selection" : "visible",
+        options: selected ? ["selection", "visible"] : ["visible"],
+      },
+    ],
+    "Export",
+    (values) => {
+      const format = values.format as MeshFormat;
+      const scope = values.scope === "selection" ? { selectedOnly: true } : { visibleOnly: true };
+      shell.log(`Exporting ${format.toUpperCase()}...`);
+      void saveMesh(viewer, format, scope)
+        .then((result) => {
+          shell.log(
+            `Exported ${result.elements} element(s), ${result.triangles.toLocaleString()} triangles` +
+              (result.truncated ? " (truncated at the size cap)" : ""),
+            result.truncated ? "info" : "success",
+            true,
+          );
+        })
+        .catch(reportError);
+    },
+  );
+}
+
+/** The name of the last saved view applied, shown until something clears it. */
+let activeViewName = "";
+
+function setActiveViewName(name: string): void {
+  activeViewName = name;
+  syncViewState();
+}
+
+/**
+ * The view-state bar. Everything currently modifying what is on screen, each
+ * chip clearing exactly its own modifier: the permanent answer to "why can't
+ * I see anything?".
+ */
+function syncViewState(): void {
+  if (!viewer.getStats()) return shell.setViewState([]);
+  const entries: Array<{ label: string; detail?: string; icon?: string; clear?: () => void }> = [];
+  if (activeViewName) {
+    entries.push({
+      label: activeViewName,
+      detail: "saved view applied",
+      icon: "bookmark",
+      clear: () => {
+        activeViewName = "";
+        syncViewState();
+      },
+    });
+  }
+  const rules = filters.list();
+  if (rules.length) {
+    entries.push({
+      label: `${rules.length} filter${rules.length === 1 ? "" : "s"}`,
+      detail: rules.map((rule) => `${rule.mode === "hide" ? "hides" : "shows"} ${rule.label}`).join(", "),
+      icon: "funnel",
+      clear: () => viewer.clearRules(),
+    });
+  }
+  const hidden = viewer.getHiddenCount();
+  if (hidden > 0) {
+    entries.push({
+      label: `${hidden.toLocaleString()} hidden`,
+      detail: "hidden one at a time",
+      icon: "eye-off",
+      clear: () => viewer.setHidden(viewer.getHiddenIds(), false),
+    });
+  }
+  const sections = viewer.getSections();
+  if (sections.length) {
+    entries.push({
+      label: "Section",
+      detail: sections.map((section) => (section.axis ? section.axis.toUpperCase() : section.name)).join(", "),
+      icon: "section",
+      clear: () => viewer.clearSection(),
+    });
+  }
+  if (viewer.getSectionBox()) {
+    entries.push({ label: "Box", detail: "six section planes", icon: "cube", clear: () => viewer.setSectionBox(null) });
+  }
+  const color = dock.getColorRule();
+  if (color.kind !== "none") {
+    entries.push({
+      label: color.kind === "property" ? color.key : `Colour: ${color.kind}`,
+      detail: "colour override",
+      icon: "sparkle",
+      clear: () => void dock.setColorRule(null).catch(reportError),
+    });
+  }
+  const xray = viewer.getXrayCount();
+  if (xray > 0) {
+    entries.push({
+      label: `${xray.toLocaleString()} see-through`,
+      detail: "transparency override",
+      icon: "eye",
+      clear: () => {
+        viewer.clearXray();
+        ribbon.sync();
+      },
+    });
+  }
+  if (viewer.hasElementOffsets()) {
+    entries.push({
+      label: "Offsets",
+      detail: "storey slide, explode or moved elements",
+      icon: "layers",
+      clear: () => viewer.clearElementOffsets(),
+    });
+  }
+  const measures = viewer.getMeasureCount();
+  if (measures > 0) {
+    entries.push({
+      label: `${measures.toLocaleString()} measured`,
+      detail: "placed measurements",
+      icon: "ruler",
+      clear: () => viewer.resetMeasure(),
+    });
+  }
+  shell.setViewState(entries);
+}
+
+/**
+ * Enter or leave an immersive session. Raised from a command, which is a real
+ * user gesture; every browser refuses a session started any other way.
+ */
+async function enterXr(mode: "immersive-vr" | "immersive-ar"): Promise<void> {
+  if (viewer.xrMode() === mode) {
+    await viewer.exitXr();
+    return;
+  }
+  if (!(await viewer.xrSupported(mode))) {
+    toast(
+      mode === "immersive-vr"
+        ? "No VR headset is available to this browser"
+        : "This device cannot place the model in the room",
+      "info",
+    );
+    return;
+  }
+  try {
+    await viewer.startXr(mode);
+    shell.log(mode === "immersive-vr" ? "VR session started" : "AR session started", "success");
+  } catch (error) {
+    reportError(error);
+  }
 }
 
 function frameSelection(): void {
@@ -722,6 +1310,23 @@ function toggleMeasure(): void {
   syncTools();
 }
 
+function reportGeoStatus(model: FederatedModel): void {
+  if (!releaseUi.geoContext) return;
+  if (model.geoStatus === "aligned") {
+    shell.log(`Geo Context: automatically aligned ${model.name} to the federation CRS`, "success");
+    return;
+  }
+  if (model.geoStatus !== "missing" && model.geoStatus !== "conflict") return;
+  const label = model.geoStatus === "conflict" ? "conflicts with the federation CRS" : "has incomplete CRS information";
+  shell.log(`Geo Context: ${model.name} ${label}. Open Geo Context for diagnostics.`, "info", true);
+  toast(`${model.name} ${label}`, "info");
+}
+
+function openSmartMeasure(): void {
+  viewer.setMeasuring(false);
+  void plugins.open("smart-measure");
+}
+
 // The rail, the ribbon and Esc can all start or stop measuring, so the mode is
 // mirrored from the viewer. Only the mode: the measurement itself changes on
 // every hover frame, and repainting the ribbon that often would be wasteful.
@@ -731,6 +1336,36 @@ viewer.onMeasureChange(() => {
   wasMeasuring = viewer.isMeasuring();
   syncTools();
 });
+
+/**
+ * The box starts around the selection when there is one, because that is what
+ * it is nearly always wanted for, and around the whole model otherwise so the
+ * sliders in the section popover have somewhere to start.
+ */
+function toggleSectionBox(): void {
+  if (viewer.getSectionBox()) {
+    viewer.setSectionBox(null);
+  } else {
+    const selected = viewer.getSelectedIds();
+    const box = (selected.length ? viewer.boxAround(selected) : null) ?? viewer.getModelBox();
+    viewer.setSectionBox(box);
+    shell.log(
+      selected.length
+        ? `Section box around ${selected.length} selected element(s). Section tool has the sliders.`
+        : "Section box on. Drag the sliders in the Section tool to close it in.",
+    );
+  }
+  syncTools();
+}
+
+function sectionBoxAroundSelection(): void {
+  const selected = viewer.getSelectedIds();
+  const box = viewer.boxAround(selected, 0.08);
+  if (!box) return void toast("Select one or more elements first", "info");
+  viewer.setSectionBox(box);
+  shell.log(`Section box fitted to ${selected.length} selected element(s).`);
+  syncTools();
+}
 
 function toggleSection(): void {
   if (viewer.getSections().length) {
@@ -748,12 +1383,14 @@ function toggleSection(): void {
 let hadSections = false;
 viewer.onSectionChange(() => {
   const has = viewer.getSections().length > 0;
-  if (has === hadSections) return;
-  hadSections = has;
-  if (viewer.isPlanView() !== has) {
-    viewer.setPlanView(has);
-    syncTools();
+  if (has !== hadSections) {
+    hadSections = has;
+    if (viewer.isPlanView() !== has) viewer.setPlanView(has);
   }
+  // Sections move from plugins, the assistant and the MCP bridge as well as
+  // from the toolbar, so the pressed states are refreshed on every change
+  // rather than only when the plan inset flips.
+  syncTools();
 });
 
 const midOf = (axis: number): number => {
@@ -774,6 +1411,7 @@ function togglePlan(): void {
 function saveViewpoint(): void {
   const name = storeViewpoint(viewer);
   if (name) shell.log(`Saved ${name}`, "success", true);
+  else toast("The browser could not save this viewpoint", "error");
 }
 
 function setHud(on: boolean): void {
@@ -881,9 +1519,19 @@ async function withPyStatus<T>(onStatus: ((text: string) => void) | undefined, r
 // Typed edits: no generated code, no runtime download. Every op runs on a
 // disposable copy in the semantic worker and lands in the pending bar.
 async function proposeIfcEdit(op: EditOp, source: "user" | "ai" | "mcp"): Promise<string> {
+  return proposeIfcEdits([op], source);
+}
+
+/**
+ * Stage a batch as one approval. A spreadsheet re-import is many operations,
+ * and staging them one at a time would leave only the last one pending.
+ */
+async function proposeIfcEdits(ops: EditOp[], source: "user" | "ai" | "mcp"): Promise<string> {
   if (!activeBytes) throw new Error("Open a model first.");
-  if (op.ids.length === 0) throw new Error("No elements selected for this edit.");
-  const edit = await ifc.propose(op);
+  if (ops.length === 0 || ops.every((op) => op.ids.length === 0)) {
+    throw new Error("No elements selected for this edit.");
+  }
+  const edit = await ifc.proposeBatch(ops);
   // A partial batch is a result, not a crash: say which elements refused and
   // why, so the pending bar's counts are never a mystery.
   for (const failure of edit.failures) shell.log(`Edit skipped ${failure}`, "error");
@@ -1030,7 +1678,7 @@ function deleteSelection(): void {
 }
 
 /** The guarded pipeline, as handed to plugins. The console is one of them. */
-const pythonFacet: PluginPython = {
+const pythonFacet: PythonRunner = {
   runsNatively: () => service.runsNatively(),
   query: (code, onStatus) => withPyStatus(onStatus, () => runQuery(code)),
   propose: (code, onStatus) => withPyStatus(onStatus, () => proposeEdit(code, "user")),
@@ -1096,12 +1744,8 @@ async function applyPending(): Promise<void> {
   const previous = activeBytes;
   // Staged until the reload lands: a failed apply that had already cleared the
   // bar would lose the edit and leave a checkpoint that changed nothing.
-  applying = true;
-  try {
-    await loadBytes(edit.bytes, fileName, true);
-  } finally {
-    applying = false;
-  }
+  const applied = await loadBytes(edit.bytes, fileName, true, { preservePending: true });
+  if (!applied) return;
   pendingEdit = null;
   pendingBar.set(null);
   checkpoints.push(previous);
@@ -1118,35 +1762,8 @@ function discardPending(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Assistant loop: reply -> tool block -> execute -> feed the report back
-const history: ChatMessage[] = [];
-const MAX_REPAIRS = 2;
-const MAX_TOOL_ROUNDS = 8;
-/**
- * Turns kept in the transcript sent to the model. Tool reports are large, so an
- * uncapped history walks into the context limit and costs more every turn. The
- * system prompt is rebuilt each call and is not part of this.
- */
-const MAX_HISTORY = 24;
-
-/**
- * Append a turn, dropping the oldest ones once the window is full. The cut
- * lands on a user message: several providers reject a transcript that opens
- * with an assistant turn, so trimming to an exact count is not enough.
- */
-function remember(entry: ChatMessage): void {
-  history.push(entry);
-  if (history.length <= MAX_HISTORY) return;
-  let cut = history.length - MAX_HISTORY;
-  while (cut < history.length && history[cut].role !== "user") cut += 1;
-  if (cut < history.length) history.splice(0, cut);
-}
-
-/**
- * Everything a viewer action delegates outside this module. IDS and clash are
- * dynamic imports: both belong to panels the user may never open, and neither
- * should sit in the startup bundle just because the assistant might ask.
- */
+// Assistant runtime. Provider transport, tool execution, result state and the
+// transcript live behind one agent so every entry point observes one turn.
 const semanticActions: SemanticActions = {
   check: () => ifc.validate(),
   schedule: (type, properties) => ifc.schedule(type, properties),
@@ -1154,194 +1771,297 @@ const semanticActions: SemanticActions = {
     const { idsReport } = await import("./ui/ids.js");
     return idsReport(viewer);
   },
-  clash: async (a, b, tolerance) => {
-    const { clashReport } = await import("./ifc/clash.js");
-    return clashReport(viewer, a, b, tolerance);
+  clash: async (a, b, tolerance, clearance, signal) => {
+    return clashReport(viewer, a, b, tolerance, clearance, signal);
   },
 };
 
-/**
- * The mode is a rule, not a hint, so it is enforced where the tool runs rather
- * than only asked for in the prompt. Query refuses every write; edit refuses
- * deletion, which is the one typed op that changes what the viewer draws.
- */
-function modeRefusal(kind: "query" | "edit" | "viewer" | "modelEdit"): string | null {
-  const writes = kind === "modelEdit" || kind === "edit";
-  if (!writes) return null;
-  if (assistantMode() === "query") {
-    return "Refused: this session is in Query mode, which is read-only. Answer the question instead, or tell the user to switch the assistant to Edit mode.";
-  }
-  return null;
-}
+const viewerCapabilities = createViewerCapabilityRegistry();
+let activeAssistantResult = "";
+let focusedAssistantRow: number | undefined;
+const viewerCapabilityContext = {
+  viewer,
+  semantic: semanticActions,
+  viewport: shell.viewerHost,
+  revision: () => modelRevision(viewer),
+  setActiveResult: (id: string, row?: number) => {
+    activeAssistantResult = id;
+    focusedAssistantRow = row;
+  },
+  stageEdit: async (input: Record<string, unknown>) => {
+    const op = parseEditOp(JSON.stringify(input));
+    if (op.op === "deleteElements") throw new Error("Deleting geometry is not available to the assistant");
+    return proposeIfcEdit(op, "ai");
+  },
+};
+const assistantCapabilities = new AssistantCapabilityAdapter(viewerCapabilities, viewerCapabilityContext);
+const extensionToolApprovals = new ExtensionToolApprovals();
+const viewTransactions = new ViewTransactionManager(viewer);
+const tokenTotals = { input: 0, output: 0 };
+const assistantTrace: AssistantTraceEvent[] = [];
+let assistantChatId: string = crypto.randomUUID();
 
 const assistantMode = (): "query" | "edit" =>
   assistantUi ? assistantUi.activeMode() : loadSettings().mode;
 
-/** The report, plus the line that titles it for the model. */
-async function runTool(extracted: {
-  code: string;
-  kind: "query" | "edit" | "viewer" | "modelEdit";
-}): Promise<{ title: string; report: string }> {
-  const refusal = modeRefusal(extracted.kind);
-  if (refusal) throw new Error(refusal);
-  if (extracted.kind === "viewer") {
-    return {
-      title: "Viewer action report",
-      report: await runViewerAction(viewer, extracted.code, semanticActions),
-    };
-  }
-  if (extracted.kind === "modelEdit") {
-    const op = parseEditOp(extracted.code);
-    if (op.op === "deleteElements") {
-      throw new Error(
-        "Refused: deleting entities removes geometry, which Edit mode does not allow. Restrict yourself to setAttribute, renameByPattern and setProperty.",
-      );
-    }
-    return { title: "Edit report", report: await proposeIfcEdit(op, "ai") };
-  }
-  // Python blocks never reach here: handleChat sends them to the escalation
-  // card instead. This is the invariant, stated where it would be broken.
-  throw new Error("Generated Python is never executed. Show it to the user instead.");
+function recordUsage(usage: { input: number; output: number }): void {
+  tokenTotals.input += usage.input;
+  tokenTotals.output += usage.output;
+  assistant().setUsage(usage, tokenTotals);
 }
 
-/** Local Studio can hold the provider key, so the browser never sees one. */
-function askModel(messages: ChatMessage[]): Promise<string> {
-  return chat(
-    loadSettings(),
-    withSystem(messages),
-    service.proxiesLlm() ? (turns) => service.chat(turns) : undefined,
-    chatAbort?.signal,
+function modelSuggestions(): string[] {
+  const counts = elementCounts(viewer);
+  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  if (entries.length === 0) return [];
+  const plain = (type: string): string => type.replace(/^Ifc/, "").replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+  const out = [`How many ${plain(entries[0][0])}s are there, and on which storeys?`];
+  const named = entries.find(([type]) => /Door|Window|Wall|Space|Slab/i.test(type));
+  if (named) out.push(`List the ${plain(named[0])}s with their properties`);
+  out.push("Run the checks and summarise what is wrong");
+  out.push(idsLoaded ? "Validate this model against the loaded IDS" : "What is in this model? Break it down by class");
+  return out.slice(0, 4);
+}
+
+function syncAttachment(): void {
+  if (!assistantUi) return;
+  const ids = viewer.getSelectedIds();
+  const types = viewer.getElementTypes();
+  assistantUi.setAttachment(
+    ids.length,
+    ids.slice(0, 12).map((id) => `${types.get(id) ?? "element"} #${id}`).join("\n"),
   );
 }
 
-/**
- * One turn at a time. Stop and New chat both bump the generation, so a turn
- * the user has walked away from can neither write into the transcript nor
- * repopulate the history it was abandoned from.
- */
-let chatSeq = 0;
-let chatAbort: AbortController | null = null;
-
-function stopChat(): void {
-  if (!chatAbort) return;
-  chatSeq += 1;
-  chatAbort.abort();
-  chatAbort = null;
-  const ui = assistant();
-  ui.setBusy(false);
-  ui.setStatus("");
-  ui.addMessage("system", "Stopped.");
+function blobDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read the viewport image"));
+    reader.readAsDataURL(blob);
+  });
 }
 
-async function handleChat(text: string): Promise<void> {
+async function captureAssistantContext(includeImage: boolean): Promise<{
+  snapshot: ReturnType<typeof buildViewerContext>;
+  image: ViewImageAttachment | null;
+}> {
+  let image: ViewImageAttachment | null = null;
+  if (includeImage) {
+    const blob = await viewer.captureImage(1280, "image/jpeg", 0.78);
+    if (!blob) throw new Error("The current view could not be captured");
+    const rect = shell.viewerHost.getBoundingClientRect();
+    const scale = Math.min(1, 1280 / Math.max(1, rect.width));
+    image = {
+      mimeType: "image/jpeg",
+      dataUrl: await blobDataUrl(blob),
+      width: Math.max(1, Math.round(rect.width * scale)),
+      height: Math.max(1, Math.round(rect.height * scale)),
+      explicit: true,
+    };
+  }
+  const snapshot = buildViewerContext(viewer, {
+    fileName,
+    schema: schemaName,
+    panel: shell.currentTab(),
+    activeExtension: plugins.activeId() || undefined,
+    activeResult: activeAssistantResult || undefined,
+    focusedRow: focusedAssistantRow,
+    image,
+  });
+  if (assistantUi && !assistantUi.attachmentEnabled()) snapshot.selection = [];
+  return { snapshot, image };
+}
+
+function assistantTransport() {
+  return service.proxiesLlm()
+    ? localProviderTransport(service)
+    : browserProviderTransport(loadSettings());
+}
+
+function assistantSystem(messages: ChatMessage[], native: boolean, mode: "query" | "edit"): ChatMessage[] {
+  const brief = buildModelBrief(viewer, fileName, schemaName);
+  return [{ role: "system", content: systemPrompt(brief, mode, native) }, ...messages];
+}
+
+assistantAgent = new AgentRuntime({
+  ui: () => assistant(),
+  mode: assistantMode,
+  transport: assistantTransport,
+  tools: assistantCapabilities,
+  viewTransactions,
+  captureContext: captureAssistantContext,
+  attachView: () => assistant().viewAttachmentEnabled(),
+  approvals: () => extensionToolApprovals.list(plugins.assistantToolContributions()),
+  system: assistantSystem,
+  onUsage: recordUsage,
+  onPersist: (messages) => saveChat(chatModelKey(), assistantChatId, messages, Date.now()),
+  onTrace: (event) => {
+    assistantTrace.push(event);
+    if (assistantTrace.length > 200) assistantTrace.splice(0, assistantTrace.length - 200);
+  },
+});
+
+function chatModelKey(): string {
+  const stats = viewer.getStats();
+  return stats ? `${stats.totalEntities}-${stats.triangleCount}` : "none";
+}
+
+function persistChat(): void {
+  saveChat(chatModelKey(), assistantChatId, agent().history(), Date.now());
+}
+
+function openChat(chat: Conversation): void {
+  assistantChatId = chat.id;
+  agent().replaceHistory(chat.messages);
   const ui = assistant();
-  if (chatAbort) return void toast("The assistant is still answering", "info");
-  const mine = ++chatSeq;
-  chatAbort = new AbortController();
-  shell.selectTab("assistant");
-  ui.addMessage("user", text);
-  ui.setBusy(true);
-  ui.setStatus("Thinking");
-  try {
-    remember({ role: "user", content: text });
-    let repairs = 0;
-    let rounds = 0;
-    let reply = await askModel(history);
-    for (;;) {
-      if (mine !== chatSeq) return;
-      remember({ role: "assistant", content: reply });
-      const extracted = extractCode(reply);
-      // The call itself becomes a card below, so the prose keeps the sentence
-      // that introduced it and loses the JSON: printing both says it twice.
-      const prose = extracted ? stripBlock(reply, extracted.code) : reply;
-      if (prose) ui.addMessage("assistant", prose);
-      if (!extracted) break;
-      if (rounds >= MAX_TOOL_ROUNDS) {
-        // Ending on a silently dropped tool call looks like the turn stalled.
-        ui.addMessage("system", `Stopped after ${MAX_TOOL_ROUNDS} tool calls. Ask again to continue.`);
-        break;
-      }
-      // Generated Python is always shown and never run, on every tier: the user
-      // reads it and decides, and the loop ends there. Viewer actions and typed
-      // edits are the assistant's own tools, so they are never escalated.
-      // A block the mode forbids is not offered as an escalation either: it
-      // goes to runTool, which refuses it in words the model can correct from.
-      const isPython = extracted.kind === "query" || extracted.kind === "edit";
-      if (isPython && !modeRefusal(extracted.kind)) {
-        ui.addEscalation(extracted.code, extracted.kind === "edit" ? "edit" : "query");
-        break;
-      }
-      rounds += 1;
-
-      const call = ui.addToolCall(extracted.kind, extracted.code);
-      ui.setStatus("Running the tool");
-      let report: string;
-      let done: { title: string; report: string } | null = null;
-      try {
-        done = await runTool(extracted);
-        report = done.report;
-      } catch (err) {
-        report = err instanceof Error ? err.message : String(err);
-      }
-
-      if (!done) {
-        const giveUp = repairs >= MAX_REPAIRS;
-        call.settle(report, false, !giveUp);
-        if (giveUp) {
-          // No repair prompt on the way out: the transcript would end with an
-          // instruction to retry that nothing is going to answer.
-          ui.addMessage("system", `Failed after ${MAX_REPAIRS + 1} attempts. The error is in the card above.`);
-          break;
-        }
-        remember({ role: "user", content: repairPrompt(report) });
-        repairs += 1;
-      } else {
-        call.settle(report, true);
-        remember({
-          role: "user",
-          content: `${done.title}:\n${report}\n\nContinue with another tool call if needed; otherwise answer in plain text.`,
-        });
-      }
-      ui.setStatus("Reading the report");
-      reply = await askModel(history);
-    }
-  } catch (err) {
-    // An abort is the user pressing Stop, and stopChat already said so.
-    if (mine === chatSeq) {
-      ui.addMessage("system", `Error: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  } finally {
-    if (mine === chatSeq) {
-      chatAbort = null;
-      ui.setBusy(false);
-      ui.setStatus("");
+  ui.reset();
+  ui.setBusy(false);
+  for (const message of chat.messages) {
+    if ((message.role === "user" && !message.context) || message.role === "assistant") {
+      ui.addMessage(message.role, message.content);
     }
   }
+  shell.selectTab("assistant");
 }
 
-function withSystem(messages: ChatMessage[]): ChatMessage[] {
-  const brief = buildModelBrief(viewer, fileName, schemaName);
-  return [{ role: "system", content: systemPrompt(brief, assistantMode()) }, ...messages];
+function showChatHistory(anchor: HTMLElement): void {
+  const model = chatModelKey();
+  const chats = readChats(model);
+  if (chats.length === 0) return void toast("No saved chats for this model yet", "info");
+  const now = Date.now();
+  const items: MenuItem[] = chats.map((chat) => ({
+    label: `${chat.title}  (${ageLabel(chat.at, now)})`,
+    run: () => openChat(chat),
+  }));
+  items.push({ separator: true });
+  items.push({
+    label: "Delete all saved chats",
+    run: () => confirmAction(
+      "Delete saved chats",
+      `${chats.length} conversation(s) for this model will be removed from this browser.`,
+      "Delete",
+      () => {
+        clearChats(model);
+        shell.log("Saved chats deleted");
+      },
+    ),
+  });
+  const menu = buildMenu(items);
+  const rect = anchor.getBoundingClientRect();
+  menu.style.position = "fixed";
+  menu.style.top = `${rect.bottom + 4}px`;
+  menu.style.right = `${Math.max(8, window.innerWidth - rect.right)}px`;
+  openLayer([menu], () => undefined);
+  menuKeys(menu);
+}
+
+function retryChat(): void {
+  const ui = assistant();
+  if (agent().busy) return void toast("The assistant is still answering", "info");
+  const last = ui.lastPrompt();
+  if (!last) return void toast("Nothing to ask again", "info");
+  agent().rewind(last);
+  void agent().run(last).catch(reportError);
 }
 
 function newChat(): void {
-  // Fence the turn in flight before the transcript goes: otherwise its reply
-  // lands in the new chat and its tool reports go back into the history.
-  chatSeq += 1;
-  chatAbort?.abort();
-  chatAbort = null;
-  history.length = 0;
+  persistChat();
+  assistantChatId = crypto.randomUUID();
+  agent().clear();
   assistant().reset();
   assistant().setBusy(false);
   shell.selectTab("assistant");
 }
 
+/**
+ * Follow a citation back into the model. Selecting is all a click does: the
+ * camera holds still and the assistant stays on screen, because the reader is
+ * mid-conversation and being thrown into the Properties tab loses their place.
+ * Moving the camera is a separate, named request.
+ */
+function openEvidence(references: EvidenceReference[], action: "select" | "isolate" | "focus"): void {
+  const first = references[0];
+  if (!first) return;
+  if (first.resultId) {
+    activeAssistantResult = first.resultId;
+    focusedAssistantRow = first.row;
+  }
+  const ids = [...new Set(references.flatMap((reference) => reference.elementIds ?? []))]
+    .filter((id) => viewer.hasGeometry(id));
+  if (ids.length) {
+    if (action === "isolate") viewer.isolate(ids, "Assistant evidence");
+    else viewer.selectMany(ids, "replace");
+    if (action === "focus") {
+      const box = viewer.boxAround(ids, 0.15);
+      if (box) viewer.fitToPoint([
+        (box.min[0] + box.max[0]) / 2,
+        (box.min[1] + box.max[1]) / 2,
+        (box.min[2] + box.max[2]) / 2,
+      ]);
+    }
+  } else if (action === "focus" && first.point) {
+    viewer.fitToPoint(first.point);
+  }
+  const what = references.length === 1 ? `${first.id}: ${first.label}` : `${references.length} references`;
+  const verb = action === "focus" ? "Zoomed to" : action === "isolate" ? "Isolated" : "Selected";
+  shell.log(`${verb} evidence ${what}`, "info", true);
+}
+
+async function acceptIssueProposal(payload: Record<string, unknown>): Promise<void> {
+  const ids = Array.isArray(payload.elementIds)
+    ? payload.elementIds.map(Number).filter((id) => Number.isFinite(id) && id > 0)
+    : [];
+  await raiseIssue(String(payload.title ?? "Assistant issue"), ids);
+}
+
+/**
+ * Keep a definition the assistant wrote. Saving it is the whole point: the
+ * answer stops being a message in a transcript and becomes a file the team
+ * can open, edit and re-run on the next revision.
+ */
+async function acceptDefinitionProposal(payload: Record<string, unknown>): Promise<void> {
+  const kind = String(payload.staged ?? "");
+  if (kind === "view") {
+    const body = payload.view as Record<string, unknown>;
+    const store = new ViewStore();
+    store.save({
+      ...(body as unknown as ViewDefinition),
+      id: `view-${Date.now().toString(36)}`,
+      updatedAt: new Date().toISOString(),
+      thumbnail: "",
+    });
+    viewsUi?.refresh();
+    shell.selectTab("views");
+    shell.log(`Saved the view "${String(body.name)}" the assistant wrote`, "success", true);
+    return;
+  }
+  if (kind === "property") {
+    const body = payload.property as ComputedProperty;
+    if (!new ComputedStore().save({ ...body, id: `cp-${Date.now().toString(36)}` })) {
+      throw new Error("The assistant returned an invalid computed-property definition");
+    }
+    computedUi?.refresh();
+    shell.selectTab("computed");
+    shell.log(`Saved the computed property "${String(body.name)}"`, "success", true);
+    return;
+  }
+  if (kind === "ruleset") {
+    const ruleset = payload.ruleset as { name?: unknown };
+    // Rule Studio reads its ruleset from its own extension storage, so the
+    // ruleset is handed over the way the panel itself stores one.
+    localStorage.setItem("ifcviewx.plug.rule-studio.ruleset", JSON.stringify(payload.ruleset));
+    await plugins.open("rule-studio");
+    shell.log(`Loaded the ruleset "${String(ruleset.name ?? "")}" into Rule Studio`, "success", true);
+    return;
+  }
+  toast("That proposal is not something this build can save", "error");
+}
+
 function reportError(err: unknown): void {
-  // A cancelled load is the user's own decision, not a failure to shout about.
   if (err instanceof Error && err.name === "CancelledError") return shell.log("Load cancelled");
   shell.log(err instanceof Error ? err.message : String(err), "error", true);
 }
-
 // ---------------------------------------------------------------------------
 // Summary pane
 function renderSummary(): void {
@@ -1443,26 +2163,36 @@ function requireLocal(capability: string, what: string): boolean {
 async function convertWithService(): Promise<void> {
   if (!activeBytes) return toast("Open a model first", "info");
   if (!requireLocal("convert", "Conversion")) return;
+  const sourceBytes = activeBytes;
+  const sourceName = fileName;
+  const sourceLoad = loadSeq;
+  let commitLoad = 0;
   try {
     shell.setStatus("Converting", "busy");
     shell.log("Converting with IfcOpenShell, this can take minutes");
-    loadingUi.show(`Converting ${fileName}`);
+    loadingUi.show(`Converting ${sourceName}`);
     await handOverModel();
+    if (activeBytes !== sourceBytes || loadSeq !== sourceLoad) return;
     const source = service.getSha();
     const converted = await service.convert((text) => {
+      if (activeBytes !== sourceBytes || loadSeq !== sourceLoad) return;
       shell.setHint(text);
       loadingUi.step(text);
     });
-    await loadBytes(converted, fileName.replace(/\.ifc$/i, ".ifcx"));
+    if (activeBytes !== sourceBytes || loadSeq !== sourceLoad) return;
+    commitLoad = sourceLoad + 1;
+    if (!(await loadBytes(converted, sourceName.replace(/\.ifc$/i, ".ifcx")))) return;
     // The viewer now shows the .ifcx; native tools keep using the stored source.
     if (source) service.adoptModel(source);
     plugins.refresh();
     shell.log("Converted. This model now opens instantly.", "success", true);
   } catch (err) {
-    reportError(err);
-    updateModelChrome();
+    if (activeBytes === sourceBytes && (loadSeq === sourceLoad || loadSeq === commitLoad)) {
+      reportError(err);
+      updateModelChrome();
+    }
   } finally {
-    loadingUi.hide();
+    if (loadSeq === sourceLoad) loadingUi.hide();
   }
 }
 
@@ -1470,28 +2200,159 @@ async function convertWithService(): Promise<void> {
 // Model checks (native, no generated code)
 let lastReport: ValidationReport | null = null;
 let checking = false;
+let checkingLoad: number | null = null;
 
 async function validateModel(): Promise<void> {
-  if (!activeBytes || checking) return toast(checking ? "The checks are already running" : "Open a model first", "info");
+  if (!activeBytes || (checking && checkingLoad === loadSeq)) {
+    return toast(activeBytes ? "The checks are already running" : "Open a model first", "info");
+  }
+  const sourceBytes = activeBytes;
+  const sourceLoad = loadSeq;
   shell.setStatus("Checking", "busy");
   // Shown before the wait, not after it: a pass over every entity takes
   // seconds, and the pane it lands in is where the user should be watching.
   checking = true;
+  checkingLoad = sourceLoad;
   refreshSummary(true);
   ribbon.sync();
   try {
-    lastReport = await ifc.validate();
-    const { error, warning } = lastReport.counts;
+    const report = await ifc.validate();
+    if (activeBytes !== sourceBytes || loadSeq !== sourceLoad) return;
+    lastReport = report;
+    publishChecksDocket(report);
+    const { error, warning } = report.counts;
     shell.log(
       `Model checks: ${error} error${error === 1 ? "" : "s"}, ${warning} warning${warning === 1 ? "" : "s"}`,
       error ? "error" : "success",
       true,
     );
   } finally {
-    checking = false;
-    refreshSummary();
+    if (checkingLoad === sourceLoad) {
+      checking = false;
+      checkingLoad = null;
+      if (activeBytes === sourceBytes && loadSeq === sourceLoad) {
+        refreshSummary();
+        updateModelChrome();
+      }
+    }
+  }
+}
+
+/**
+ * The offline report. Nothing here runs a check of its own: it prints the
+ * checks, IDS run and plugin findings this session already produced, and marks
+ * the rest "not run". A report that quietly re-ran the work under different
+ * settings would not describe what the user saw.
+ */
+async function buildReport(): Promise<void> {
+  if (!viewer.getStats()) return toast("Open a model first", "info");
+  shell.setStatus("Building the report", "busy");
+  try {
+    const { buildReport: render, collectReport } = await import("./ui/report.js");
+    const { lastIdsReport } = await import("./ui/ids.js");
+    const model = await collectReport({
+      viewer,
+      title: fileName.replace(/\.[^.]+$/, "") || "Model report",
+      app: `IFCViewX ${__APP_VERSION__}`,
+      checks: () => lastReport,
+      ids: () => lastIdsReport(),
+      issues: () => bcfUi?.reportIssues() ?? null,
+    });
+    const html = render(model);
+    download(`${model.title.replace(/[^\w.-]+/g, "-")}-report.html`, html, "text/html;charset=utf-8");
+    shell.log(`Report saved (${Math.round(html.length / 1024)} kB). Open it and print to PDF.`, "success", true);
+  } finally {
     updateModelChrome();
   }
+}
+
+/** Read the alignments this file carries and open drive mode on them. */
+async function openDriveMode(): Promise<void> {
+  if (!activeBytes) return void toast("Open a model first", "info");
+  if (drive.isOpen()) return drive.hide();
+  shell.setStatus("Reading alignments", "busy");
+  try {
+    await handOverModel();
+    const report = await ifc.alignments();
+    // The schema is what tells a user their file simply cannot carry an
+    // alignment, so pass the one the loader sniffed rather than a blank.
+    drive.present(report.alignments, schemaName ?? "");
+    if (report.alignments.length) {
+      shell.log(
+        `${report.alignments.length} alignment(s), ${report.alignments.reduce((total, entry) => total + entry.length, 0).toFixed(0)} m in total`,
+        "success",
+      );
+    }
+  } finally {
+    shell.setStatus(activeBytes ? "Ready" : "No model");
+  }
+}
+
+/**
+ * The conformance pass buildingSMART's own service runs, run here instead.
+ * Their service is free and online only; this one never sees the file, which
+ * is the only claim in the app that no other product can make.
+ */
+let conformanceRunning = false;
+async function runConformance(): Promise<void> {
+  if (!activeBytes) return void toast("Open a model first", "info");
+  if (conformanceRunning) return;
+  conformanceRunning = true;
+  shell.setStatus("Checking conformance", "busy");
+  try {
+    await handOverModel();
+    const report = await ifc.conformance();
+    const { FAMILY_LABEL } = await import("./ifc/conformance.js");
+    publishDocket({
+      id: "conformance",
+      producer: "Conformance",
+      title: "IFC conformance",
+      summary: `${report.passed} passed, ${report.failed} failed, ${report.notRun} need Local Studio. Schema ${report.schema}`,
+      rows: report.checks.map((check) => ({
+        id: check.id,
+        severity: check.outcome === "fail" ? "error" : check.outcome === "not_run" ? "info" : "info",
+        title: `${check.id}  ${check.title}`,
+        detail: check.outcome === "pass" ? "passes" : check.outcome === "fail" ? `${check.count} failing` : check.detail,
+        group: FAMILY_LABEL[check.family],
+        ids: check.sample.map((entry) => entry.expressID).filter((id) => viewer.hasGeometry(id)),
+      })),
+    });
+    results.setOpen(true);
+    shell.log(
+      `Conformance: ${report.failed} rule(s) failed, ${report.passed} passed, nothing uploaded`,
+      report.failed ? "error" : "success",
+      true,
+    );
+  } finally {
+    conformanceRunning = false;
+    shell.setStatus(activeBytes ? "Ready" : "No model");
+  }
+}
+
+/**
+ * The built-in checks, as rows on the shared dock. A check names a sample of
+ * the entities it failed on, so the rows carry those ids and nothing more:
+ * claiming an id the check never looked at would send a reviewer somewhere
+ * the finding does not apply.
+ */
+function publishChecksDocket(report: ValidationReport): void {
+  const rows: DocketRow[] = report.checks.map((check) => ({
+    id: check.id,
+    severity: check.severity,
+    title: `${check.title} (${check.count.toLocaleString()})`,
+    detail: check.hint,
+    group: check.severity === "error" ? "Errors" : check.severity === "warning" ? "Warnings" : "Notes",
+    ids: (check.sample ?? [])
+      .map((entry) => Number(entry.expressID ?? entry.id))
+      .filter((id) => Number.isFinite(id) && viewer.hasGeometry(id)),
+  }));
+  publishDocket({
+    id: "checks",
+    producer: "Model checks",
+    title: "Model checks",
+    summary: `${report.counts.error} error(s), ${report.counts.warning} warning(s), schema ${report.schema}`,
+    rows,
+  });
 }
 
 function renderChecks(page: HTMLElement): void {
@@ -1555,16 +2416,28 @@ async function renderRecents(): Promise<void> {
 }
 
 function openRecent(sha: string, name: string): void {
-  if (pendingEdit) discardPending();
-  void loadCachedSource(sha)
-    .then((bytes) => {
-      if (!bytes) {
-        toast(`${name} is no longer cached. Open it from disk.`, "info");
-        return renderRecents();
-      }
-      return loadBytes(bytes, name).then(() => shell.log(`Opened ${name}`, "success"));
-    })
-    .catch(reportError);
+  replaceOrConfirm(() => {
+    const attempt = beginLoadAttempt();
+    loadingUi.show(name);
+    loadingUi.step("Reading it from browser storage");
+    void loadCachedSource(sha)
+      .then(async (bytes) => {
+        if (attempt !== loadAttemptSeq) return;
+        if (!bytes) {
+          toast(`${name} is no longer cached. Open it from disk.`, "info");
+          return renderRecents();
+        }
+        if (await loadBytes(bytes, name, false, { attempt })) {
+          shell.log(`Opened ${name}`, "success");
+        }
+      })
+      .catch((err) => {
+        if (attempt === loadAttemptSeq) reportError(err);
+      })
+      .finally(() => {
+        if (attempt === loadAttemptSeq) loadingUi.hide();
+      });
+  });
 }
 
 function recentMenu(): MenuItem[] {
@@ -1580,6 +2453,7 @@ function recentMenu(): MenuItem[] {
 // Settings dialog: the same values the ribbon edits, with their explanations
 const setScale = $<HTMLSelectElement>("set-scale");
 const setAdaptive = $<HTMLInputElement>("set-adaptive");
+const setLod = $<HTMLInputElement>("set-lod");
 const setDoubleside = $<HTMLInputElement>("set-doubleside");
 const setAa = $<HTMLInputElement>("set-aa");
 const setHudInput = $<HTMLInputElement>("set-hud");
@@ -1587,6 +2461,7 @@ const setConvert = $<HTMLInputElement>("set-convert");
 
 setScale.value = String(settings.scale);
 setAdaptive.checked = settings.adaptive;
+setLod.checked = settings.lod;
 setDoubleside.checked = settings.doubleSided;
 setAa.checked = settings.antialias;
 setHudInput.checked = settings.hud;
@@ -1597,6 +2472,11 @@ setScale.addEventListener("change", () => {
   viewer.setRenderScale(settings.scale);
   persistSettings();
   ribbon.sync();
+});
+setLod.addEventListener("change", () => {
+  settings.lod = setLod.checked;
+  viewer.setLodThreshold(settings.lod ? LOD_PIXELS : 0);
+  persistSettings();
 });
 setAdaptive.addEventListener("change", () => {
   settings.adaptive = setAdaptive.checked;
@@ -1648,7 +2528,31 @@ function showSettings(): void {
     : !isConfigured(llm)
       ? "Not configured yet."
       : `${provider.label} · ${llm.model}, ${isVerified(llm) ? "verified" : "not verified yet"}.`;
+  // Measured off the disk each time it is opened: these numbers are worth
+  // nothing if they are stale, and nobody opens Settings often enough for a
+  // background poll to pay for itself.
+  void privacyPanel().refresh();
   openDialog(settingsDialog);
+}
+
+let privacy: PrivacyPanel | null = null;
+
+/** The "Your data" block: what has been kept, and one button per thing. */
+function privacyPanel(): PrivacyPanel {
+  if (!privacy) {
+    privacy = new PrivacyPanel({
+      paths: () => service.storagePaths(),
+      reveal: (which) => service.revealFolder(which),
+      changed: () => {
+        // Deleting the key or the cache changes what the assistant header
+        // claims and what the dropzone offers to reopen.
+        refreshAssistantEngine();
+        void renderRecents();
+      },
+    });
+    $("privacy-panel").appendChild(privacy.root);
+  }
+  return privacy;
 }
 
 // ---------------------------------------------------------------------------
@@ -1658,13 +2562,22 @@ const registry = new CommandRegistry();
 
 registry.add([
   { id: "file.open", label: "Open", icon: "folder", section: "File", shortcut: "Ctrl+O", hint: "Open an IFC or .ifcx file", run: () => fileInput.click() },
+  { id: "file.attach", label: "Add model", icon: "layers", section: "File", hint: "Load a second model beside this one", enabled: hasModel, run: () => attachInput.click() },
+  { id: "file.sample", label: "Sample model", icon: "cube", section: "File", hint: "A small two-storey building, generated here, to try the viewer on", run: () => replaceOrConfirm(() => void openSample().catch(reportError)) },
   { id: "file.export", label: "Export", icon: "download", section: "File", hint: "Download the active IFC", enabled: hasModel, run: exportModel },
+  { id: "file.mesh", label: "Export mesh", icon: "cube", section: "File", hint: "glTF, GLB, STL or OBJ of what is on screen, or of the selection", enabled: hasModel, run: exportMeshFile },
+  { id: "file.plan", label: "Export plan", icon: "section", section: "File", hint: "The 2D plan as a PNG, cut where the section is", enabled: hasModel, run: () => void savePlanImage() },
+  { id: "file.package", label: "Share package", icon: "download", section: "File", hint: "Model, views, properties, drawings and issues as one file that opens with no account and no network", enabled: hasModel, run: () => void exportSharePackage().catch(reportError) },
   { id: "file.close", label: "Close", icon: "x", section: "File", enabled: hasModel, run: closeOrConfirm },
   { id: "file.screenshot", label: "Screenshot", icon: "camera", section: "File", shortcut: "S", enabled: hasModel, run: () => { viewer.screenshot(); shell.log("Screenshot saved", "success", true); } },
   { id: "file.viewpoint", label: "Viewpoint", icon: "bookmark", section: "File", shortcut: "V", enabled: hasModel, run: saveViewpoint },
+  { id: "view.save", label: "Save view", icon: "bookmark", section: "Views", shortcut: "Shift+V", hint: "Store filters, colour, cuts, notes and camera as a definition that re-runs on any revision", enabled: hasModel, run: () => void viewsPane().then((pane) => pane.saveCurrent()).catch(reportError) },
+  { id: "view.open", label: "Views", icon: "bookmark", section: "Views", shortcut: "W", hint: "Saved model views", run: () => shell.selectTab("views") },
   { id: "file.convert", label: "Convert", icon: "refresh", section: "Local Studio", tier: "local", available: () => canLocal("convert"), hint: "IfcOpenShell → .ifcx, then reopens are instant", enabled: hasModel, run: () => void convertWithService() },
+  { id: "file.conformance", label: "Conformance", icon: "shield", section: "Review", hint: "Schema, implementer agreements and informal propositions, checked on this machine with nothing uploaded", enabled: () => hasModel() && !conformanceRunning, run: () => void runConformance().catch(reportError) },
   { id: "file.check", label: "Checks", icon: "shield", section: "Review", hint: "Structural QA in this tab, no generated code", enabled: () => hasModel() && !checking, run: () => void validateModel().catch(reportError) },
-  { id: "file.schedule", label: "Schedule", icon: "table", section: "Review", hint: "Tabular export of a class, with pset columns resolved through the type", enabled: hasModel, run: () => shell.selectTab("schedule") },
+  { id: "file.schedule", label: "Element schedules", icon: "table", section: "Plugins", hint: "Tabular export of a class, with pset columns resolved through the type", enabled: hasModel, run: () => void openScheduleWorkspace().catch(reportError) },
+  { id: "file.report", label: "Report", icon: "clipboard", section: "Review", hint: "One offline HTML page: checks, IDS, findings and issues. Print it for PDF", enabled: hasModel, run: () => void buildReport().catch(reportError) },
 
   { id: "edit.undo", label: "Undo", icon: "undo", section: "Edit", shortcut: "Ctrl+Z", enabled: () => checkpoints.length > 0, run: () => void undo().catch(reportError) },
   { id: "edit.redo", label: "Redo", icon: "redo", section: "Edit", shortcut: "Ctrl+Y", enabled: () => redoStack.length > 0, run: () => void redo().catch(reportError) },
@@ -1677,6 +2590,16 @@ registry.add([
   { id: "vis.isolate", label: "Isolate", icon: "focus", section: "Visibility", shortcut: "I", binding: "", enabled: () => viewer.getSelection() !== null, run: () => viewer.isolateSelected() },
   { id: "vis.hide", label: "Hide", icon: "eye-off", section: "Visibility", shortcut: "H", binding: "", enabled: () => viewer.getSelection() !== null, run: () => viewer.hideSelected() },
   { id: "vis.all", label: "Show all", icon: "eye", section: "Visibility", shortcut: "A", binding: "", run: () => viewer.showAll() },
+  { id: "vis.undo", label: "Undo visibility", icon: "undo", section: "Visibility", shortcut: "Ctrl+Shift+Z", hint: "Step back through hide and isolate", enabled: () => viewer.canUndoVisibility(), run: () => { if (!viewer.undoVisibility()) toast("Nothing to undo", "info"); } },
+  { id: "vis.redo", label: "Redo visibility", icon: "redo", section: "Visibility", shortcut: "Ctrl+Shift+Y", enabled: () => viewer.canRedoVisibility(), run: () => { if (!viewer.redoVisibility()) toast("Nothing to redo", "info"); } },
+  { id: "vis.ghost", label: "Ghost hidden", icon: "eye-off", section: "Visibility", hint: "Hidden elements stay as a faint hatch instead of vanishing", pressed: () => viewer.isGhostHidden(), run: () => { viewer.setGhostHidden(!viewer.isGhostHidden()); shell.log(viewer.isGhostHidden() ? "Hidden elements are ghosted" : "Hidden elements are fully hidden"); ribbon.sync(); } },
+  { id: "vis.xray", label: "Transparent", icon: "eye", section: "Visibility", hint: "Draw the selection see-through; click again to make it solid", enabled: () => viewer.getSelection() !== null, run: () => { const ids = viewer.getSelectedIds(); const on = !ids.every((id) => viewer.isElementXray(id)); viewer.setXray(ids, on); ribbon.sync(); } },
+  { id: "vis.xrayrest", label: "Transp. unselected", icon: "eye", section: "Visibility", hint: "Keep the selection solid; everything else goes see-through", enabled: () => viewer.getSelection() !== null, run: () => { viewer.xrayAllExcept(viewer.getSelectedIds()); ribbon.sync(); } },
+  { id: "vis.xrayclear", label: "Opaque all", icon: "eye", section: "Visibility", enabled: () => viewer.getXrayCount() > 0, run: () => { viewer.clearXray(); ribbon.sync(); } },
+  { id: "vis.picksolid", label: "Ignore transparent", icon: "focus", section: "Visibility", hint: "Clicks and measurements pass through see-through elements", pressed: () => viewer.getPickIgnoreXray(), run: () => { viewer.setPickIgnoreXray(!viewer.getPickIgnoreXray()); ribbon.sync(); } },
+  { id: "vis.showthrough", label: "Show through", icon: "sparkle", section: "Visibility", hint: "The selection stays visible through walls", pressed: () => viewer.getShowThroughSelection(), run: () => { viewer.setShowThroughSelection(!viewer.getShowThroughSelection()); ribbon.sync(); } },
+  { id: "vis.grids", label: "Grid axes", icon: "table", section: "Visibility", hint: "IfcGrid axis lines with their bubble labels", enabled: hasModel, pressed: () => viewer.areGridsVisible(), run: () => { void viewer.setGridsVisible(!viewer.areGridsVisible()).then(() => { if (viewer.areGridsVisible() && viewer.getSceneInfo().meshCount > 0 && !document.querySelector(".ifc-grid-bubble")) toast("This model has no grid axes", "info"); ribbon.sync(); }).catch(reportError); } },
+  { id: "vis.edges", label: "Edges", icon: "section", section: "Visibility", hint: "Feature edge lines over the shading", enabled: hasModel, pressed: () => viewer.areEdgesVisible(), run: () => { viewer.setEdgesVisible(!viewer.areEdgesVisible()); ribbon.sync(); } },
   { id: "sel.clear", label: "Deselect", icon: "x", section: "Visibility", shortcut: "Esc", binding: "", enabled: () => viewer.getSelection() !== null, run: () => viewer.clearSelection() },
   { id: "vis.spaces", label: "Spaces", icon: "layers", section: "Visibility", hint: "IfcSpace geometry loads on demand", pressed: () => viewer.isCategoryVisible("IfcSpace"), run: () => void setCategory("IfcSpace").catch(reportError) },
   { id: "vis.openings", label: "Openings", icon: "layers", section: "Visibility", pressed: () => viewer.isCategoryVisible("IfcOpeningElement"), run: () => void setCategory("IfcOpeningElement").catch(reportError) },
@@ -1689,38 +2612,74 @@ registry.add([
   { id: "cam.right", label: "Right", icon: "cube", section: "Camera", shortcut: "2", run: () => viewer.viewFrom("right") },
   { id: "cam.top", label: "Top", icon: "cube", section: "Camera", shortcut: "3", run: () => viewer.viewFrom("top") },
   { id: "cam.iso", label: "Iso", icon: "cube", section: "Camera", shortcut: "4", run: () => viewer.viewFrom("iso") },
+  { id: "cam.back", label: "Back", icon: "cube", section: "Camera", run: () => viewer.viewFrom("back") },
+  { id: "cam.left", label: "Left", icon: "cube", section: "Camera", run: () => viewer.viewFrom("left") },
+  { id: "cam.bottom", label: "Bottom", icon: "cube", section: "Camera", run: () => viewer.viewFrom("bottom") },
+  { id: "cam.ortho", label: "Orthographic", icon: "ortho", section: "Camera", shortcut: "5", hint: "Parallel projection; toggling keeps the framing", pressed: () => viewer.getProjection() === "orthographic", run: () => { viewer.setProjection(viewer.getProjection() === "orthographic" ? "perspective" : "orthographic"); ribbon.sync(); } },
+  { id: "cam.rotl", label: "Rotate left", icon: "undo", section: "Camera", shortcut: "[", hint: "Quarter turn about the up axis", run: () => viewer.rotateView(90) },
+  { id: "cam.rotr", label: "Rotate right", icon: "redo", section: "Camera", shortcut: "]", run: () => viewer.rotateView(-90) },
+  { id: "cam.perp", label: "Perpendicular", icon: "focus", section: "Camera", shortcut: "N", hint: "Face the last-picked surface head on", enabled: hasModel, run: () => { if (!viewer.viewPerpendicular()) toast("No picked face; snapped to the nearest axis", "info"); } },
+  { id: "analysis.alignment", label: "Drive alignment", icon: "walk", section: "Analyze", hint: "Follow an IFC 4.3 alignment with the file's own chainage, height and grade", enabled: hasModel, pressed: () => drive.isOpen(), run: () => void openDriveMode().catch(reportError) },
+  { id: "cam.vr", label: "VR review", icon: "walk", section: "Camera", hint: "Walk the model in a headset. The same tab, no second application", enabled: hasModel, pressed: () => viewer.xrMode() === "immersive-vr", run: () => void enterXr("immersive-vr") },
+  { id: "cam.ar", label: "AR on site", icon: "globe", section: "Camera", hint: "Place the model in the room through a passthrough headset or an Android phone", enabled: hasModel, pressed: () => viewer.xrMode() === "immersive-ar", run: () => void enterXr("immersive-ar") },
+  { id: "cam.fly", label: "Fly mode", icon: "walk", section: "Camera", shortcut: "6", hint: "First person: WASD moves, Q/E down and up, Shift is faster, wheel zooms, Shift+wheel sets speed, Esc exits", enabled: hasModel, pressed: () => viewer.isFlyMode(), run: () => viewer.setFlyMode(!viewer.isFlyMode()) },
 
   { id: "tool.measure", label: "Measure", icon: "ruler", section: "Tools", shortcut: "M", pressed: () => viewer.isMeasuring(), run: toggleMeasure },
   { id: "tool.section", label: "Section", icon: "section", section: "Tools", shortcut: "X", hint: "Slice on X, Y and Z", pressed: () => viewer.getSections().length > 0, run: toggleSection },
-  { id: "tool.plan", label: "2D plan", icon: "layers", section: "Tools", shortcut: "G", hint: "Floorplan inset, cut by the horizontal section", enabled: hasModel, pressed: () => viewer.isPlanView(), run: togglePlan },
+  { id: "tool.box", label: "Section box", icon: "cube", section: "Tools", shortcut: "B", hint: "Six planes at once, around the selection", enabled: hasModel, pressed: () => viewer.getSectionBox() !== null, run: toggleSectionBox },
+  { id: "tool.plan", label: "2D plan", icon: "layers", section: "Tools", shortcut: "G", hint: "Floorplan inset, cut by the horizontal section. Click it to select in 3D", enabled: hasModel, pressed: () => viewer.isPlanView(), run: togglePlan },
   { id: "tool.hud", label: "Perf HUD", icon: "gauge", section: "Tools", pressed: () => settings.hud, run: () => setHud(!settings.hud) },
+
+  { id: "analysis.smart-measure", label: "Smart measure", icon: "ruler", section: "Analyze", hint: "Shortest clearance between two elements or a six-axis surface scan", enabled: hasModel, run: openSmartMeasure },
+  { id: "analysis.section-workspace", label: "Section drawing", icon: "section", section: "Analyze", hint: "Synchronized plans and sections from the active cut", enabled: hasModel, run: () => void plugins.open("section-workspace") },
+  { id: "sheets.open", label: "Sheets", icon: "layers", section: "Sheets", hint: "The issued drawing set: import, calibrate, overlay, mark up and raise BCF from 2D", run: () => void plugins.open("sheets") },
+  { id: "analysis.clash", label: "Clash detection", icon: "alert", section: "Analyze", hint: "Find mesh intersections and clearance failures", enabled: hasModel, run: () => void plugins.open("clash") },
+  { id: "analysis.health", label: "Model health", icon: "shield", section: "Analyze", hint: "Check identity, geometry and model quality", enabled: hasModel, run: () => void plugins.open("model-health") },
+  { id: "analysis.rules", label: "Rule Studio", icon: "shield", section: "Analyze", hint: "Geometric, topological and relational rules, saved as one ruleset the project shares", enabled: hasModel, run: () => void plugins.open("rule-studio") },
+  { id: "analysis.compare", label: "Compare models", icon: "compare", section: "Analyze", hint: "Classify geometry and property changes", enabled: hasModel, run: () => void plugins.open("compare") },
+  { id: "analysis.ids", label: "IDS", icon: "clipboard", section: "Analyze", hint: "Open an IDS file and check the model against it", run: () => shell.selectTab("ids") },
+  { id: "analysis.ids-studio", label: "IDS authoring", icon: "clipboard", section: "Analyze", hint: "Write IDS 1.0 requirements, bind bSDD concepts and compare compliance", run: () => void plugins.open("ids-studio") },
+  { id: "analysis.schedule-4d", label: "4D Schedule", icon: "clock", section: "Analyze", hint: "IFC task graph, schedule CSV overlay, Gantt and construction timeline", enabled: hasModel, run: () => void plugins.open("schedule-4d") },
+  { id: "analysis.takeoff", label: "Takeoff", icon: "calculator", section: "Analyze", hint: "Extract quantities from the model", enabled: hasModel, run: () => void plugins.open("takeoff") },
+  { id: "analysis.report-builder", label: "Report builder", icon: "clipboard", section: "Review", hint: "Your columns, your grouping, saved as a template that reproduces on the next revision", enabled: hasModel, run: () => void plugins.open("report-builder") },
+  { id: "analysis.point-cloud", label: "Point cloud", icon: "cube", section: "Analyze", hint: "Overlay a laser scan and colour it by its deviation from the model", enabled: hasModel, run: () => void plugins.open("point-cloud") },
+  { id: "analysis.presentation", label: "Presentation", icon: "walk", section: "Review", hint: "Saved views as an ordered walkthrough, played or recorded", enabled: hasModel, run: () => void plugins.open("presentation") },
+  { id: "analysis.geo", label: "Geo Context", icon: "globe", section: "Analyze", hint: "Inspect CRS metadata, align models and exchange GeoJSON", enabled: hasModel, run: () => shell.selectTab("geo") },
 
   { id: "panel.tree", label: "Structure", icon: "panel-left-close", section: "Panels", shortcut: "Ctrl+B", pressed: () => shell.isPanelOpen("outliner"), run: () => { shell.togglePanel("outliner"); ribbon.sync(); } },
   { id: "panel.insp", label: "Inspector", icon: "panel-right-close", section: "Panels", shortcut: "\\", pressed: () => shell.isPanelOpen("inspector"), run: () => { shell.togglePanel("inspector"); ribbon.sync(); } },
   { id: "panel.props", label: "Properties", icon: "info", section: "Panels", shortcut: "P", run: () => shell.selectTab("properties") },
+  { id: "panel.views", label: "Views", icon: "bookmark", section: "Panels", hint: "Saved model views", run: () => shell.selectTab("views") },
+  { id: "panel.computed", label: "Computed", icon: "sliders", section: "Panels", hint: "Derived properties used by filters, colours, schedules and reports", run: () => shell.selectTab("computed") },
   { id: "panel.filters", label: "Filters", icon: "funnel", section: "Panels", shortcut: "R", run: () => shell.selectTab("filters") },
-  { id: "panel.ids", label: "IDS checks", icon: "clipboard", section: "Panels", hint: "Validate against a buildingSMART IDS", run: () => shell.selectTab("ids") },
-  { id: "panel.bcf", label: "Issues", icon: "flag", section: "Panels", hint: "BCF topics with viewpoints and snapshots", run: () => shell.selectTab("bcf") },
+  { id: "panel.geo", label: "Geo Context", icon: "globe", section: "Panels", hint: "CRS diagnostics, federation alignment and GeoJSON", run: () => shell.selectTab("geo") },
+  { id: "panel.ids", label: "IDS", icon: "clipboard", section: "Panels", hint: "Check the model against a buildingSMART IDS file", run: () => shell.selectTab("ids") },
+  { id: "panel.schedule-4d", label: "4D Schedule", icon: "clock", section: "Panels", hint: "Construction timeline, Gantt and task-to-product mapping", run: () => void plugins.open("schedule-4d") },
+  { id: "panel.bcf", label: "Issues", icon: "flag", section: "Panels", hint: "Local or OpenCDE BCF topics with viewpoints", run: () => shell.selectTab("bcf") },
   { id: "panel.ai", label: "Assistant", icon: "sparkle", section: "Panels", shortcut: "C", run: () => shell.selectTab("assistant") },
   { id: "panel.py", label: "Python console", icon: "terminal", section: "Panels", shortcut: "Y", hint: "Write IfcOpenShell yourself; opens as a plugin", run: () => void plugins.open("python") },
   { id: "panel.log", label: "Activity", icon: "activity", section: "Panels", shortcut: "L", run: () => shell.selectTab("activity") },
+  { id: "panel.results", label: "Results dock", icon: "list", section: "Panels", shortcut: "D", hint: "Analysis results with shared grouping and BCF handoff", pressed: () => results.isOpen(), run: () => { results.toggle(); ribbon.sync(); } },
   { id: "panel.summary", label: "Summary", icon: "list", section: "Panels", run: () => showPane("summary") },
   { id: "panel.types", label: "Types", icon: "layers", section: "Panels", hint: "Browse the model by IFC class", run: () => showPane("types") },
+  { id: "panel.organize", label: "Organize", icon: "layers", section: "Panels", hint: "Groups, layers, classifications and materials", run: () => showPane("organize") },
   { id: "panel.structure", label: "Structure tree", icon: "layers", section: "Panels", run: () => showPane("tree") },
 
   { id: "bcf.new", label: "Raise issue", icon: "flag", section: "Review", hint: "Keeps the camera, the section and a snapshot", enabled: hasModel, run: () => void raiseIssue("", []).catch(reportError) },
-  { id: "ids.open", label: "IDS checks", icon: "clipboard", section: "Review", hint: "Load an .ids file and validate this model", enabled: hasModel, run: () => shell.selectTab("ids") },
+  { id: "ids.open", label: "IDS check", icon: "clipboard", section: "Review", hint: "Load an IDS 1.0 file and validate the model", run: () => shell.selectTab("ids") },
 
   { id: "ai.new", label: "New chat", icon: "message", section: "Assistant", run: newChat },
 
-  { id: "app.plugins", label: "Plugins", icon: "blocks", section: "Application", hint: "Python console, clash detection, takeoff, explorer, compare and the Local Studio add-ons", run: () => pluginBrowser.open() },
+  { id: "app.plugins", label: "Plugins", icon: "blocks", section: "Application", hint: "Browse the plugins available in this release and the Local Studio add-ons", run: () => pluginBrowser.open() },
   { id: "app.connection", label: "Studio", icon: "plug", section: "Application", hint: "Web Studio or Local Studio", run: () => connection.open() },
+  { id: "app.install", label: "Install app", icon: "walk", section: "Application", hint: "Install IFCViewX so it opens from the home screen and works with no connection", run: () => void field.install() },
+  { id: "app.touch", label: "Touch mode", icon: "walk", section: "Application", hint: "Bigger hit targets for a tablet on site", pressed: () => field.isTouch(), run: () => { field.setTouch(!field.isTouch()); ribbon.sync(); shell.log(field.isTouch() ? "Touch mode on" : "Touch mode off"); } },
   { id: "app.theme", label: "Theme", icon: "moon", section: "Application", run: toggleTheme },
   { id: "app.settings", label: "Settings", icon: "settings", section: "Application", shortcut: "Ctrl+,", run: () => showSettings() },
   { id: "app.help", label: "Shortcuts", icon: "help", section: "Application", shortcut: "?", run: () => openDialog(helpDialog) },
   { id: "app.palette", label: "Command palette", icon: "command", section: "Application", shortcut: "Ctrl+K", run: () => palette.toggle() },
   { id: "app.ribbon", label: "Collapse ribbon", icon: "chevron", section: "Application", shortcut: "Ctrl+F1", run: () => ribbon.setCollapsed(!ribbon.isCollapsed()) },
-]);
+], (command) => isReleaseCommandVisible(command.id));
 
 /** Ribbon layout: pure data over command ids. */
 const RIBBON: RibbonTab[] = [
@@ -1731,65 +2690,73 @@ const RIBBON: RibbonTab[] = [
       { label: "Model", items: [
         { kind: "cmd", id: "file.open" },
         { kind: "menu", label: "Recent", icon: "clock", items: recentMenu },
+        { kind: "cmd", id: "file.attach", size: "sm" },
         { kind: "cmd", id: "file.close", size: "sm" },
         { kind: "cmd", id: "app.connection", size: "sm" },
       ] },
       { label: "Output", items: [
-        { kind: "cmd", id: "file.export" },
-        { kind: "cmd", id: "file.screenshot", size: "sm" },
-        { kind: "cmd", id: "file.viewpoint", size: "sm" },
+        { kind: "cmd", id: "file.export", label: "IFC" },
+        { kind: "cmd", id: "file.mesh", label: "Mesh" },
+        { kind: "cmd", id: "file.screenshot", size: "sm", label: "Image" },
+        { kind: "cmd", id: "file.plan", size: "sm", label: "Plan" },
+        { kind: "cmd", id: "file.viewpoint", size: "sm", label: "View" },
+        { kind: "cmd", id: "file.package", size: "sm", label: "Package" },
       ] },
       { label: "App", items: [
+        { kind: "cmd", id: "app.plugins" },
         { kind: "cmd", id: "app.settings", size: "sm" },
         { kind: "cmd", id: "app.help", size: "sm" },
       ] },
+      { label: "Field", items: [
+        { kind: "cmd", id: "app.install", label: "Install" },
+        { kind: "cmd", id: "app.touch", size: "sm", label: "Touch" },
+      ] },
     ],
   },
+  // Each command has one ribbon home. Everyday selection and edits stay on
+  // Home, while geometry work has one dedicated Analyze tab.
   {
     id: "home",
     label: "Home",
     groups: [
-      { label: "Edit", items: [
-        { kind: "cmd", id: "edit.rename" },
-        { kind: "cmd", id: "edit.property" },
-        { kind: "cmd", id: "edit.undo", size: "sm" },
-        { kind: "cmd", id: "edit.redo", size: "sm" },
-        { kind: "cmd", id: "edit.delete", size: "sm" },
-        { kind: "cmd", id: "edit.apply", size: "sm" },
-        { kind: "cmd", id: "edit.discard", size: "sm" },
-      ] },
       { label: "Assistant", items: [
         { kind: "cmd", id: "panel.ai" },
-        { kind: "cmd", id: "ai.new", size: "sm" },
+        { kind: "cmd", id: "ai.new", size: "sm", label: "New" },
       ] },
       { label: "Selection", items: [
-        { kind: "cmd", id: "vis.isolate" },
-        { kind: "cmd", id: "vis.hide" },
-        { kind: "cmd", id: "vis.all", size: "sm" },
+        { kind: "cmd", id: "cam.fitsel" },
         { kind: "cmd", id: "sel.clear", size: "sm" },
       ] },
-      { label: "Filter", items: [
+      { label: "Visibility", items: [
+        { kind: "cmd", id: "vis.isolate" },
+        { kind: "cmd", id: "vis.hide" },
+        { kind: "cmd", id: "vis.all" },
+        { kind: "cmd", id: "vis.undo", size: "sm", label: "Undo vis." },
+        { kind: "cmd", id: "vis.redo", size: "sm", label: "Redo vis." },
+      ] },
+      { label: "Find", items: [
         { kind: "cmd", id: "vis.filters" },
-        { kind: "cmd", id: "vis.clear", size: "sm" },
-        { kind: "cmd", id: "panel.types", size: "sm" },
+        { kind: "cmd", id: "vis.clear", size: "sm", label: "Clear" },
       ] },
-      { label: "Camera", items: [
-        { kind: "cmd", id: "cam.fit" },
-        { kind: "cmd", id: "cam.fitsel" },
-        { kind: "cmd", id: "cam.front", size: "sm" },
-        { kind: "cmd", id: "cam.top", size: "sm" },
-        { kind: "cmd", id: "cam.right", size: "sm" },
-        { kind: "cmd", id: "cam.iso", size: "sm" },
+      { label: "Views", items: [
+        { kind: "cmd", id: "view.open", label: "Views" },
+        { kind: "cmd", id: "view.save", size: "sm", label: "Save" },
+        { kind: "cmd", id: "file.viewpoint", size: "sm", label: "Viewpoint" },
       ] },
-      { label: "Tools", items: [
-        { kind: "cmd", id: "tool.measure" },
-        { kind: "cmd", id: "tool.section" },
-        { kind: "cmd", id: "tool.plan" },
-      ] },
-      { label: "Panels", items: [
-        { kind: "cmd", id: "panel.props", size: "sm" },
+      { label: "Inspect", items: [
+        { kind: "cmd", id: "panel.structure", label: "Structure" },
         { kind: "cmd", id: "panel.types", size: "sm" },
         { kind: "cmd", id: "panel.summary", size: "sm" },
+        { kind: "cmd", id: "panel.props", size: "sm", label: "Props" },
+      ] },
+      { label: "Edit", items: [
+        { kind: "cmd", id: "edit.undo", size: "sm" },
+        { kind: "cmd", id: "edit.redo", size: "sm" },
+        { kind: "cmd", id: "edit.rename", size: "sm" },
+        { kind: "cmd", id: "edit.property", size: "sm", label: "Property" },
+        { kind: "cmd", id: "edit.apply", size: "sm" },
+        { kind: "cmd", id: "edit.discard", size: "sm" },
+        { kind: "cmd", id: "edit.delete", size: "sm" },
       ] },
     ],
   },
@@ -1803,50 +2770,94 @@ const RIBBON: RibbonTab[] = [
         { kind: "cmd", id: "cam.top", size: "sm" },
         { kind: "cmd", id: "cam.right", size: "sm" },
         { kind: "cmd", id: "cam.iso", size: "sm" },
+        { kind: "cmd", id: "cam.back", size: "sm" },
+        { kind: "cmd", id: "cam.left", size: "sm" },
+        { kind: "cmd", id: "cam.bottom", size: "sm" },
       ] },
-      { label: "Show", items: [
-        { kind: "cmd", id: "vis.all" },
-        { kind: "cmd", id: "vis.spaces", size: "sm" },
-        { kind: "cmd", id: "vis.openings", size: "sm" },
-        { kind: "cmd", id: "vis.clear", size: "sm" },
-      ] },
-      { label: "Section", items: [
-        { kind: "cmd", id: "tool.section" },
-        { kind: "cmd", id: "tool.plan" },
+      // Ribbon labels are deliberately shorter than the command labels the
+      // palette and tooltips show, so a tab fits without a scroll.
+      { label: "Navigate", items: [
+        { kind: "cmd", id: "cam.fly", label: "Fly" },
+        { kind: "cmd", id: "cam.vr", label: "VR" },
+        { kind: "cmd", id: "cam.ar", size: "sm", label: "AR" },
+        { kind: "cmd", id: "cam.ortho", size: "sm", label: "Ortho" },
+        { kind: "cmd", id: "cam.perp", size: "sm", label: "Perp." },
+        { kind: "cmd", id: "cam.rotl", size: "sm", label: "Rot. left" },
+        { kind: "cmd", id: "cam.rotr", size: "sm", label: "Rot. right" },
       ] },
       { label: "Display", items: [
+        { kind: "cmd", id: "vis.ghost", size: "sm", label: "Ghost" },
+        { kind: "cmd", id: "vis.spaces", size: "sm" },
+        { kind: "cmd", id: "vis.openings", size: "sm" },
+        { kind: "cmd", id: "vis.grids", size: "sm", label: "Grids" },
+        { kind: "cmd", id: "vis.edges", size: "sm" },
+      ] },
+      { label: "Transparency", items: [
+        { kind: "cmd", id: "vis.xray", label: "Transp." },
+        { kind: "cmd", id: "vis.xrayrest", size: "sm", label: "Transp. rest" },
+        { kind: "cmd", id: "vis.xrayclear", size: "sm", label: "Opaque" },
+        { kind: "cmd", id: "vis.picksolid", size: "sm", label: "Ignore transp." },
+        { kind: "cmd", id: "vis.showthrough", size: "sm", label: "See through" },
+      ] },
+      { label: "Render", items: [
         { kind: "control", build: buildScaleControl },
         { kind: "cmd", id: "tool.hud", size: "sm" },
         { kind: "cmd", id: "app.theme", size: "sm" },
       ] },
-      { label: "Workspace", items: [
-        { kind: "cmd", id: "panel.summary", size: "sm" },
-        { kind: "cmd", id: "panel.log", size: "sm" },
-        { kind: "cmd", id: "app.ribbon", size: "sm" },
+    ],
+  },
+  {
+    id: "analyze",
+    label: "Analyze",
+    groups: [
+      { label: "Measure", items: [
+        { kind: "cmd", id: "tool.measure" },
+        { kind: "cmd", id: "analysis.smart-measure", label: "Smart" },
+      ] },
+      { label: "Cut", items: [
+        { kind: "cmd", id: "tool.section" },
+        { kind: "cmd", id: "tool.box", label: "Box" },
+        { kind: "cmd", id: "tool.plan", size: "sm" },
+        { kind: "cmd", id: "analysis.section-workspace", size: "sm", label: "Drawing" },
+      ] },
+      { label: "Inspect", items: [
+        { kind: "cmd", id: "cam.fitsel" },
+        { kind: "cmd", id: "vis.isolate", size: "sm" },
+        { kind: "cmd", id: "panel.props", size: "sm", label: "Props" },
+      ] },
+      { label: "Geometry", items: [
+        { kind: "cmd", id: "analysis.clash", label: "Clash" },
+        { kind: "cmd", id: "analysis.alignment", size: "sm", label: "Drive" },
+        { kind: "cmd", id: "analysis.point-cloud", size: "sm", label: "Scan" },
+        { kind: "cmd", id: "analysis.geo", size: "sm", label: "Geo" },
+        { kind: "cmd", id: "analysis.health", size: "sm", label: "Health" },
+        { kind: "cmd", id: "analysis.compare", size: "sm", label: "Compare" },
+        { kind: "cmd", id: "analysis.takeoff", size: "sm" },
+      ] },
+      { label: "Requirements", items: [
+        { kind: "cmd", id: "analysis.ids", label: "IDS" },
+        { kind: "cmd", id: "analysis.rules", label: "Rules" },
+        { kind: "cmd", id: "analysis.ids-studio", size: "sm", label: "Author" },
+        { kind: "cmd", id: "analysis.schedule-4d", size: "sm", label: "4D" },
       ] },
     ],
   },
   {
-    id: "model",
-    label: "Model",
+    id: "sheets",
+    label: "Sheets",
     groups: [
-      { label: "Inspect", items: [
-        { kind: "cmd", id: "panel.types" },
-        { kind: "cmd", id: "panel.summary" },
-        { kind: "cmd", id: "panel.props" },
+      { label: "Drawing set", items: [
+        { kind: "cmd", id: "sheets.open", label: "Sheets" },
+        { kind: "cmd", id: "analysis.section-workspace", size: "sm", label: "Section" },
+        { kind: "cmd", id: "tool.plan", size: "sm" },
       ] },
-      { label: "Convert", items: [
-        { kind: "cmd", id: "file.convert" },
+      { label: "Output", items: [
+        { kind: "cmd", id: "file.plan", label: "Plan PNG" },
+        { kind: "cmd", id: "file.screenshot", size: "sm", label: "Image" },
       ] },
-      { label: "Data", items: [
-        { kind: "cmd", id: "file.export" },
-        { kind: "cmd", id: "panel.structure", size: "sm" },
-        { kind: "cmd", id: "panel.summary", size: "sm" },
-      ] },
-      // The Python console is a plugin like any other, so it is opened from
-      // the catalog rather than from a tile of its own up here.
-      { label: "Plugins", items: [
-        { kind: "cmd", id: "app.plugins" },
+      { label: "Issues", items: [
+        { kind: "cmd", id: "bcf.new" },
+        { kind: "cmd", id: "panel.bcf", size: "sm" },
       ] },
     ],
   },
@@ -1854,29 +2865,45 @@ const RIBBON: RibbonTab[] = [
     id: "review",
     label: "Review",
     groups: [
-      { label: "Filter", items: [
-        { kind: "cmd", id: "vis.filters" },
-        { kind: "cmd", id: "vis.clear", size: "sm" },
-        { kind: "cmd", id: "panel.types", size: "sm" },
-      ] },
       { label: "Quality", items: [
         { kind: "cmd", id: "file.check" },
-        { kind: "cmd", id: "file.schedule" },
+        { kind: "cmd", id: "analysis.rules", label: "Rules" },
+        { kind: "cmd", id: "file.conformance", size: "sm", label: "Conformance" },
         { kind: "cmd", id: "panel.ids", size: "sm" },
       ] },
       { label: "Issues", items: [
         { kind: "cmd", id: "bcf.new" },
         { kind: "cmd", id: "panel.bcf", size: "sm" },
-        { kind: "cmd", id: "file.viewpoint", size: "sm" },
+        { kind: "cmd", id: "analysis.presentation", size: "sm", label: "Present" },
+      ] },
+      { label: "Findings", items: [
+        { kind: "cmd", id: "panel.results", label: "Results" },
+      ] },
+      { label: "Convert", items: [
+        { kind: "cmd", id: "file.convert" },
       ] },
       { label: "Report", items: [
-        { kind: "cmd", id: "panel.summary" },
-        { kind: "cmd", id: "file.screenshot", size: "sm" },
-        { kind: "cmd", id: "panel.log", size: "sm" },
+        { kind: "cmd", id: "analysis.report-builder", label: "Builder" },
+        { kind: "cmd", id: "file.report", size: "sm", label: "Session" },
       ] },
     ],
   },
 ];
+
+function visibleRibbon(tabs: RibbonTab[]): RibbonTab[] {
+  return tabs
+    .filter((tab) => releaseUi.advancedWorkflows || tab.id !== "sheets")
+    .map((tab) => ({
+      ...tab,
+      groups: tab.groups
+        .map((group) => ({
+          ...group,
+          items: group.items.filter((item) => item.kind !== "cmd" || registry.get(item.id)),
+        }))
+        .filter((group) => group.items.length > 0),
+    }))
+    .filter((tab) => tab.groups.length > 0);
+}
 
 function buildScaleControl(): RibbonControl {
   const select = h("select", { class: "rib-select", title: "Render scale", "aria-label": "Render scale" });
@@ -1901,7 +2928,22 @@ function buildScaleControl(): RibbonControl {
   };
 }
 
-const ribbon = new Ribbon($("ribbon-tabs"), $("ribbon"), registry, RIBBON);
+const ribbon = new Ribbon($("ribbon-tabs"), $("ribbon"), registry, visibleRibbon(RIBBON));
+// The status bar mirrors the same state the ribbon reads, so it repaints with it.
+ribbon.onSync = syncViewState;
+filters.onChange(() => syncViewState());
+viewer.onModelLoaded(() => setActiveViewName(""));
+syncViewState();
+
+viewer.onXrChange((mode) => {
+  ribbon.sync();
+  if (mode) shell.log("Immersive session running. Take the headset off or press the browser's exit control to come back.", "info", true);
+});
+
+viewer.onFlyChange((on) => {
+  ribbon.sync();
+  if (on) shell.log("Fly mode: WASD moves, Q/E down and up, wheel zooms, Shift+wheel sets speed, the plan shows where you are, Esc exits", "info", true);
+});
 
 // ---------------------------------------------------------------------------
 // Command palette: registry commands plus the model's own element classes
@@ -1917,43 +2959,222 @@ const palette = new CommandPalette(() => [
       section: "Model",
       run: () => isolateByType(name),
     })),
-]);
+], (query) => universalSearch(query));
+
+/**
+ * Everything in the session, reachable from one keystroke: saved views,
+ * element names and GlobalIds, property values, and the sheets that have been
+ * imported. The property index answers the last two only once it exists, so
+ * the palette never triggers a several-thousand-element read of its own.
+ */
+function universalSearch(query: string): Array<{ id: string; label: string; icon: string; sub?: string; section: string; run: () => void }> {
+  const lower = query.toLowerCase();
+  const out: Array<{ id: string; label: string; icon: string; sub?: string; section: string; run: () => void }> = [];
+
+  for (const view of readSavedViews()) {
+    if (!`${view.name} ${view.folder}`.toLowerCase().includes(lower)) continue;
+    out.push({
+      id: `view.${view.id}`,
+      label: view.name,
+      icon: "bookmark",
+      sub: view.folder || "Saved view",
+      section: "Views",
+      run: () => void viewsPane().then((pane) => pane.run(view)).catch(reportError),
+    });
+    if (out.length > 6) break;
+  }
+
+  if (!viewer.getStats()) return out;
+
+  const index = plugins.index();
+  if (index.ready()) {
+    let seen = 0;
+    for (const row of index.all()) {
+      if (seen >= 12) break;
+      const hit =
+        row.globalId.toLowerCase() === lower ? `GlobalId ${row.globalId}`
+        : row.name.toLowerCase().includes(lower) ? row.storey || row.type
+        : matchingProperty(row, lower);
+      if (!hit) continue;
+      seen++;
+      out.push({
+        id: `element.${row.id}`,
+        label: row.name || `${row.type.replace(/^Ifc/, "")} #${row.id}`,
+        icon: "cube",
+        sub: hit,
+        section: "Elements",
+        run: () => {
+          viewer.select(row.id);
+          viewer.fitToElement(row.id);
+          shell.selectTab("properties");
+        },
+      });
+    }
+    return out;
+  }
+
+  // Before the index exists, names from the spatial tree are the honest answer.
+  const search = buildIndex(elementsOf(viewer.getSpatialTree()));
+  for (const hit of search.search(query, 10)) {
+    out.push({
+      id: `element.${hit.id}`,
+      label: hit.name || `${hit.type.replace(/^Ifc/, "")} #${hit.id}`,
+      icon: "cube",
+      sub: hit.storey || hit.type,
+      section: "Elements",
+      run: () => {
+        viewer.select(hit.id);
+        viewer.fitToElement(hit.id);
+        shell.selectTab("properties");
+      },
+    });
+  }
+  return out;
+}
+
+/** The first property whose value contains the query, for the result subtitle. */
+function matchingProperty(row: { props: Record<string, unknown> }, lower: string): string {
+  for (const [key, value] of Object.entries(row.props)) {
+    if (value === null || value === undefined || value === "") continue;
+    const text = String(value);
+    if (text.toLowerCase().includes(lower)) return `${key} = ${text}`;
+  }
+  return "";
+}
+
+/** Saved views without building the pane, so the palette works before it opens. */
+function readSavedViews(): ViewDefinition[] {
+  try {
+    return new ViewStore().list();
+  } catch {
+    return [];
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Plugins. The panel is the catalog until something is running, and the status
-// bar toggle opens the full browser. Plugin tools stay out of the ribbon; what
-// is on the rail is one entry, like every other panel.
+// bar toggle opens the full browser. First-party analysis workflows also have
+// direct commands so they are discoverable without browsing the catalog.
 /** A refused command explains itself; a silent chip teaches nothing. */
 function runCommandOrExplain(id: string): void {
   if (registry.run(id)) return;
   toast(id.startsWith("edit.") ? "Select an element first" : "Open a model first", "info");
 }
 
+const installedExtensions = new InstalledExtensionManager();
+installedExtensions.reserve(CATALOG.map((plugin) => plugin.id));
+
 const plugins = new PluginHost(
   $("tab-plugins"),
   viewer,
   service,
   {
+    list: () => viewerCapabilities.list((capability) => capability.exposure.sdk === true).map((capability) => ({
+      id: capability.id,
+      title: capability.title,
+      description: capability.description,
+      effect: capability.effect,
+      cost: capability.cost,
+      parallelSafe: capability.parallelSafe,
+    })),
+    execute: <T,>(id: string, input: Record<string, unknown> = {}, signal?: AbortSignal) =>
+      viewerCapabilities.executeValue<T>(id, input, viewerCapabilityContext, {
+        policy: VIEWER_POLICY,
+        signal,
+      }),
+  },
+  {
     showPanel: () => shell.selectTab("plugins"),
     setPanelVisible: () => undefined,
     log: (text, kind) => shell.log(text, kind),
     runCommand: runCommandOrExplain,
-    // Taken from the viewer, not from activeBytes: onModelLoaded fires from
-    // inside viewer.load(), before the load path here records the new bytes.
-    modelKey: () => {
-      const stats = viewer.getStats();
-      return stats ? `${stats.totalEntities}:${stats.triangleCount}` : "";
+    registerCommand: (contribution, run) => registry.register({
+      id: contribution.id,
+      label: contribution.title,
+      icon: contribution.icon,
+      shortcut: contribution.shortcut,
+      section: "Extensions",
+      run,
+    }),
+    createIssue: (input) => raiseIssue(input.title, input.elementIds ?? [], input),
+    setActiveResult: (id) => {
+      activeAssistantResult = id;
+      focusedAssistantRow = undefined;
     },
+    // Match the assistant result revision exactly so extension-created rows
+    // can be paged and grouped by follow-up tools without a false stale error.
+    modelKey: () => viewer.isReady() ? modelRevision(viewer) : "",
     modelName: () => fileName,
     python: pythonFacet,
-    changed: () => syncPluginToggle(),
+    setColorRule: (rule) => dock.setColorRule(rule),
+    changed: () => {
+      syncPluginToggle();
+      refreshAssistantEngine();
+    },
   },
   (id) => pluginBrowser.open(id),
+  assistantCapabilities.results,
 );
 
 const pluginBrowser = new PluginBrowser(plugins, service, {
   runCommand: runCommandOrExplain,
   openConnection: () => connection.open(),
+}, installedExtensions);
+
+dock.onOpenSmartMeasure = openSmartMeasure;
+dock.onOpenSectionWorkspace = () => void plugins.open("section-workspace");
+
+const installedCommands = new Map<string, () => void>();
+
+function syncInstalledExtensions(): void {
+  setInstalledExtensions(installedExtensions.list(), (id) => installedExtensions.loadModule(id));
+  for (const remove of installedCommands.values()) remove();
+  installedCommands.clear();
+  for (const installation of installedExtensions.list()) {
+    if (!installation.enabled || installation.sessionDisabled) continue;
+    const manifest = activeInstalledVersion(installation).manifest;
+    for (const contribution of manifest.contributes.commands ?? []) {
+      try {
+        installedCommands.set(contribution.id, registry.register({
+          id: contribution.id,
+          label: contribution.title,
+          icon: contribution.icon,
+          shortcut: contribution.shortcut,
+          section: "Extensions",
+          run: () => void plugins.open(manifest.id, true, { type: "command", id: contribution.id }),
+        }));
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        installedExtensions.audit.record({ extensionId: manifest.id, action: "command.register", outcome: "failed", detail });
+        shell.log(`${manifest.name}: ${detail}`, "error");
+      }
+    }
+  }
+  plugins.catalogChanged();
+  pluginBrowser.refresh();
+}
+
+installedExtensions.onChange((change) => {
+  const reload = change.id !== "*" && plugins.isOpen(change.id) &&
+    (change.kind === "updated" || change.kind === "rolled-back");
+  if (change.id !== "*" && (reload || change.kind === "disabled" || change.kind === "uninstalled" || change.kind === "session-disabled")) {
+    plugins.close(change.id);
+  }
+  syncInstalledExtensions();
+  // Saved installed panels are not discoverable until initialize() has
+  // populated the runtime catalog. Restore only after that catalog sync;
+  // PluginHost.open() is idempotent if startup is signalled more than once.
+  if (change.kind === "initialized") plugins.restore();
+  if (reload) void plugins.open(change.id, false, { type: "reload" });
+});
+
+void installedExtensions.initialize().then(() => {
+  const devUrl = new URL(location.href).searchParams.get("extensionDev");
+  if (devUrl) void installedExtensions.connectDevelopment(devUrl).catch((error) => {
+    toast(error instanceof Error ? error.message : String(error), "error");
+  });
+}).catch((error) => {
+  shell.log(`Installed extensions could not start: ${error instanceof Error ? error.message : String(error)}`, "error");
 });
 
 // One way in, in the top bar with the other app-wide controls: the catalog is
@@ -1962,7 +3183,7 @@ const pluginCount = h("span", { class: "plug-count hidden" });
 const pluginToggle = h("button", {
   class: "icon-btn plug-btn",
   type: "button",
-  title: "Plugins: Python console, clash detection, takeoff, explorer, compare and the Local Studio add-ons",
+  title: "Browse plugins and Local Studio add-ons",
   "aria-label": "Plugins",
 }, [icon("blocks"), pluginCount]);
 pluginToggle.addEventListener("click", () => pluginBrowser.open());
@@ -1979,8 +3200,11 @@ function syncPluginToggle(): void {
 }
 
 syncPluginToggle();
-plugins.restore();
 viewer.onModelLoaded(() => plugins.modelChanged());
+dock.setPropertyIndex(() => plugins.index());
+viewer.onModelLoaded(() => dock.resetColors());
+viewer.onModelLoaded(() => assistantUi?.setSuggestions(modelSuggestions()));
+viewer.onSelectionChange(() => syncAttachment());
 
 // ---------------------------------------------------------------------------
 // Selection, status, context menu
@@ -2022,12 +3246,14 @@ viewer.onRenderTick(() => {
 
 // Right-drag pans the camera; only a stationary right-click is a menu.
 let rightDown: [number, number] = [0, 0];
+let contextSeq = 0;
 shell.viewerHost.addEventListener("pointerdown", (e) => {
   if (e.button === 2) rightDown = [e.clientX, e.clientY];
 });
 
 shell.viewerHost.addEventListener("contextmenu", (e) => {
   e.preventDefault();
+  const mine = ++contextSeq;
   if (Math.hypot(e.clientX - rightDown[0], e.clientY - rightDown[1]) > 5) return;
   const pick = viewer.pickAt(e.clientX, e.clientY);
   if (!pick) {
@@ -2041,6 +3267,7 @@ shell.viewerHost.addEventListener("contextmenu", (e) => {
   // on everything the user picked; right-clicking elsewhere selects that one.
   if (!viewer.getSelectedIds().includes(pick.expressID)) viewer.select(pick.expressID);
   void viewer.getProperties(pick.expressID).then((props) => {
+    if (mine !== contextSeq || !viewer.getSelectedIds().includes(pick.expressID)) return;
     const type = props?.type ?? "Element";
     const count = viewer.getSelectedIds().length;
     const scope = count > 1 ? ` (${count})` : "";
@@ -2053,6 +3280,23 @@ shell.viewerHost.addEventListener("contextmenu", (e) => {
       { label: `Isolate${scope}`, run: () => viewer.isolateSelected() },
       { label: `Hide${scope}`, run: () => viewer.hideSelected() },
       { separator: true },
+      ...(count === 2 && isReleasePluginVisible("smart-measure")
+        ? [{ label: "Measure shortest clearance", run: openSmartMeasure }]
+        : []),
+      { label: `Section box around selection${scope}`, run: sectionBoxAroundSelection },
+      { label: "Cut on this face", run: () => { if (!viewer.addSectionFromPick()) toast("No usable face normal here", "info"); } },
+      {
+        label: "Add note here",
+        run: () => promptForm("Add note", [{ key: "text", label: "Note", value: "", placeholder: "What should this say?" }], "Add", (values) => {
+          if (!values.text?.trim()) return void toast("A note needs text", "info");
+          viewer.addAnnotation({ text: values.text, at: pick.point, elementId: pick.expressID });
+          toast("Note added", "success");
+        }),
+      },
+      ...(isReleasePluginVisible("section-workspace")
+        ? [{ label: "Open section drawing", run: () => void plugins.open("section-workspace") }]
+        : []),
+      { separator: true },
       { label: `Isolate all ${type}`, run: () => isolateByType(type) },
       { label: "Show all", run: () => viewer.showAll() },
       { separator: true },
@@ -2061,11 +3305,21 @@ shell.viewerHost.addEventListener("contextmenu", (e) => {
       { label: `Delete${scope}…`, run: deleteSelection },
       { separator: true },
       { label: "Properties", run: () => shell.selectTab("properties") },
+      ...((): Array<{ label: string; run: () => void }> => {
+        const guid = props?.attributes.find((a) => a.name === "GlobalId")?.value;
+        return typeof guid === "string" && guid
+          ? [{
+              label: "Copy GUID",
+              run: () => {
+                void copyText(guid, "GUID copied");
+              },
+            }]
+          : [];
+      })(),
       {
         label: "Copy express ID",
         run: () => {
-          void navigator.clipboard.writeText(String(pick.expressID));
-          toast("Express ID copied", "success");
+          void copyText(String(pick.expressID), "Express ID copied");
         },
       },
     ]);
@@ -2074,126 +3328,39 @@ shell.viewerHost.addEventListener("contextmenu", (e) => {
 
 // ---------------------------------------------------------------------------
 // MCP bridge (browser as a tool backend for AI clients)
-const bridge = new BridgeClient({
+const bridge = createBrowserBridge({
+  viewer,
+  service,
+  capabilities: viewerCapabilities,
+  capabilityContext: viewerCapabilityContext,
+  state: () => ({
+    loaded: activeBytes !== null,
+    fileName,
+    schema: schemaName,
+    pendingEdit: pendingEdit ? pendingEdit.summary : null,
+  }),
   onStatus: (status, detail) => {
     if (detail) shell.log(detail, status === "disconnected" ? "error" : "info");
   },
 });
-bridge.register("get_status", () => ({
-  loaded: activeBytes !== null,
-  fileName,
-  schema: schemaName,
-  // The sha tells the service it may run natively against its own copy.
-  sha: service.getSha(),
-  mode: service.mode(),
-  pendingEdit: pendingEdit ? pendingEdit.summary : null,
-}));
-bridge.register("get_model_info", async () => ({
-  fileName,
-  schema: schemaName,
-  stats: viewer.getStats(),
-  countsByType: await viewer.getCountsByType(),
-}));
-bridge.register("get_spatial_tree", () => {
-  const tree = viewer.getSpatialTree();
-  if (!tree) throw new Error("no model loaded");
-  return tree;
-});
-bridge.register("get_selection", () => ({ expressId: viewer.getSelection() }));
-bridge.register("select_element", (params) => {
-  const id = Number(params.express_id);
-  if (!Number.isFinite(id)) throw new Error("express_id required");
-  viewer.select(id);
-  viewer.fitToElement(id);
-  return { selected: id };
-});
-bridge.register("get_properties", async (params) => {
-  const id = Number(params.express_id);
-  const props = await viewer.getProperties(id);
-  if (!props) throw new Error(`no properties for express_id ${id}`);
-  return props;
-});
-bridge.register("set_visibility", (params) => {
-  const id = Number(params.express_id);
-  if (!Number.isFinite(id) || id <= 0) throw new Error("express_id required");
-  viewer.setSubtreeVisible(id, Boolean(params.visible));
-  return { expressId: id, visible: Boolean(params.visible) };
-});
-bridge.register("show_all", () => {
-  viewer.showAll();
-  return { ok: true };
-});
-bridge.register("fit_view", (params) => {
-  const id = Number(params.express_id);
-  if (Number.isFinite(id) && id > 0) viewer.fitToElement(id);
-  else viewer.fitToModel();
-  return { ok: true };
-});
-// No run_python here on purpose. An MCP client is an AI client, and generated
-// code is never executed for one, in this tab or anywhere else. MCP reads the
-// model and stages typed edits; arbitrary Python belongs to the user and to the
-// Python Console, which only a human click starts.
 
-// ---------------------------------------------------------------------------
-// Input: files, drag and drop, keyboard
-fileInput.addEventListener("change", () => {
-  const file = fileInput.files?.[0];
-  if (file) void openFile(file).catch(reportError);
-  fileInput.value = "";
+bindAppInput({
+  fileInput,
+  attachInput,
+  dropzone,
+  openFirstButton: $("btn-open-first"),
+  sampleButton: $("btn-sample"),
+  palette,
+  commands: registry,
+  hasModel: () => activeBytes !== null,
+  replaceOrConfirm,
+  openFile,
+  attachFile,
+  openSample,
+  showDropzone,
+  syncTools,
+  reportError,
 });
-$("btn-open-first").addEventListener("click", () => fileInput.click());
-
-let dragDepth = 0;
-window.addEventListener("dragenter", (e) => {
-  e.preventDefault();
-  dragDepth += 1;
-  showDropzone();
-  dropzone.classList.add("dragging");
-});
-window.addEventListener("dragover", (e) => e.preventDefault());
-window.addEventListener("dragleave", () => {
-  dragDepth = Math.max(0, dragDepth - 1);
-  if (dragDepth === 0) {
-    dropzone.classList.remove("dragging");
-    if (activeBytes) dropzone.classList.add("hidden");
-  }
-});
-window.addEventListener("drop", (e) => {
-  e.preventDefault();
-  dragDepth = 0;
-  dropzone.classList.remove("dragging");
-  if (activeBytes) dropzone.classList.add("hidden");
-  const file = e.dataTransfer?.files?.[0];
-  if (!file) return void toast("Drop an .ifc or .ifcx file", "info");
-  if (!/\.(ifc|ifcx|ifczip)$/i.test(file.name)) {
-    return void toast(`${file.name} is not an IFC file`, "error");
-  }
-  void openFile(file).catch(reportError);
-});
-
-window.addEventListener("keydown", (e) => {
-  const target = e.target as HTMLElement | null;
-  // A modal dialog owns the keyboard: the app behind it is inert, so a stray
-  // S would download a screenshot of a viewport nobody can see.
-  if (document.querySelector("dialog[open]")) return;
-  const typing =
-    target instanceof HTMLInputElement ||
-    target instanceof HTMLTextAreaElement ||
-    target instanceof HTMLSelectElement ||
-    target?.isContentEditable === true;
-
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
-    e.preventDefault();
-    return palette.toggle();
-  }
-  // Esc is handled inside viewer-core (close popover / clear selection / exit
-  // measure); this only resyncs the controls that mirror that state.
-  if (e.key === "Escape") return syncTools();
-  if (typing || palette.isOpen()) return;
-  registry.handleKey(e);
-});
-
-// F / H / I / A / Esc stay owned by viewer-core's own key handler.
 
 updateModelChrome();
 void renderRecents();

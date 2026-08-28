@@ -1,0 +1,46 @@
+{
+  "manifestVersion": 2,
+  "id": "rule-studio",
+  "name": "Rule Studio",
+  "version": "1.0.0",
+  "sdk": ">=2.0.0 <3",
+  "description": "Geometric, topological and relational model rules, saved as a ruleset file and run as a batch.",
+  "runtime": { "kind": "bundled", "entry": "panel.ts" },
+  "activationEvents": ["onPanel:rule-studio"],
+  "permissions": [
+    "model.summary.read",
+    "model.structure.read",
+    "model.properties.read",
+    "model.index.build",
+    "geometry.query",
+    "geometry.mesh.read",
+    "view.read",
+    "view.control",
+    "viewport.capture",
+    "review.issue.create",
+    "storage.extension",
+    "file.open",
+    "file.export"
+  ],
+  "contributes": {
+    "panels": [{ "id": "rule-studio", "title": "Rule Studio", "icon": "shield" }],
+    "importers": [{ "id": "rule-studio.ruleset", "title": "Ruleset", "accepts": [".json"] }],
+    "exporters": [
+      { "id": "rule-studio.ruleset", "title": "Ruleset", "mimeTypes": ["application/json"] },
+      { "id": "rule-studio.findings", "title": "Rule findings CSV", "mimeTypes": ["text/csv"] }
+    ]
+  },
+  "catalog": {
+    "tagline": "The checks IDS cannot express: geometry, hosting, placement and quantities",
+    "about": "IDS answers whether the information is there. This answers whether the model is right. Twelve rules ship, each parameterized, severity-graded and scoped by a saved query; a ruleset is one file a project can standardize on and re-run at every milestone. Everything runs against the same triangle-level engine the clash tool uses, in this tab, with nothing uploaded.",
+    "icon": "shield",
+    "category": "Review",
+    "keywords": "rules ruleset solibri checking quality assurance qa geometry clash placement classification naming host clearance",
+    "does": [
+      "Twelve shipped rules: duplicates, overlaps, hosting, storeys, spaces, clearance, naming, placement and quantities",
+      "Every rule parameterized, severity-graded and scoped by class, storey or property",
+      "Save the whole set as a ruleset file a project shares and re-runs",
+      "One docket of findings: isolate, frame, raise as BCF, export as CSV"
+    ]
+  }
+}

@@ -1,7 +1,7 @@
 // Transfer format for streaming meshes out of the parser worker: each unique
 // geometry crosses once, placements reference it by geometryID, and all typed
 // arrays are transferable (no copies).
-import type { IfcMesh, LoadProgress, LoadedModelMeta, MeshGeometry, Vec3 } from './types.js';
+import type { IfcGridInfo, IfcMesh, IfcTaskGraph, LoadProgress, LoadedModelMeta, MeshGeometry, OrganizeIndex, Vec3 } from './types.js';
 
 /** Unique geometries new in this batch, concatenated into shared arrays. */
 export interface GeometryTable {
@@ -42,6 +42,9 @@ export type WorkerRequest =
   | { type: 'loadCategory'; id: number; modelID: number; category: string }
   | { type: 'getProperties'; id: number; modelID: number; expressID: number }
   | { type: 'getCounts'; id: number; modelID: number }
+  | { type: 'getTaskGraph'; id: number; modelID: number }
+  | { type: 'getOrganizeIndex'; id: number; modelID: number }
+  | { type: 'getGridAxes'; id: number; modelID: number }
   | { type: 'dispose'; modelID: number };
 
 /** Messages from the worker to the client. */
@@ -54,6 +57,9 @@ export type WorkerResponse =
   | { type: 'categoryDone'; id: number }
   | { type: 'properties'; id: number; result: unknown }
   | { type: 'counts'; id: number; result: Record<string, number> }
+  | { type: 'taskGraph'; id: number; result: IfcTaskGraph }
+  | { type: 'organizeIndex'; id: number; result: OrganizeIndex }
+  | { type: 'gridAxes'; id: number; result: IfcGridInfo[] }
   | { type: 'fail'; id: number; message: string };
 
 /** Accumulates meshes worker-side and drains them as one transferable batch. */

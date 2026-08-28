@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
@@ -76,9 +78,91 @@ def test_sweep_never_evicts_a_model_in_use(env) -> None:
     assert store.source_path(keep).exists()
 
 
+def test_reserving_space_refuses_a_quota_overrun(env) -> None:
+    env(IFCVIEWX_STORE_GB="0.000001")
+    recent = "e" * 64
+    store.source_path(recent).write_bytes(b"x" * 800)
+    with pytest.raises(store.StoreError) as excinfo:
+        store.sweep(reserve=800)
+    assert excinfo.value.code == "quota_exceeded"
+
+
+def test_failed_reservation_does_not_partially_evict_old_models(env) -> None:
+    env(IFCVIEWX_STORE_GB="0.000001")  # ~1 KB
+    import os
+
+    old, recent = "1" * 64, "2" * 64
+    store.source_path(old).write_bytes(b"x" * 400)
+    store.source_path(recent).write_bytes(b"x" * 800)
+    stale = time.time() - 9000
+    os.utime(store.source_path(old), (stale, stale))
+
+    with pytest.raises(store.StoreError, match="quota is full"):
+        store.sweep(reserve=400)
+    assert store.source_path(old).is_file(), "an impossible reservation must not evict caches"
+    assert store.source_path(recent).is_file()
+
+
+def test_lease_prevents_eviction_while_a_worker_reads(env) -> None:
+    env(IFCVIEWX_STORE_GB="0.000001")
+    import os
+
+    source = store.source_path(SHA)
+    source.write_bytes(b"x" * 4096)
+    old = time.time() - 9000
+    os.utime(source, (old, old))
+    with store.lease(SHA):
+        store.sweep()
+        assert source.is_file()
+    assert not list(store.models_dir().glob("*.lease"))
+
+
 def test_stats_reports_quota_and_contents(env) -> None:
     store.source_path(SHA).write_bytes(b"x" * 10)
+    store.result_path("deadbeef").write_bytes(b"y" * 5)
     stats = store.stats()
     assert stats["files"] == 1
-    assert stats["bytes"] == 10
+    assert stats["bytes"] == 15
+    assert stats["modelBytes"] == 10
+    assert stats["resultBytes"] == 5
     assert stats["models"][0]["sha"] == SHA
+
+
+def test_unexpired_edit_results_count_toward_the_store_quota(env) -> None:
+    env(IFCVIEWX_STORE_GB=str(100 / 1024**3))
+    store.result_path("deadbeef").write_bytes(b"x" * 80)
+    staging = store.models_dir() / "new-result.part"
+    staging.write_bytes(b"y" * 30)
+    with pytest.raises(store.StoreError, match="quota is full"):
+        store.commit_staging(staging, store.result_path("feedbeef"))
+    assert store.result_path("deadbeef").is_file()
+    assert not store.result_path("feedbeef").exists()
+
+
+def test_concurrent_commits_cannot_claim_the_same_quota(env) -> None:
+    env(IFCVIEWX_STORE_GB=str(100 / 1024**3))
+    barrier = Barrier(2)
+    shas = ("3" * 64, "4" * 64)
+    staging = []
+    for sha in shas:
+        path = store.models_dir() / f"{sha}.test.part"
+        path.write_bytes(b"x" * 60)
+        staging.append(path)
+
+    def publish(index: int) -> str:
+        barrier.wait()
+        try:
+            store.commit_staging(
+                staging[index],
+                store.source_path(shas[index]),
+                keep={shas[index]},
+            )
+            return "published"
+        except store.StoreError as exc:
+            return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(publish, range(2)))
+
+    assert sorted(outcomes) == ["published", "quota_exceeded"]
+    assert sum(path.stat().st_size for path in store.models_dir().glob("*.ifc")) == 60

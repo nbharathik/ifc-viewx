@@ -6,24 +6,24 @@
 </p>
 
 <p align="center">
-  Fast, private IFC viewing. Files never leave your machine.
+  Fully private IFC viewing. No uploads, analytics or tracking.
+  <br>
+  Everything runs locally and files never leave your machine. Drop an IFC file to get started.
   <br>
   <a href="https://nbharathik.github.io/ifc-viewx/"><strong>Open the viewer</strong></a>
   &middot;
   <a href="https://nbharathik.github.io/ifc-viewx/docs/">Docs</a>
 </p>
 
-Drop an IFC file on it. Nothing to install, nothing uploaded.
-
 ## What it does
 
 * Model tree, properties, quantities and schedules
-* Measurements, section planes, 2D plans, saved viewpoints
-* Quality checks and IDS validation
+* Measurements, section planes, 2D plans and saved viewpoints
+* Quality checks, IFC conformance and IDS validation
 * Editing with diffs, undo and redo
-* Clash detection, quantity takeoff, model compare, BCF issues
+* Quantity takeoff, room data and BCF issues
 * Python console with real IfcOpenShell
-* Optional AI assistant, using your own Claude, OpenAI, OpenRouter or local model
+* Optional AI assistant using your own provider
 
 ## Install it locally
 
@@ -40,13 +40,13 @@ See [Local Studio](https://nbharathik.github.io/ifc-viewx/docs/local-studio/).
 
 ## Plugins
 
-Here are some of the plugins that ship with the viewer, and a few that need Local Studio. 
+These are the plugins and built-in tools available in this release.
 
 | In the browser | Local Studio | Built into the app |
 | --- | --- | --- |
-| Clash Detection, Element Explorer, Model Compare, Python Console, Quantity Takeoff, Storey Navigator | Assistant Key Vault, IfcOpenShell Converter, MCP Bridge, Native Python | Element Schedules, IDS Validation, Issue Tracker, Model Checks, Model Edits, Smart Filters |
+| Element Explorer, Python Console, Quantity Takeoff, Room Book, Storey Navigator | Assistant Key Vault, IfcOpenShell Converter, MCP Bridge, Native Python | Element Schedules, IDS Validation, Issue Tracker, Model Checks, Model Edits, Smart Filters |
 
-Want to build a plugin? See [Writing a plugin](https://nbharathik.github.io/ifc-viewx/docs/plugins/) and [working on the repo](https://nbharathik.github.io/ifc-viewx/docs/contributing/).
+See the [available tools](https://nbharathik.github.io/ifc-viewx/docs/plugins/catalog/).
 
 ## License
 

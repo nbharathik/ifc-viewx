@@ -11,10 +11,10 @@
 // has nothing to pair, so the badge in the top bar is a statement of where you
 // are, not a switch. It opens a popover with the one action that state needs:
 // how to get Local Studio, or what this Local Studio is doing.
-import { closeLayer, h, icon, iconButton, lightDismiss, openLayer, toast } from "./kit.js";
+import { closeLayer, copyText, h, icon, iconButton, lightDismiss, openLayer } from "./kit.js";
 import type { ServiceClient, ServiceMode } from "../bridge/serviceClient.js";
 
-export const INSTALL_CMD = "pip install ifcviewx\nifcviewx";
+export const INSTALL_CMD = "pip install ifcviewx";
 
 interface Feature {
   id: string;
@@ -142,7 +142,7 @@ export class Connection {
       rows.push(
         h("div", { class: "pop-title", text: "Web Studio" }),
         h("p", { class: "note", text: "Everything runs in this tab. Nothing is uploaded, nothing is installed." }),
-        h("p", { class: "note", text: "Local Studio is a separate app. Install it and it opens its own copy of this viewer from your machine, with conversion, native Python and the MCP bridge already on. This tab is not involved and never reaches your machine." }),
+        h("p", { class: "note", text: "Local Studio is a separate app. Install it and it opens its own copy of this viewer from your machine, with conversion, native Python and the MCP bridge already on. " }),
         h("div", { class: "row" }, [this.copyButton(), this.moreLink()]),
       );
     }
@@ -158,7 +158,7 @@ export class Connection {
   private copyButton(): HTMLElement {
     const copy = h("button", { class: "btn sm accent", type: "button", text: "Copy install command" });
     copy.addEventListener("click", () => {
-      void navigator.clipboard?.writeText(INSTALL_CMD).then(() => toast("Install command copied", "success"));
+      void copyText(INSTALL_CMD, "Install command copied");
     });
     return copy;
   }

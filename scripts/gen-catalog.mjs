@@ -8,59 +8,63 @@ import { transform } from "esbuild";
 
 const PLUGINS = join("src", "plugins");
 const OUT = join("docs", "plugins", "catalog.md");
-const STUB = "const definePlugin = (m) => m;";
-
-/** Strips the types and swaps the SDK import for a definePlugin that is identity. */
 async function evaluate(source) {
   const { code } = await transform(source, { loader: "ts", format: "esm" });
-  const js = code.replace(/import\s*\{[^}]*\}\s*from\s*["']@ifcviewx\/sdk["'];?/g, STUB);
-  return import(`data:text/javascript,${encodeURIComponent(js)}`);
+  return import(`data:text/javascript,${encodeURIComponent(code)}`);
 }
+
+const release = await evaluate(await readFile(join("src", "app", "release.ts"), "utf8"));
 
 const found = [];
 for (const entry of await readdir(PLUGINS, { withFileTypes: true })) {
   if (!entry.isDirectory() || entry.name === "runtime") continue;
-  const source = await readFile(join(PLUGINS, entry.name, "manifest.ts"), "utf8").catch(() => null);
-  if (source) found.push((await evaluate(source)).default);
+  const manifestText = await readFile(join(PLUGINS, entry.name, "extension.json"), "utf8").catch(() => null);
+  if (!manifestText) continue;
+  const manifest = JSON.parse(manifestText);
+  if (!release.isReleasePluginVisible(manifest.id)) continue;
+  found.push({
+    id: manifest.id,
+    name: manifest.name,
+    tier: "web",
+    tagline: manifest.catalog.tagline,
+    about: manifest.catalog.about,
+    icon: manifest.catalog.icon,
+    category: manifest.catalog.category,
+    keywords: manifest.catalog.keywords,
+    does: manifest.catalog.does,
+    author: manifest.publisher?.name,
+    url: manifest.publisher?.url,
+  });
 }
-found.push(...(await evaluate(await readFile(join(PLUGINS, "shortcuts.ts"), "utf8"))).SHORTCUTS);
+found.push(...(await evaluate(await readFile(join(PLUGINS, "shortcuts.ts"), "utf8"))).SHORTCUTS
+  .filter((plugin) => release.isReleasePluginVisible(plugin.id)));
 found.sort((a, b) => a.name.localeCompare(b.name));
 
 const TIERS = [
-  ["web", "In the browser", "These run in the tab. Nothing to install, nothing uploaded."],
-  ["local", "Local Studio", "These need the local service, which is one `pip install` away."],
-  ["core", "Built into the app", "These have their own panel on the rail rather than being opened from the catalog."],
+  ["web", "Viewer plugins", "Available from **Plugins** in the viewer."],
+  ["core", "Built-in tools", "Available directly from the viewer."],
+  ["local", "Local Studio", "Available after installing Local Studio."],
 ];
 
 const section = ([tier, title, blurb]) => {
   const list = found.filter((plugin) => plugin.tier === tier);
   if (!list.length) return "";
-  const entries = list.map((plugin) => {
-    const credit = plugin.author ? `\nBy ${plugin.url ? `[${plugin.author}](${plugin.url})` : plugin.author}.\n` : "";
-    return [
-      `### ${plugin.name}${plugin.soon ? " *(planned)*" : ""}`,
-      "",
-      `*${plugin.tagline}*`,
-      "",
-      plugin.about,
-      "",
-      ...plugin.does.map((line) => `- ${line}`),
-      credit,
-      `<small>Category: ${plugin.category}${plugin.capability ? ` &middot; Needs: \`${plugin.capability}\`` : ""}</small>`,
-      "",
-    ].join("\n");
-  });
-  return [`## ${title}`, "", blurb, "", ...entries].join("\n");
+  return [
+    `## ${title}`,
+    "",
+    blurb,
+    "",
+    ...list.flatMap((plugin) => [`**${plugin.name}.** ${plugin.tagline}.`, ""]),
+  ].join("\n");
 };
 
 const page = [
-  "# Plugin catalog",
+  "# Available tools in 0.1.2",
   "",
-  "Everything in the viewer's plugin browser, generated from the manifests.",
-  "Yours belongs here too: see [writing a plugin](index.md).",
+  "This page lists the tools available in the planned 0.1.2 release. Each one runs in the browser or through Local Studio.",
   "",
   ...TIERS.map(section).filter(Boolean),
 ].join("\n");
 
-await writeFile(OUT, `${page}\n`);
+await writeFile(OUT, `${page.trimEnd()}\n`);
 console.log(`Wrote ${OUT} with ${found.length} plugin(s).`);

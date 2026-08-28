@@ -43,6 +43,14 @@ export const nextFrame = (): Promise<void> =>
     });
   });
 
+/** The heading every panel opens with: what it does, plus an optional tag. */
+export function header(title: string, sub: string, tag = ""): HTMLElement {
+  return h("header", { class: "plug-head" }, [
+    h("div", { class: "grow" }, [h("h3", { text: title }), h("p", { text: sub })]),
+    ...(tag ? [h("span", { class: "plug-tag", text: tag })] : []),
+  ]);
+}
+
 /** A row of controls across the top of a panel. Strings become labels. */
 export function bar(...children: Array<Node | string>): HTMLElement {
   return h("div", { class: "plug-bar" }, children.map((c) =>
@@ -104,7 +112,14 @@ export interface Progress {
 export function progress(): Progress {
   const fill = h("i");
   const text = h("span", { class: "plug-progress-text" });
-  const root = h("div", { class: "plug-progress hidden" }, [
+  const root = h("div", {
+    class: "plug-progress hidden",
+    role: "progressbar",
+    "aria-label": "Progress",
+    "aria-valuemin": "0",
+    "aria-valuemax": "100",
+    "aria-valuenow": "0",
+  }, [
     h("div", { class: "plug-progress-track" }, [fill]),
     text,
   ]);
@@ -112,9 +127,12 @@ export function progress(): Progress {
     root,
     set(done, total, label) {
       root.classList.remove("hidden");
-      const percent = total > 0 ? Math.round((done / total) * 100) : 0;
+      const percent = total > 0 ? Math.max(0, Math.min(100, Math.round((done / total) * 100))) : 0;
+      const valueText = label ?? `${done.toLocaleString()} of ${total.toLocaleString()}`;
       fill.style.width = `${percent}%`;
-      text.textContent = label ?? `${done.toLocaleString()} of ${total.toLocaleString()}`;
+      text.textContent = valueText;
+      root.setAttribute("aria-valuenow", String(percent));
+      root.setAttribute("aria-valuetext", valueText);
     },
     hide() {
       root.classList.add("hidden");
@@ -135,33 +153,94 @@ export function stats(items: Array<[string, string, string?]>): HTMLElement {
 export interface GridRow {
   cells: Array<Value>;
   pick?: () => void;
+  /** Accessible name for the row action. Derived from its cells when omitted. */
+  pickLabel?: string;
   tone?: "err" | "warn" | "ok";
   title?: string;
 }
 
+export interface GridSort {
+  column: number;
+  direction: "ascending" | "descending";
+}
+
 /** A scrollable table with sticky headers; numbers align and format themselves. */
-export function grid(headers: string[], rows: GridRow[], onSort?: (column: number) => void): HTMLElement {
+export function grid(
+  headers: string[],
+  rows: GridRow[],
+  onSort?: (column: number) => void,
+  sort?: GridSort,
+): HTMLElement {
   const head = h("tr", {}, headers.map((label, column) => {
-    const cell = h("th", { text: label });
-    if (onSort) {
-      cell.classList.add("sortable");
-      cell.addEventListener("click", () => onSort(column));
+    const cell = h("th", { scope: "col" });
+    if (!onSort) {
+      cell.textContent = label;
+      return cell;
     }
+    cell.classList.add("sortable");
+    if (sort?.column === column) cell.setAttribute("aria-sort", sort.direction);
+    const trigger = h("button", { class: "grid-sort", type: "button", text: label });
+    trigger.addEventListener("click", () => {
+      const next = cell.getAttribute("aria-sort") === "ascending" ? "descending" : "ascending";
+      for (const other of cell.parentElement?.querySelectorAll<HTMLElement>("th[aria-sort]") ?? []) {
+        other.removeAttribute("aria-sort");
+      }
+      cell.setAttribute("aria-sort", next);
+      onSort(column);
+    });
+    cell.appendChild(trigger);
     return cell;
   }));
   const body = h("tbody");
+  const pickButtons: HTMLButtonElement[] = [];
+  const focusPickButton = (next: number): void => {
+    const at = Math.max(0, Math.min(pickButtons.length - 1, next));
+    for (const [index, item] of pickButtons.entries()) item.tabIndex = index === at ? 0 : -1;
+    pickButtons[at]?.focus();
+  };
   for (const row of rows) {
     const tr = h("tr", { class: row.tone ?? "", title: row.title ?? "" });
-    for (const value of row.cells) {
+    const pickIndex = row.pick ? pickButtons.length : -1;
+    const summary = row.cells
+      .map((part) => String(part ?? "").trim())
+      .filter(Boolean)
+      .slice(0, 3)
+      .join(", ");
+    const pick = (): void => {
+      for (const [index, item] of pickButtons.entries()) item.tabIndex = index === pickIndex ? 0 : -1;
+      row.pick?.();
+    };
+    for (const [column, value] of row.cells.entries()) {
       const numeric = typeof value === "number";
-      tr.appendChild(h("td", {
+      const cell = h("td", {
         class: numeric ? "num" : "",
         text: numeric ? formatNumber(value) : String(value ?? ""),
-      }));
+      });
+      if (row.pick && column === 0) {
+        const button = h("button", {
+          class: "grid-row-action",
+          type: "button",
+          tabindex: pickIndex === 0 ? "0" : "-1",
+          "aria-label": row.pickLabel ?? `Select row${summary ? `: ${summary}` : ""}`,
+        }, [...cell.childNodes]);
+        button.addEventListener("keydown", (event) => {
+          const next = event.key === "ArrowDown" ? pickIndex + 1
+            : event.key === "ArrowUp" ? pickIndex - 1
+              : event.key === "Home" ? 0
+                : event.key === "End" ? pickButtons.length - 1
+                  : null;
+          if (next === null) return;
+          event.preventDefault();
+          focusPickButton(next);
+        });
+        cell.replaceChildren(button);
+        pickButtons.push(button);
+      }
+      tr.appendChild(cell);
     }
     if (row.pick) {
       tr.classList.add("pick");
-      tr.addEventListener("click", row.pick);
+      tr.addEventListener("click", pick);
     }
     body.appendChild(tr);
   }

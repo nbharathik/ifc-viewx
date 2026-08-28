@@ -5,9 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark light" />
     <title>IFCViewX</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <meta name="theme-color" content="#0b0c0e" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="apple-touch-icon" href="./icon.svg" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64' width='64' height='64' role='img' aria-label='IFCViewX'><rect x='0.00' y='0.00' width='64.00' height='64.00' rx='14.40' fill='%230f1115'/><polygon points='9.28%2C45.12 32.00%2C58.24 32.00%2C32.00 9.28%2C18.88' fill='%233b82f6'/><polygon points='54.72%2C45.12 32.00%2C58.24 32.00%2C32.00 54.72%2C18.88' fill='%231e5bd0'/><polygon points='32.00%2C5.76 54.72%2C18.88 32.00%2C32.00 9.28%2C18.88' fill='%2393b9fb'/><polyline points='54.72%2C32.00 32.00%2C45.12' stroke='%233b82f6' stroke-width='3.20' fill='none'/><polyline points='9.28%2C32.00 32.00%2C45.12' stroke='%2393b9fb' stroke-width='3.20' fill='none'/></svg>" />
     <script>
-      document.documentElement.dataset.theme = localStorage.getItem("ifcviewx.theme") || "dark";
+      // Storage can be unavailable in privacy-restricted or sandboxed tabs. A
+      // blocked preference must not stop the application module from loading.
+      let initialTheme = "dark";
+      try {
+        if (localStorage.getItem("ifcviewx.theme") === "light") initialTheme = "light";
+      } catch {
+        // Keep the deterministic default.
+      }
+      document.documentElement.dataset.theme = initialTheme;
     </script>
     <style>
       /* The brand lives here, not in styles.css, because the splash paints
@@ -81,7 +95,7 @@
               <h1 class="dz-title">IFCViewX</h1>
               <p class="dz-sub">Fast, private IFC viewing. Files never leave this machine.</p>
               <button id="btn-open-first" type="button" class="btn primary lg">Open IFC file</button>
-              <p class="dz-hint">or drop a file anywhere</p>
+              <p class="dz-hint">or drop a file anywhere, or <button id="btn-sample" type="button" class="link-btn">try a sample building</button></p>
               <div class="dz-recent hidden" id="recent">
                 <div class="dz-recent-title">Recent</div>
                 <div id="recent-list"></div>
@@ -110,10 +124,9 @@
           </div>
           <div class="panel-body" id="tab-properties" role="tabpanel" tabindex="0" aria-labelledby="rail-properties"></div>
           <div class="panel-body hidden" id="tab-filters" role="tabpanel" tabindex="0" aria-labelledby="rail-filters"></div>
-          <div class="panel-body hidden" id="tab-ids" role="tabpanel" tabindex="0" aria-labelledby="rail-ids"></div>
+          <div class="panel-body hidden" id="tab-geo" role="tabpanel" tabindex="0" aria-labelledby="rail-geo"></div>
           <div class="panel-body hidden" id="tab-bcf" role="tabpanel" tabindex="0" aria-labelledby="rail-bcf"></div>
           <div class="panel-body hidden" id="tab-assistant" role="tabpanel" tabindex="0" aria-labelledby="rail-assistant"></div>
-          <div class="panel-body hidden" id="tab-schedule" role="tabpanel" tabindex="0" aria-labelledby="rail-schedule"></div>
           <div class="panel-body hidden" id="tab-plugins" role="tabpanel" tabindex="0" aria-labelledby="rail-plugins"></div>
           <div class="panel-body hidden" id="tab-activity" role="tabpanel" tabindex="0" aria-labelledby="rail-activity"></div>
         </aside>
@@ -139,6 +152,7 @@
           </select>
         </div>
         <label class="field check"><input type="checkbox" id="set-adaptive" checked  aria-describedby="set-adaptive-tip" /><span class="field-label">Adaptive resolution<span class="tip" id="set-adaptive-tip">Drops resolution while orbiting heavy scenes.</span></span></label>
+        <label class="field check"><input type="checkbox" id="set-lod" checked  aria-describedby="set-lod-tip" /><span class="field-label">Skip tiny objects<span class="tip" id="set-lod-tip">Stops drawing repeated parts smaller than a couple of pixels. On a services model this is a third of the draw calls.</span></span></label>
         <label class="field check"><input type="checkbox" id="set-doubleside" checked  aria-describedby="set-doubleside-tip" /><span class="field-label">Double-sided surfaces<span class="tip" id="set-doubleside-tip">Turn off for roughly double the fill rate; some models show holes.</span></span></label>
         <label class="field check"><input type="checkbox" id="set-aa" checked  aria-describedby="set-aa-tip" /><span class="field-label">Antialiasing<span class="tip" id="set-aa-tip">Applies after reload.</span></span></label>
         <label class="field check"><input type="checkbox" id="set-hud"  aria-describedby="set-hud-tip" /><span class="field-label">Performance HUD<span class="tip" id="set-hud-tip">Live render cost, draw calls and load timings.</span></span></label>
@@ -166,6 +180,9 @@
         </div>
         <label class="field check"><input type="checkbox" id="set-convert" checked  aria-describedby="set-convert-tip" /><span class="field-label">Offer conversion for heavy models<span class="tip" id="set-convert-tip">web-ifc draws every file here. On a large or brep-heavy model, IfcOpenShell converts it once to .ifcx through Local Studio and every reopen is instant.</span></span></label>
         <p class="note">Viewing, checks, schedules, filters, IDS, issues and model edits all run in this tab and never need it.</p>
+
+        <div class="group-title">Your data</div>
+        <div id="privacy-panel"></div>
       </div>
       <div class="dlg-foot"><button class="btn primary" id="settings-done" type="button">Done</button></div>
     </dialog>
@@ -177,6 +194,10 @@
           <section>
             <div class="group-title">Camera</div>
             <div class="key-row"><span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd></span>Front, right, top, isometric</div>
+            <div class="key-row"><span><kbd>5</kbd></span>Orthographic projection on or off</div>
+            <div class="key-row"><span><kbd>6</kbd></span>Fly mode (WASD, Q/E, Shift, wheel; Esc exits)</div>
+            <div class="key-row"><span><kbd>[</kbd><kbd>]</kbd></span>Rotate the view a quarter turn</div>
+            <div class="key-row"><span><kbd>N</kbd></span>Perpendicular to the picked face</div>
             <div class="key-row"><span><kbd>F</kbd></span>Frame model</div>
             <div class="key-row"><span><kbd>Shift</kbd><kbd>F</kbd></span>Frame selection</div>
             <div class="key-row"><span>Double click</span>Frame element</div>
@@ -188,12 +209,15 @@
             <div class="key-row"><span><kbd>I</kbd></span>Isolate selection</div>
             <div class="key-row"><span><kbd>H</kbd></span>Hide selection</div>
             <div class="key-row"><span><kbd>A</kbd></span>Show all</div>
+            <div class="key-row"><span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>Z</kbd></span>Undo the last hide or isolate</div>
+            <div class="key-row"><span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>Y</kbd></span>Redo it</div>
             <div class="key-row"><span><kbd>Esc</kbd></span>Clear selection, or drop the span then the measure tool</div>
             <div class="key-row"><span>Right click</span>Element actions</div>
           </section>
           <section>
             <div class="group-title">Tools</div>
             <div class="key-row"><span><kbd>M</kbd></span>Measure: click twice or drag; right-drag orbits</div>
+            <div class="key-row"><span><kbd>Backspace</kbd></span>Undo the last measure point or object</div>
             <div class="key-row"><span><kbd>X</kbd></span>Section planes (X, Y, Z)</div>
             <div class="key-row"><span><kbd>G</kbd></span>2D plan inset</div>
             <div class="key-row"><span><kbd>S</kbd></span>Screenshot</div>
@@ -219,7 +243,10 @@
       <div class="dlg-foot"><button class="btn primary" id="help-done" type="button">Close</button></div>
     </dialog>
 
-    <input id="file-input" type="file" accept=".ifc,.ifcx" hidden />
+    <input id="file-input" type="file" accept=".ifc,.ifcx,.ifcpkg" hidden />
+    <!-- Separate from file-input so opening and adding cannot share a change
+         handler and one path silently replace the model the other added. -->
+    <input id="attach-input" type="file" accept=".ifc,.ifcx" hidden />
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

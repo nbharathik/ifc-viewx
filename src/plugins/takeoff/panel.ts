@@ -4,10 +4,9 @@
 // coverage column says how much of a row is real so nobody quotes an estimate
 // by accident.
 import {
-  bar, button, copyTable, emptyState, grid, h, hint, note, page, progress, saveCsv, select, stats,
-  type ElementRow, type GridRow,
+  bar, button, copyTable, emptyState, grid, h, header, hint, note, page, progress, saveXlsx, select, stats, toCsv,
+  type ElementRow, type ExtensionContext, type GridRow,
 } from "@ifcviewx/sdk";
-import type { PluginContext } from "@ifcviewx/sdk";
 
 /** Quantity names in priority order; the first one present wins. */
 const VOLUME = ["NetVolume", "GrossVolume", "Volume"];
@@ -29,8 +28,8 @@ interface Group {
   authored: number;
 }
 
-export function mount(host: HTMLElement, ctx: PluginContext): void {
-  let groupBy = ctx.read<GroupBy>("groupBy", "type");
+export function mount(host: HTMLElement, ctx: ExtensionContext): void {
+  let groupBy = ctx.storage.read<GroupBy>("groupBy", "type");
   let rows: ElementRow[] = [];
   let busy = false;
 
@@ -38,16 +37,18 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
   const summary = h("div", {});
   const table = h("div", { class: "plug-results" });
   const root = page(
+    header("Quantity takeoff", "Volumes, areas and counts rolled up by class and storey."),
     bar(
       select([["type", "By class"], ["storey", "By storey"], ["both", "Class and storey"]], groupBy, (value) => {
         groupBy = value as GroupBy;
-        ctx.write("groupBy", groupBy);
+        ctx.storage.write("groupBy", groupBy);
         paint();
       }),
       button("Rebuild", () => void load(true)),
-      button("Show all", () => ctx.showAll()),
+      button("Show all", () => ctx.view.showAll()),
       button("CSV", () => exportCsv()),
-      button("Copy", () => (rows.length ? copyTable(REPORT, reportRows()) : ctx.log("Nothing to copy yet", "error"))),
+      button("XLSX", () => void exportXlsx()),
+      button("Copy", () => (rows.length ? copyTable(REPORT, reportRows()) : ctx.feedback.log("Nothing to copy yet", "error"))),
     ),
     hint("info", "Volume, area and length are the file's own authored quantities, in the file's own units. Box m³ is measured from the geometry instead, and Coverage says how much of the row is authored."),
     status.root,
@@ -57,17 +58,17 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
 
   const load = async (force = false): Promise<void> => {
     if (busy) return;
-    const index = ctx.index();
+    const index = ctx.model.index();
     if (force) index.invalidate();
-    if (!ctx.model().loaded) {
+    if (!ctx.session.model().loaded) {
       table.replaceChildren(emptyState("cube", "No model loaded", "Open an IFC file to take off quantities."));
       return;
     }
     busy = true;
     status.set(0, 1, "Reading quantities");
-    const key = ctx.model().key;
+    const key = ctx.session.model().key;
     rows = await index.build((done, total) => status.set(done, total, `Reading quantities ${done.toLocaleString()} of ${total.toLocaleString()}`));
-    if (key !== ctx.model().key) {
+    if (key !== ctx.session.model().key) {
       busy = false;
       return void load();
     }
@@ -136,8 +137,8 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
       ],
       title: `Isolate ${group.count} element(s)`,
       pick: () => {
-        ctx.isolate(group.ids);
-        ctx.log(`Isolated ${group.count.toLocaleString()} element(s) in ${group.key}`);
+        ctx.view.isolate(group.ids);
+        ctx.feedback.log(`Isolated ${group.count.toLocaleString()} element(s) in ${group.key}`);
       },
     }));
     table.replaceChildren(grid(["Group", "Count", "Volume m³", "Area m²", "Length m", "Box m³", "Coverage"], gridRows));
@@ -158,11 +159,22 @@ export function mount(host: HTMLElement, ctx: PluginContext): void {
     ]);
 
   const exportCsv = (): void => {
-    if (rows.length === 0) return void ctx.log("Nothing to export yet", "error");
-    saveCsv(`takeoff-${ctx.model().name || "model"}.csv`, REPORT, reportRows());
+    if (rows.length === 0) return void ctx.feedback.log("Nothing to export yet", "error");
+    const csv = toCsv(REPORT, reportRows());
+    ctx.files.export("takeoff.csv", `takeoff-${ctx.session.model().name || "model"}.csv`, `\uFEFF${csv}`, "text/csv");
   };
 
-  ctx.on("model", () => {
+  const exportXlsx = async (): Promise<void> => {
+    if (rows.length === 0) return void ctx.feedback.log("Nothing to export yet", "error");
+    const name = `takeoff-${ctx.session.model().name || "model"}.xlsx`;
+    try {
+      await saveXlsx(name, REPORT, reportRows(), { sheet: "Takeoff" });
+    } catch {
+      ctx.feedback.log("The spreadsheet could not be written", "error");
+    }
+  };
+
+  ctx.events.on("model", () => {
     rows = [];
     paint();
     void load();
@@ -184,8 +196,8 @@ function pick(row: ElementRow, names: string[]): number | null {
   return null;
 }
 
-function boxVolume(ctx: PluginContext, id: number): number {
-  const bounds = ctx.bounds(id);
+function boxVolume(ctx: ExtensionContext, id: number): number {
+  const bounds = ctx.model.bounds(id);
   if (!bounds) return 0;
   return (
     Math.max(0, bounds.max.x - bounds.min.x) *

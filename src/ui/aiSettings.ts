@@ -5,6 +5,7 @@
 // standalone function: the panel shows the same ones inline before anything is
 // configured, so a first run never opens a dialog on its own.
 import { attachTip, h, icon, iconButton, infoIcon, lightDismiss, toast } from "./kit.js";
+import { LLM_SETTINGS_KEY } from "./privacy.js";
 import {
   PROVIDERS,
   findProvider,
@@ -23,6 +24,7 @@ import {
   type ToolAvailability,
   type ToolTier,
 } from "../llm/tools.js";
+import { isReleaseAssistantCapabilityVisible } from "../app/release.js";
 
 /** What the verify line is saying, which decides its icon and its colour. */
 type VerifyState = "idle" | "busy" | "ok" | "fail";
@@ -50,6 +52,15 @@ export interface AiSettingsActions {
   openConsole(): void;
   /** Open the Studio dialog, which says what Local Studio adds. */
   openLocal(): void;
+  extensionTools?(): AssistantExtensionToolView[];
+  setExtensionTool?(owner: string, id: string, enabled: boolean): void;
+}
+
+export interface AssistantExtensionToolView {
+  owner: string;
+  id: string;
+  capability: string;
+  enabled: boolean;
 }
 
 export class AssistantSettings {
@@ -131,7 +142,7 @@ export class AssistantSettings {
   setToolState(state: ToolAvailability): void {
     const blocks: HTMLElement[] = [];
     for (const tier of ["viewer", "edit"] as ToolTier[]) {
-      const rows = TOOLS.filter((tool) => tool.tier === tier);
+      const rows = TOOLS.filter((tool) => tool.tier === tier && isReleaseAssistantCapabilityVisible(tool.name));
       const blocked = rows.map((tool) => toolBlocker(tool, state));
       // One reason for the whole tier is said once, next to the heading.
       // Repeating "open a model" down thirteen rows is noise, not information.
@@ -155,8 +166,33 @@ export class AssistantSettings {
         ]),
       );
     }
+    const extensions = this.extensionGroup();
+    if (extensions) blocks.push(extensions);
     blocks.push(this.extrasGroup(state.localCaps));
     this.toolsHost.replaceChildren(...blocks);
+  }
+
+  private extensionGroup(): HTMLElement | null {
+    const rows = this.actions.extensionTools?.() ?? [];
+    if (rows.length === 0) return null;
+    return h("div", { class: "tool-sec assistant-extension-tools" }, [
+      h("div", { class: "tool-title" }, [
+        h("span", { text: "Extension tools" }),
+        infoIcon("Disabled by default. Enabling one lets the assistant call that registered capability."),
+      ]),
+      ...rows.map((row) => {
+        const input = h("input", { type: "checkbox" }) as HTMLInputElement;
+        input.checked = row.enabled;
+        input.addEventListener("change", () => this.actions.setExtensionTool?.(row.owner, row.id, input.checked));
+        return h("label", { class: "assistant-extension-tool" }, [
+          input,
+          h("span", { class: "grow" }, [
+            h("span", { class: "tool-extension-name", text: row.capability }),
+            h("span", { class: "note", text: row.owner }),
+          ]),
+        ]);
+      }),
+    ]);
   }
 
   /**
@@ -383,7 +419,13 @@ export function connectionFields(onChange: () => void): HTMLElement[] {
     h("label", { class: "field" }, [
       h("span", { class: "field-label" }, [
         h("span", { text: "API key" }),
-        h("span", { class: "hint", text: "Kept in this browser only." }),
+        // Named exactly, not described vaguely: a user who wants to check or
+        // remove it can find it, and Settings has the button that does it.
+        h("span", { class: "hint" }, [
+          h("span", { text: "Stored in this browser under " }),
+          h("code", { text: LLM_SETTINGS_KEY }),
+          h("span", { text: ". Sent only to the provider above. Delete it under Settings, Your data." }),
+        ]),
       ]),
       apiKey,
     ]),

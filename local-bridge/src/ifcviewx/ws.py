@@ -19,7 +19,8 @@ class BrowserHub:
         self.token = token
         self._loop: asyncio.AbstractEventLoop | None = None
         self._conn: Any = None
-        self._pending: dict[int, asyncio.Future] = {}
+        self._generation = 0
+        self._pending: dict[int, tuple[int, asyncio.Future]] = {}
         self._ids = itertools.count(1)
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -30,7 +31,15 @@ class BrowserHub:
 
     async def serve(self, websocket: Any) -> None:
         """Own an accepted socket until it closes, resolving pending calls."""
+        previous = self._conn
+        self._generation += 1
+        generation = self._generation
         self._conn = websocket
+        if previous is not None and previous is not websocket:
+            try:
+                await previous.close(code=1012)
+            except Exception:  # noqa: BLE001 - replacement must still take ownership
+                pass
         try:
             while True:
                 raw = await websocket.receive_text()
@@ -38,18 +47,29 @@ class BrowserHub:
                     message = json.loads(raw)
                 except ValueError:
                     continue
-                future = self._pending.pop(message.get("id"), None)
-                if future is not None and not future.done():
+                if not isinstance(message, dict):
+                    continue
+                entry = self._pending.get(message.get("id"))
+                if entry is None or entry[0] != generation:
+                    continue
+                _, future = entry
+                self._pending.pop(message.get("id"), None)
+                if not future.done():
                     future.set_result(message)
         finally:
             if self._conn is websocket:
                 self._conn = None
             # Nothing will answer these now; waiting out the full timeout only
             # makes an MCP client look hung after the tab has already closed.
-            for future in list(self._pending.values()):
+            abandoned = [
+                (call_id, future)
+                for call_id, (owner, future) in self._pending.items()
+                if owner == generation
+            ]
+            for call_id, future in abandoned:
+                self._pending.pop(call_id, None)
                 if not future.done():
                     future.set_exception(RuntimeError("the viewer tab disconnected"))
-            self._pending.clear()
 
     def call(self, method: str, params: dict | None = None, timeout: float = 120.0) -> Any:
         """Thread-safe request to the browser. Raises on transport problems;
@@ -63,6 +83,7 @@ class BrowserHub:
 
     async def _call(self, method: str, params: dict, timeout: float) -> Any:
         socket = self._conn
+        generation = self._generation
         if socket is None:
             raise ConnectionError(
                 "no browser connected: open the viewer and connect it to this service"
@@ -70,7 +91,7 @@ class BrowserHub:
         call_id = next(self._ids)
         assert self._loop is not None
         pending: asyncio.Future = self._loop.create_future()
-        self._pending[call_id] = pending
+        self._pending[call_id] = (generation, pending)
         try:
             await socket.send_text(json.dumps({"id": call_id, "method": method, "params": params}))
             reply = await asyncio.wait_for(pending, timeout)

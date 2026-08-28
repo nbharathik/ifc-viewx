@@ -1,0 +1,61 @@
+{
+  "manifestVersion": 2,
+  "id": "schedule-4d",
+  "name": "4D Schedule",
+  "version": "1.0.0",
+  "sdk": ">=2.0.0 <3",
+  "description": "Connect IFC task graphs and imported schedules to a federated construction timeline.",
+  "runtime": {
+    "kind": "bundled",
+    "entry": "panel.ts"
+  },
+  "activationEvents": ["onPanel:schedule-4d"],
+  "permissions": [
+    "model.summary.read",
+    "model.structure.read",
+    "model.properties.read",
+    "model.index.build",
+    "view.read",
+    "view.control",
+    "review.issue.create",
+    "viewport.capture",
+    "file.open",
+    "file.export",
+    "storage.extension"
+  ],
+  "contributes": {
+    "panels": [
+      { "id": "schedule-4d", "title": "4D Schedule", "icon": "clock" }
+    ],
+    "analyses": [
+      { "id": "schedule-4d.progress", "title": "Planned versus actual progress", "capability": "schedule", "resultView": "schedule-4d.results" }
+    ],
+    "resultViews": [
+      { "id": "schedule-4d.results", "title": "4D progress report" }
+    ],
+    "importers": [
+      { "id": "schedule-4d.csv", "title": "Schedule CSV", "accepts": [".csv", ".tsv", "text/csv", "text/tab-separated-values"] },
+      { "id": "schedule-4d.mapping", "title": "4D mapping", "accepts": [".json", "application/json"] }
+    ],
+    "exporters": [
+      { "id": "schedule-4d.mapping", "title": "4D task mapping", "mimeTypes": ["application/json"] },
+      { "id": "schedule-4d.report", "title": "4D progress report", "mimeTypes": ["text/csv"] }
+    ]
+  },
+  "catalog": {
+    "tagline": "Turn IFC tasks and schedule CSVs into a live construction sequence",
+    "about": "Reads native IfcWorkSchedule, IfcTask, IfcTaskTime, sequence and product relationships in the parser worker. Overlay external dates and progress, map tasks without changing the IFC, scrub or play the federated model timeline, compare planned and actual delivery, and hand delayed states to BCF.",
+    "icon": "clock",
+    "category": "Planning",
+    "keywords": "4d schedule gantt task timeline construction progress planned actual delay IfcTask IfcTaskTime federation bcf csv",
+    "does": [
+      "Native IFC work schedules, task hierarchy, task time, dependencies and product links",
+      "CSV schedule overlay by task ID with planned and actual dates and progress",
+      "Task mapping by GlobalId, current selection, saved selection set or class and storey filter",
+      "Gantt view, date scrubber, playback and planned, active, delayed and completed model colours",
+      "Planned versus actual variance with federated discipline filtering",
+      "Mapping JSON and progress CSV export without modifying the IFC",
+      "BCF issue creation from any delayed task or selected construction state"
+    ]
+  }
+}

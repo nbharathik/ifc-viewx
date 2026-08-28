@@ -1,5 +1,5 @@
-site_name: IFCViewX
-site_description: Fast, private IFC viewing in the browser, with a plugin ecosystem
+site_name: IFCViewX Docs
+site_description: Short guides for the planned IFCViewX 0.1.2 release
 site_url: https://nbharathik.github.io/ifc-viewx/docs/
 repo_url: https://github.com/nbharathik/ifc-viewx
 repo_name: nbharathik/ifc-viewx
@@ -9,9 +9,22 @@ docs_dir: docs
 
 theme:
   name: material
+  language: en
+  icon:
+    logo: material/cube-scan
+    repo: fontawesome/brands/github
   features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
+    - navigation.tracking
     - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
     - content.code.copy
     - content.action.edit
   palette:
@@ -33,19 +46,35 @@ theme:
 markdown_extensions:
   - admonition
   - attr_list
+  - md_in_html
+  - tables
   - toc:
       permalink: true
-  - pymdownx.highlight
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
   - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true
 
+plugins:
+  - search
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/nbharathik/ifc-viewx
+      name: IFCViewX on GitHub
+
 nav:
   - Home: index.md
-  - How the viewer works: how-it-works.md
-  - Plugins:
-      - Writing a plugin: plugins/index.md
-      - SDK reference: plugins/api.md
-      - Catalog: plugins/catalog.md
+  - Assistant: assistant.md
+  - Available tools: plugins/catalog.md
   - Local Studio: local-studio.md
-  - Working on the repo: contributing.md

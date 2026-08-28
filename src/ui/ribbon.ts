@@ -2,10 +2,19 @@
 // commands under it. Tabs are data; every button points at a command id, so
 // the ribbon holds no app state of its own.
 //
-// Collapsed, the strip takes no height and a tab click opens it as a flyout
-// that closes after one command (the PowerPoint behaviour, at a lighter
-// weight). The choice persists.
-import { buildMenu, closeLayer, h, icon, menuKeys, openLayer, type MenuItem } from "./kit.js";
+// Collapsed, the strip takes no height. Selecting a tab expands it in place,
+// so the controls always stay attached to the header. The choice persists.
+import {
+  buildMenu,
+  closeLayer,
+  h,
+  icon,
+  menuKeys,
+  openLayer,
+  safeStorageGet,
+  safeStorageSet,
+  type MenuItem,
+} from "./kit.js";
 import type { CommandRegistry } from "./commands.js";
 
 export interface RibbonControl {
@@ -14,9 +23,16 @@ export interface RibbonControl {
   sync?: () => void;
 }
 
+/**
+ * Two sizes, and every button is labelled. One large button opens a group and
+ * the rest stack small beside it; an unlabelled button next to a labelled one
+ * reads as unfinished, so there is no icon-only size.
+ */
+export type RibbonSize = "lg" | "sm";
+
 export type RibbonItem =
-  | { kind: "cmd"; id: string; size?: "lg" | "sm"; label?: string }
-  | { kind: "menu"; label: string; icon: string; size?: "lg" | "sm"; items: () => MenuItem[] }
+  | { kind: "cmd"; id: string; size?: RibbonSize; label?: string }
+  | { kind: "menu"; label: string; icon: string; size?: RibbonSize; items: () => MenuItem[] }
   | { kind: "control"; build: () => RibbonControl };
 
 export interface RibbonGroup {
@@ -42,8 +58,7 @@ export class Ribbon {
   private readonly controls: RibbonControl[] = [];
   private readonly toggleBtn: HTMLButtonElement;
   private active: string;
-  private collapsed = localStorage.getItem(COLLAPSE_KEY) === "1";
-  private flyout = false;
+  private collapsed = safeStorageGet(COLLAPSE_KEY) === "1";
 
   constructor(
     tabHost: HTMLElement,
@@ -51,6 +66,8 @@ export class Ribbon {
     private readonly registry: CommandRegistry,
     private readonly tabs: RibbonTab[],
   ) {
+    if (!tabHost.hasAttribute("role")) tabHost.setAttribute("role", "tablist");
+    if (!tabHost.hasAttribute("aria-label")) tabHost.setAttribute("aria-label", "Ribbon");
     this.strip = h("div", { class: "rib-strip" });
     this.body.appendChild(this.strip);
 
@@ -62,9 +79,11 @@ export class Ribbon {
         text: tab.label,
         "aria-selected": "false",
         "aria-controls": "ribbon",
+        tabindex: "-1",
       });
       button.addEventListener("click", () => this.onTabClick(tab.id));
       button.addEventListener("dblclick", () => this.setCollapsed(!this.collapsed));
+      button.addEventListener("keydown", (e) => this.onTabKey(e, tab.id));
       this.tabButtons.set(tab.id, button);
       tabHost.appendChild(button);
     }
@@ -78,20 +97,20 @@ export class Ribbon {
     this.toggleBtn.addEventListener("click", () => this.setCollapsed(!this.collapsed));
     tabHost.appendChild(this.toggleBtn);
 
-    const stored = localStorage.getItem(TAB_KEY);
+    const stored = safeStorageGet(TAB_KEY);
     this.active = tabs.some((t) => t.id === stored) ? stored! : tabs[0].id;
     this.render();
     this.paintCollapsed();
   }
 
-  /** Show a tab; opens the flyout instead when the ribbon is collapsed. */
+  /** Show a tab. A collapsed ribbon expands in place when a tab is chosen. */
   select(id: string, viaTab = false): void {
     if (this.active !== id) {
       this.active = id;
-      localStorage.setItem(TAB_KEY, id);
+      safeStorageSet(TAB_KEY, id);
       this.render();
     }
-    if (this.collapsed && viaTab) this.openFlyout();
+    if (this.collapsed && viaTab) this.setCollapsed(false);
   }
 
   getTab(): string {
@@ -100,21 +119,17 @@ export class Ribbon {
 
   setCollapsed(collapsed: boolean): void {
     this.collapsed = collapsed;
-    localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0");
-    if (collapsed) closeLayer();
-    this.flyout = false;
-    this.paintCollapsed();
-  }
-
-  /** Keep a collapsed ribbon open for the life of a dropdown, and no longer. */
-  private hold(on: boolean): void {
-    this.flyout = on;
+    safeStorageSet(COLLAPSE_KEY, collapsed ? "1" : "0");
+    closeLayer();
     this.paintCollapsed();
   }
 
   isCollapsed(): boolean {
     return this.collapsed;
   }
+
+  /** Chrome outside the ribbon that mirrors the same state, kept in step. */
+  onSync: (() => void) | null = null;
 
   /** Refresh enabled/pressed state of what is currently on screen. */
   sync(): void {
@@ -126,30 +141,35 @@ export class Ribbon {
       el.classList.toggle("off", !this.registry.isAvailable(id));
     }
     for (const control of this.controls) control.sync?.();
+    this.onSync?.();
   }
 
   private onTabClick(id: string): void {
-    if (this.collapsed && this.active === id && this.flyout) return closeLayer();
     this.select(id, true);
   }
 
-  private paintCollapsed(): void {
-    this.body.classList.toggle("collapsed", this.collapsed && !this.flyout);
-    this.body.classList.toggle("flyout", this.flyout);
-    this.toggleBtn.classList.toggle("up", this.collapsed);
-    this.toggleBtn.title = this.collapsed ? "Pin the ribbon  Ctrl+F1" : "Collapse the ribbon  Ctrl+F1";
+  /** Roving focus keeps the tab strip to one stop while arrows switch tabs. */
+  private onTabKey(e: KeyboardEvent, id: string): void {
+    const at = this.tabs.findIndex((tab) => tab.id === id);
+    const next =
+      e.key === "ArrowRight" ? (at + 1) % this.tabs.length
+      : e.key === "ArrowLeft" ? (at - 1 + this.tabs.length) % this.tabs.length
+      : e.key === "Home" ? 0
+      : e.key === "End" ? this.tabs.length - 1
+      : -1;
+    if (at < 0 || next < 0) return;
+    e.preventDefault();
+    const tab = this.tabs[next];
+    this.select(tab.id, true);
+    this.tabButtons.get(tab.id)?.focus();
   }
 
-  private openFlyout(): void {
-    // Drop any open layer first: openLayer would otherwise run the previous
-    // flyout's close handler *after* we set the new state and undo it.
-    closeLayer();
-    this.flyout = true;
-    this.paintCollapsed();
-    openLayer([this.body, ...this.tabButtons.values()], () => {
-      this.flyout = false;
-      this.paintCollapsed();
-    });
+  private paintCollapsed(): void {
+    this.body.classList.toggle("collapsed", this.collapsed);
+    this.toggleBtn.classList.toggle("up", this.collapsed);
+    this.toggleBtn.setAttribute("aria-expanded", String(!this.collapsed));
+    this.body.setAttribute("aria-hidden", String(this.collapsed));
+    this.toggleBtn.title = this.collapsed ? "Pin the ribbon  Ctrl+F1" : "Collapse the ribbon  Ctrl+F1";
   }
 
   private render(): void {
@@ -158,7 +178,9 @@ export class Ribbon {
       const on = id === tab.id;
       button.classList.toggle("active", on);
       button.setAttribute("aria-selected", String(on));
+      button.tabIndex = on ? 0 : -1;
     }
+    this.body.setAttribute("aria-label", tab.label);
     this.bound.length = 0;
     this.controls.length = 0;
 
@@ -175,8 +197,8 @@ export class Ribbon {
     const items = h("div", { class: "rib-items" });
     let stack: HTMLElement | null = null;
     for (const item of group.items) {
-      const large = item.kind === "control" || item.size !== "sm";
-      if (large) {
+      const size = item.kind === "control" ? "lg" : item.size ?? "lg";
+      if (size === "lg") {
         stack = null;
         items.appendChild(this.buildItem(item, "lg"));
         continue;
@@ -190,7 +212,7 @@ export class Ribbon {
     return h("div", { class: "rib-group" }, [items, h("div", { class: "rib-glabel", text: group.label })]);
   }
 
-  private buildItem(item: RibbonItem, size: "lg" | "sm"): HTMLElement {
+  private buildItem(item: RibbonItem, size: RibbonSize): HTMLElement {
     if (item.kind === "control") {
       const control = item.build();
       this.controls.push(control);
@@ -200,11 +222,6 @@ export class Ribbon {
       const button = this.button(item.icon, item.label, size, true);
       button.addEventListener("click", () => {
         if (button.getAttribute("aria-expanded") === "true") return closeLayer();
-        // A dropdown claims the transient layer, which would dismiss the
-        // flyout it sits in; hold the ribbon open without touching the
-        // stored preference, which the user set deliberately.
-        const pinned = this.flyout;
-        if (pinned) this.hold(true);
         // The ribbon strip clips its overflow, so a drop parked inside the
         // anchor would be cut off after a few pixels. It lives on <body> and
         // is placed against the button instead.
@@ -219,7 +236,6 @@ export class Ribbon {
         openLayer([drop, button], () => {
           drop.remove();
           button.setAttribute("aria-expanded", "false");
-          if (pinned) this.hold(false);
         });
         menuKeys(drop);
       });
@@ -236,17 +252,16 @@ export class Ribbon {
     // handler explains. Greying them is the signal, not disabling them.
     if (command.tier === "local") button.classList.add("local");
     button.addEventListener("click", () => {
-      if (this.flyout) closeLayer();
       this.registry.run(item.id);
     });
     this.bound.push({ el: button, id: item.id });
     return button;
   }
 
-  private button(name: string, label: string, size: "lg" | "sm", caret = false): HTMLButtonElement {
+  private button(name: string, label: string, size: RibbonSize, caret = false): HTMLButtonElement {
     const text = h("span", { class: "rib-label", text: label });
     // The caret rides on the label line so a large button stays two rows tall.
     if (caret) text.appendChild(icon("chevron", 10));
-    return h("button", { class: `rib-btn ${size}`, type: "button" }, [icon(name, size === "lg" ? 19 : 14), text]);
+    return h("button", { class: `rib-btn ${size}`, type: "button" }, [icon(name, size === "lg" ? 17 : 13), text]);
   }
 }

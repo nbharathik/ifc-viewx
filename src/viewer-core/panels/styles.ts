@@ -98,6 +98,8 @@ const CSS = `
 .ifc-search__btn:hover:not(:disabled) { background: var(--ifc-hover, rgba(255, 255, 255, 0.05)); color: var(--ifc-fg, #f4f6f9); }
 .ifc-search__btn:disabled { opacity: 0.42; cursor: default; }
 .ifc-search__btn[aria-pressed="true"] { background: var(--ifc-accent-soft, rgba(59, 130, 246, 0.15)); color: var(--ifc-accent, #3b82f6); }
+.ifc-tree-levels { display: inline-flex; gap: 1px; flex: 0 0 auto; }
+.ifc-tree-levels .ifc-search__btn { font-size: calc(10px * var(--ui, 1)); font-weight: 700; }
 .ifc-tree-label mark,
 .ifc-tree-type mark {
   background: color-mix(in srgb, var(--ifc-accent, #3b82f6) 30%, transparent);
@@ -272,9 +274,34 @@ const CSS = `
 .ifc-copy:hover { color: var(--ifc-fg, #f4f6f9); background: var(--ifc-hover, rgba(255, 255, 255, 0.05)); }
 .ifc-copy--ok { opacity: 1; color: #4ade80; }
 
+/* Pin: by property name, so the same field stays on top as the selection moves. */
+.ifc-key { display: flex; align-items: center; gap: 4px; }
+.ifc-pin {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: var(--ifc-radius, 4px);
+  background: none;
+  color: var(--ifc-fg-3, #a5adbc);
+  cursor: pointer;
+  opacity: 0;
+  flex: 0 0 auto;
+}
+.ifc-pin svg { width: 11px; height: 11px; }
+.ifc-row:hover .ifc-pin, .ifc-pin:focus-visible { opacity: 0.75; }
+.ifc-pin:hover { color: var(--ifc-fg, #f4f6f9); background: var(--ifc-hover, rgba(255, 255, 255, 0.05)); opacity: 1; }
+.ifc-pin--on { opacity: 1; color: var(--ifc-accent, #6ea8fe); }
+.ifc-row:hover .ifc-pin--on, .ifc-pin--on:focus-visible { opacity: 1; }
+[data-pinned] .ifc-section__title { color: var(--ifc-accent, #6ea8fe); }
+
 /* Measure + section handles. Scoped to the render surface: the axis gizmo is
    a sibling canvas in the same container and must keep its own cursor. */
 .ifc-measuring > canvas:first-of-type { cursor: crosshair; }
+.ifc-pick-guided > canvas:first-of-type { cursor: crosshair; }
 .ifc-over-handle > canvas:first-of-type { cursor: grab; }
 .ifc-dragging-section > canvas:first-of-type { cursor: grabbing; }
 /* One number over the middle of the span. Everything else about the
@@ -312,6 +339,17 @@ const CSS = `
   pointer-events: none;
   z-index: 9;
 }
+.ifc-snap-tag[data-constraint="x"] { border-color: #ef6b73; color: #f28a90; }
+.ifc-snap-tag[data-constraint="y"] { border-color: #4fbd85; color: #78d4a1; }
+.ifc-snap-tag[data-constraint="z"] { border-color: #5591f5; color: #82aff8; }
+.ifc-snap-tag[data-constraint="perpendicular"] { border-color: #e7c84b; color: #f2de7b; }
+.ifc-snap-tag[data-constraint="parallel"] { border-color: #d279e8; color: #e5a3f3; }
+.ifc-pick-guided .ifc-snap-tag {
+  padding: 3px 8px 3px 7px;
+  border-color: color-mix(in srgb, var(--ifc-measure, #ff8c1a) 58%, var(--ifc-line, #23272f));
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.32);
+  font-weight: 600;
+}
 
 /* Plan inset: the pixels come from the WebGL pass, this is only its frame */
 .ifc-plan-frame {
@@ -332,6 +370,142 @@ const CSS = `
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--ifc-fg-3, #a5adbc);
+}
+/* Flight HUD: beside the plan, small enough to ignore, close enough to read
+   without leaving the model. */
+.ifc-fly-panel {
+  position: absolute;
+  bottom: 14px;
+  width: calc(132px * var(--ui, 1));
+  padding: 6px 7px 7px;
+  border: 1px solid var(--ifc-line, #23272f);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ifc-surface, #14161b) 92%, transparent);
+  box-shadow: var(--ifc-shadow, 0 8px 20px rgba(0, 0, 0, 0.4));
+  font-family: var(--ifc-font, system-ui, sans-serif);
+  pointer-events: none;
+  z-index: 6;
+}
+.ifc-fly-head {
+  font-size: calc(9px * var(--ui, 1));
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ifc-accent, #3b82f6);
+  margin-bottom: 4px;
+}
+.ifc-fly-read > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: calc(10px * var(--ifc-ui, var(--ui, 1)));
+  line-height: 1.5;
+}
+.ifc-fly-read span { color: var(--ifc-fg-3, #a5adbc); }
+.ifc-fly-read b {
+  color: var(--ifc-fg, #e7ecf3);
+  font-weight: 600;
+  font-family: var(--ifc-mono, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+}
+.ifc-fly-keys {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--ifc-line, #23272f);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ifc-fly-keys > div { display: flex; align-items: center; gap: 3px; }
+.ifc-fly-keys span {
+  margin-left: auto;
+  font-size: calc(9px * var(--ui, 1));
+  color: var(--ifc-fg-3, #a5adbc);
+}
+.ifc-fly-keys kbd {
+  min-width: calc(13px * var(--ui, 1));
+  padding: 1px 3px;
+  border: 1px solid var(--ifc-line, #23272f);
+  border-radius: 3px;
+  background: var(--ifc-raised, #1a1d24);
+  color: var(--ifc-fg-2, #cfd6e1);
+  font-family: var(--ifc-mono, ui-monospace, monospace);
+  font-size: calc(8.5px * var(--ui, 1));
+  text-align: center;
+}
+
+/* The frame is click-through so it never steals a viewport drag; only the
+   save control takes pointer events back. */
+.ifc-plan-save {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(20px * var(--ui, 1));
+  height: calc(20px * var(--ui, 1));
+  padding: 0;
+  border: 1px solid var(--ifc-line, #23272f);
+  border-radius: var(--ifc-r2, 6px);
+  background: var(--ifc-surface, #14161b);
+  color: var(--ifc-fg-2, #cfd6e1);
+  cursor: pointer;
+  pointer-events: auto;
+  opacity: 0.85;
+  transition: opacity 120ms ease, color 120ms ease;
+}
+.ifc-plan-save:hover { opacity: 1; color: var(--ifc-accent, #3b82f6); }
+.ifc-plan-frame .ifc-plan-north {
+  left: auto;
+  top: auto;
+  bottom: 6px;
+  right: 8px;
+  width: calc(14px * var(--ui, 1));
+  height: calc(14px * var(--ui, 1));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--ifc-line, #23272f);
+  border-radius: 999px;
+  background: var(--ifc-surface, #14161b);
+  color: var(--ifc-accent, #3b82f6);
+}
+.ifc-note-label {
+  position: absolute;
+  max-width: 240px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--ifc-accent, #3b82f6);
+  color: #fff;
+  font-family: var(--ifc-font, system-ui, sans-serif);
+  font-size: calc(11px * var(--ui, 1));
+  line-height: 1.35;
+  pointer-events: none;
+  transform: translate(-50%, -140%);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  z-index: 9;
+  box-shadow: var(--ifc-shadow, 0 4px 12px rgba(0, 0, 0, 0.35));
+}
+.ifc-grid-bubble {
+  position: absolute;
+  width: calc(22px * var(--ui, 1));
+  height: calc(22px * var(--ui, 1));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid var(--ifc-line, #3a3f4a);
+  border-radius: 999px;
+  background: var(--ifc-surface, #14161b);
+  color: var(--ifc-fg-2, #cfd6e1);
+  font-family: var(--ifc-font, system-ui, sans-serif);
+  font-size: calc(10px * var(--ui, 1));
+  font-weight: 700;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  z-index: 8;
 }
 
 /* Loading bar + error card */

@@ -22,6 +22,40 @@ export function h<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+/** Browser storage is optional in sandboxed/private contexts; UI state is not. */
+export function safeStorageGet(key: string): string | null {
+  try {
+    return globalThis.localStorage?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function safeStorageSet(key: string, value: string): boolean {
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage) return false;
+    storage.setItem(key, value);
+    return true;
+  } catch {
+    // Callers decide whether this preference failure is benign or a durable
+    // operation must remain pending and surface the error.
+    return false;
+  }
+}
+
+export async function copyText(text: string, success = "Copied"): Promise<boolean> {
+  try {
+    if (!globalThis.navigator?.clipboard) throw new Error("clipboard unavailable");
+    await globalThis.navigator.clipboard.writeText(text);
+    toast(success, "success");
+    return true;
+  } catch {
+    toast("The browser blocked the clipboard", "error");
+    return false;
+  }
+}
+
 /** lucide-style stroke icons on a 24x24 grid, inheriting currentColor. */
 const PATHS: Record<string, string> = {
   cube: '<path d="m12 2 9 5v10l-9 5-9-5V7Z"/><path d="m3 7 9 5 9-5M12 12v10"/>',
@@ -35,7 +69,7 @@ const PATHS: Record<string, string> = {
   layers: '<path d="m12 2 10 5-10 5L2 7Z"/><path d="m4 12-2 1 10 5 10-5-2-1"/><path d="m4 17-2 1 10 5 10-5-2-1"/>',
   bookmark: '<path d="M6 3.5h12v17l-6-4-6 4Z"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
-  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="7.8" r="1" fill="currentColor" stroke="none"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
   check: '<path d="m4.5 12.5 5 5 10-11"/>',
   "check-circle": '<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>',
   alert: '<circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5"/><circle cx="12" cy="16.3" r="1" fill="currentColor" stroke="none"/>',
@@ -73,9 +107,12 @@ const PATHS: Record<string, string> = {
   trash: '<path d="M4.5 7h15M9.5 7V5h5v2M6.5 7l1 13h9l1-13"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5.3l3.4 2"/>',
   chevron: '<path d="m6 9 6 6 6-6"/>',
+  maximize: '<path d="M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5"/>',
+  minimize: '<path d="M8 3v5H3M16 3v5h5M21 16h-5v5M8 21v-5H3"/>',
   plug: '<path d="M9 3v6M15 3v6"/><path d="M6.5 9h11v2.5a5.5 5.5 0 0 1-11 0Z"/><path d="M12 17v4"/>',
   sliders: '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2.1"/><circle cx="10" cy="17" r="2.1"/>',
   funnel: '<path d="M3 5h18l-7 8.2V20l-4 1.6v-8.4Z"/>',
+  palette: '<path d="M12 3a9 9 0 1 0 0 18c1 0 1.6-.7 1.6-1.5 0-.4-.2-.8-.5-1.1-.3-.3-.4-.6-.4-1 0-.8.7-1.4 1.5-1.4H16a5 5 0 0 0 5-5c0-4.4-4-8-9-8Z"/><circle cx="7.5" cy="12" r="1.1" fill="currentColor" stroke="none"/><circle cx="10" cy="7.8" r="1.1" fill="currentColor" stroke="none"/><circle cx="15" cy="7.8" r="1.1" fill="currentColor" stroke="none"/>',
   clipboard: '<rect x="6" y="4.5" width="12" height="16" rx="2"/><path d="M9.5 4.5V3h5v1.5"/><path d="m9.5 12.5 2 2 3.5-4.5"/>',
   flag: '<path d="M5.5 21V3.6"/><path d="M5.5 4.6h12l-2.4 4 2.4 4h-12"/>',
   plus: '<path d="M12 5.5v13M5.5 12h13"/>',
@@ -83,6 +120,9 @@ const PATHS: Record<string, string> = {
   blocks: '<rect x="3" y="3" width="7.5" height="7.5" rx="1.6"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.6"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.6"/><path d="M17.25 14v6.5M14 17.25h6.5"/>',
   calculator: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7.5h8M8 12h.01M12 12h.01M16 12h.01M8 16.5h.01M12 16.5h.01M16 16.5h.01"/>',
   compare: '<path d="M9.5 4H5.5A1.5 1.5 0 0 0 4 5.5v13A1.5 1.5 0 0 0 5.5 20h4M14.5 4h4A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-4"/><path d="M12 2.5v19" stroke-dasharray="3 2.5"/>',
+  ortho: '<rect x="3.5" y="7.5" width="13" height="13" rx="1.2"/><path d="M7.5 7.5V4.7a1.2 1.2 0 0 1 1.2-1.2h10.6a1.2 1.2 0 0 1 1.2 1.2v10.6a1.2 1.2 0 0 1-1.2 1.2H16.5"/><path d="m3.5 7.5 4-4M16.5 20.5l4-4"/>',
+  walk: '<circle cx="13" cy="4.5" r="1.8"/><path d="M12.5 8.5 10 11l1.5 3.5L9 20M12.5 8.5l3 2 2.5 1M12.5 8.5 15 14l1.5 6M10 11l-3.5 1.5"/>',
+  move: '<path d="M12 2v20M2 12h20"/><path d="m9 4.5 3-3 3 3M9 19.5l3 3 3-3M4.5 9l-3 3 3 3M19.5 9l3 3-3 3"/>',
   // The one mark that cannot be redrawn as strokes, so it fills instead and is
   // scaled from its own 16-grid onto the 24 one the rest of the set uses.
   github: '<path fill="currentColor" stroke="none" transform="translate(1 1) scale(1.375)" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>',
@@ -200,6 +240,96 @@ export function iconLink(name: string, title: string, href: string, cls = "icon-
   return h("a", { class: cls, title, "aria-label": title, href, target: "_blank", rel: "noopener noreferrer" }, [icon(name)]);
 }
 
+// -- exit motion ------------------------------------------------------------
+/**
+ * Take a node away with its closing animation instead of yanking it out of the
+ * document. The class starts the animation, the node goes when it finishes.
+ * Where nothing animates, which is every headless test and any node the user
+ * has asked to hold still, the removal stays synchronous, so callers can rely
+ * on the node being gone as soon as this returns. A hidden document counts as
+ * nothing animating: the browser stops advancing animations in a background
+ * tab, and this is a viewer people leave open, so a toast dismissed behind
+ * another tab would otherwise wait there indefinitely.
+ */
+export function fadeOut(node: HTMLElement, cls = "closing"): void {
+  node.classList.add(cls);
+  const running =
+    typeof node.getAnimations === "function" && !node.ownerDocument.hidden ? node.getAnimations() : [];
+  if (!node.isConnected || running.length === 0) return node.remove();
+  void Promise.all(running.map((a) => a.finished.catch(() => undefined))).then(() => node.remove());
+}
+
+/**
+ * Write a live value and let it arrive rather than appear. Counts, selection
+ * sizes and tool states change while the user is looking straight at them, and
+ * a number that teleports is read as a glitch. Only the incoming value is
+ * animated: cross-fading the outgoing one as well means holding stale text on
+ * screen, and these update faster than that would survive. Writing the same
+ * value again does nothing, which is what makes this safe on a hot path.
+ * Opacity and transform only, so a status line updating twice a second never
+ * asks the compositor to re-rasterise the text it sits in.
+ */
+export function swapText(node: HTMLElement, next: string): void {
+  if ((node.textContent ?? "") === next) return;
+  node.textContent = next;
+  if (typeof node.animate !== "function" || !node.isConnected) return;
+  node.animate(
+    [
+      { opacity: 0, transform: "translateY(3px)" },
+      { opacity: 1, transform: "translateY(0)" },
+    ],
+    { duration: 180, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
+  );
+}
+
+/**
+ * Give a segmented control a pill that travels between its options instead of
+ * a background that blinks from one button to the next. The pill is measured
+ * here and tweened by CSS, so it follows the same curve as every other moving
+ * thing. It watches the pressed attribute rather than clicks, which keeps it
+ * correct when the selection is changed by the keyboard or by code.
+ */
+export function slidingPill(seg: HTMLElement): void {
+  if (seg.querySelector(":scope > .seg-pill")) return;
+  const pill = h("span", { class: "seg-pill", "aria-hidden": "true" });
+  seg.prepend(pill);
+  const move = (animate: boolean): void => {
+    const target = seg.querySelector<HTMLElement>(
+      'button[aria-pressed="true"], button[aria-selected="true"]',
+    );
+    // A control that is collapsed, hidden or not laid out yet measures zero.
+    // Parking the pill instead of drawing it at zero width keeps it from
+    // flashing in the corner on the frame before the panel opens.
+    if (!target?.offsetWidth) {
+      pill.style.opacity = "0";
+      return;
+    }
+    if (!animate) pill.style.transition = "none";
+    pill.style.opacity = "1";
+    pill.style.width = `${target.offsetWidth}px`;
+    pill.style.height = `${target.offsetHeight}px`;
+    // Measured against the pill's own resting position rather than the
+    // control's box, so the control's padding and border never have to be
+    // read back or kept in step with the stylesheet. Transforms do not move
+    // offsetLeft, so this stays the same number on every pass.
+    pill.style.transform =
+      `translate(${target.offsetLeft - pill.offsetLeft}px, ${target.offsetTop - pill.offsetTop}px)`;
+    if (!animate) {
+      void pill.offsetWidth;
+      pill.style.transition = "";
+    }
+  };
+  new MutationObserver(() => move(true)).observe(seg, {
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["aria-pressed", "aria-selected"],
+  });
+  // Resizing moves the buttons under the pill, and that is not a selection
+  // change, so it snaps rather than slides.
+  if (typeof ResizeObserver === "function") new ResizeObserver(() => move(false)).observe(seg);
+  requestAnimationFrame(() => move(false));
+}
+
 // -- transient layers -------------------------------------------------------
 /**
  * One dropdown, popover or context menu is open at a time and any of them
@@ -242,6 +372,12 @@ document.addEventListener("keydown", (e) => {
   if (layer) {
     e.stopPropagation();
     closeLayer();
+    return;
+  }
+  // Only once nothing transient is open, so Escape peels one thing at a time.
+  if (pinned) {
+    e.stopPropagation();
+    closePinned();
   }
 }, true);
 window.addEventListener("blur", () => {
@@ -264,14 +400,18 @@ const TOAST_ICON = { info: "info", success: "check-circle", error: "alert" } as 
 let toastHost: HTMLElement | null = null;
 
 export function toast(message: string, kind: "info" | "success" | "error" = "info"): void {
-  toastHost ??= h("div", { id: "toasts" });
+  toastHost ??= h("div", { id: "toasts", role: "region", "aria-label": "Notifications" });
   // A modal dialog paints in the top layer, so a toast parked on <body> would
   // sit behind its backdrop. It rides with whatever is on top instead.
   const owner = document.querySelector<HTMLElement>("dialog[open]") ?? document.body;
   if (toastHost.parentElement !== owner) owner.appendChild(toastHost);
   while (toastHost.childElementCount > 2) toastHost.firstElementChild?.remove();
-  const node = h("div", { class: `toast ${kind}` }, [icon(TOAST_ICON[kind], 14), h("span", { text: message })]);
-  const remove = (): void => node.remove();
+  const node = h("div", {
+    class: `toast ${kind}`,
+    role: kind === "error" ? "alert" : "status",
+    "aria-atomic": "true",
+  }, [icon(TOAST_ICON[kind], 14), h("span", { text: message })]);
+  const remove = (): void => fadeOut(node);
   node.addEventListener("click", remove);
   toastHost.appendChild(node);
   setTimeout(remove, kind === "error" ? 8000 : 3500);
@@ -284,6 +424,8 @@ export interface FormField {
   value?: string;
   placeholder?: string;
   hint?: string;
+  /** Present for a fixed set of choices, which renders a select. */
+  options?: string[];
 }
 
 /**
@@ -296,16 +438,20 @@ export function promptForm(
   confirmLabel: string,
   onSubmit: (values: Record<string, string>) => void,
 ): void {
-  const dialog = h("dialog", { class: "form-dialog" });
-  const inputs = new Map<string, HTMLInputElement>();
+  const dialog = h("dialog", { class: "form-dialog", "aria-label": title });
+  const inputs = new Map<string, HTMLInputElement | HTMLSelectElement>();
   const body = h("div", { class: "dlg-body" });
   for (const field of fields) {
-    const input = h("input", {
-      type: "text",
-      value: field.value ?? "",
-      placeholder: field.placeholder ?? "",
-    });
-    inputs.set(field.key, input);
+    const input = field.options
+      ? h("select", {}, field.options.map((option) =>
+          h("option", { value: option, text: option, ...(option === field.value ? { selected: "" } : {}) })))
+      : h("input", {
+          type: "text",
+          value: field.value ?? "",
+          placeholder: field.placeholder ?? "",
+        });
+    if (field.options && field.value) (input as HTMLSelectElement).value = field.value;
+    inputs.set(field.key, input as HTMLInputElement | HTMLSelectElement);
     body.appendChild(
       h("label", { class: "field" }, [
         h("span", { class: "field-label" }, [
@@ -343,7 +489,9 @@ export function promptForm(
   lightDismiss(dialog);
   document.body.appendChild(dialog);
   dialog.showModal();
-  inputs.values().next().value?.select();
+  const first = inputs.values().next().value;
+  if (first instanceof HTMLInputElement) first.select();
+  else first?.focus();
 }
 
 // -- dropdown menus ---------------------------------------------------------
@@ -455,16 +603,43 @@ function clipBox(node: HTMLElement): { left: number; right: number; top: number;
   return { left: 0, right: window.innerWidth, top: 0, bottom: window.innerHeight };
 }
 
+/**
+ * A panel that outlives clicks into the page. Rail tools are used against the
+ * model, so a click in the viewport must not take the panel away; it closes on
+ * its own button, on Escape, or when another pinned panel opens.
+ */
+let pinned: { close: () => void } | null = null;
+
+export function closePinned(): void {
+  const current = pinned;
+  pinned = null;
+  current?.close();
+}
+
+export interface PopoverOptions {
+  /** Called with true just before the panel is built, false once it is gone. */
+  onToggle?: (open: boolean) => void;
+  /** Survives outside clicks, scrolling and focus loss. */
+  pinned?: boolean;
+}
+
 export function attachPopover(
   button: HTMLButtonElement,
   build: (pop: HTMLElement, close: () => void) => void,
   side: PopoverSide = "above",
+  options: PopoverOptions = {},
 ): void {
+  const { onToggle, pinned: isPinned = false } = options;
   const item = button.parentElement ?? button;
   button.addEventListener("click", () => {
-    if (button.getAttribute("aria-expanded") === "true") return closeLayer();
-    const pop = h("div", { class: `pop ${side}`, role: "dialog" });
-    build(pop, () => closeLayer());
+    if (button.getAttribute("aria-expanded") === "true") {
+      return isPinned ? closePinned() : closeLayer();
+    }
+    // Before the panel is measured, so a host can make room for it.
+    onToggle?.(true);
+    const label = button.getAttribute("aria-label") || button.title || button.textContent?.trim() || "Options";
+    const pop = h("div", { class: `pop ${side}`, role: "dialog", "aria-label": label });
+    build(pop, () => (isPinned ? closePinned() : closeLayer()));
     item.appendChild(pop);
     button.setAttribute("aria-expanded", "true");
     // Keep the panel on screen when its anchor sits near an edge.
@@ -483,10 +658,23 @@ export function attachPopover(
       const vertical = fit(rect.top, rect.bottom, box.top, box.bottom);
       if (vertical) pop.style.marginTop = `${vertical}px`;
     }
-    openLayer([pop, button], () => {
-      pop.remove();
+    const dismiss = (): void => {
+      fadeOut(pop);
       button.setAttribute("aria-expanded", "false");
-    });
+      onToggle?.(false);
+    };
+    if (isPinned) {
+      // One pinned panel at a time, and it must not sit under a menu or a
+      // dropdown opened later, so any transient layer closes it first.
+      closePinned();
+      closeLayer();
+      pinned = { close: dismiss };
+    } else {
+      openLayer([pop, button], dismiss);
+    }
+    // Whatever was closed to make room for this one goes at once: a panel
+    // still playing its exit beside a fresh panel reads as two panels open.
+    for (const stale of document.querySelectorAll<HTMLElement>(".pop.closing")) stale.remove();
   });
 }
 
@@ -561,7 +749,15 @@ export class CommandPalette {
   /** Where focus came from, so closing puts it back rather than on <body>. */
   private opener: HTMLElement | null = null;
 
-  constructor(private readonly source: () => Command[]) {}
+  /**
+   * `source` is snapshotted when the palette opens; `dynamic` is asked on
+   * every keystroke instead, which is what lets the palette reach a hundred
+   * thousand elements without building a list of them up front.
+   */
+  constructor(
+    private readonly source: () => Command[],
+    private readonly dynamic?: (query: string) => Command[],
+  ) {}
 
   isOpen(): boolean {
     return this.backdrop !== null;
@@ -587,11 +783,21 @@ export class CommandPalette {
     this.pool = this.source().filter((c) => !c.disabled);
     const input = h("input", {
       type: "text",
-      placeholder: "Search commands and element classes",
+      placeholder: "Search commands, views, elements and properties",
       spellcheck: "false",
+      role: "combobox",
+      "aria-label": "Search commands",
+      "aria-autocomplete": "list",
+      "aria-controls": "palette-list",
+      "aria-expanded": "true",
     });
-    const list = h("div", { id: "palette-list" });
-    const panel = h("div", { id: "palette", role: "dialog", "aria-modal": "true" }, [
+    const list = h("div", { id: "palette-list", role: "listbox", "aria-label": "Commands" });
+    const panel = h("div", {
+      id: "palette",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-label": "Command palette",
+    }, [
       h("div", { class: "pal-input" }, [icon("search", 15), input]),
       list,
     ]);
@@ -611,7 +817,12 @@ export class CommandPalette {
           if (points >= 0) ranked.push({ command, points });
         }
         ranked.sort((a, b) => b.points - a.points);
-        this.matches = ranked.slice(0, MAX_ROWS).map((r) => r.command);
+        const found = ranked.slice(0, MAX_ROWS).map((r) => r.command);
+        // Model results come after the commands: a keystroke that names a
+        // command should not be pushed down the list by an element that
+        // happens to share a word with it.
+        const extra = query.length >= 2 ? (this.dynamic?.(query) ?? []) : [];
+        this.matches = [...found, ...extra].slice(0, MAX_ROWS);
       } else {
         this.matches = this.pool.slice(0, MAX_ROWS);
       }
@@ -625,11 +836,14 @@ export class CommandPalette {
         // unfiltered list carries section headings.
         if (!query && command.section !== section) {
           section = command.section;
-          frag.appendChild(h("div", { class: "pal-section", text: section }));
+          frag.appendChild(h("div", { class: "pal-section", text: section, role: "presentation" }));
         }
         const item = h("button", {
           class: `pal-item${index === this.cursor ? " active" : ""}`,
           type: "button",
+          id: `palette-option-${index}`,
+          role: "option",
+          "aria-selected": String(index === this.cursor),
         }, [icon(command.icon ?? "command", 14), h("span", { class: "grow", text: command.label })]);
         if (query) item.appendChild(h("span", { class: "sec", text: command.section }));
         if (command.sub) item.appendChild(h("span", { class: "sub", text: command.sub }));
@@ -639,10 +853,13 @@ export class CommandPalette {
         frag.appendChild(item);
       });
       if (this.matches.length === 0) {
-        frag.appendChild(h("div", { class: "pal-section", text: "No matches" }));
+        frag.appendChild(h("div", { class: "pal-section", text: "No matches", role: "status" }));
       }
       list.replaceChildren(frag);
-      (active as HTMLElement | null)?.scrollIntoView({ block: "nearest" });
+      const activeItem = active as HTMLElement | null;
+      if (activeItem) input.setAttribute("aria-activedescendant", activeItem.id);
+      else input.removeAttribute("aria-activedescendant");
+      activeItem?.scrollIntoView({ block: "nearest" });
     };
 
     input.addEventListener("input", () => {
@@ -700,27 +917,32 @@ export class CommandPalette {
  * goes through app state, and at most once per frame. The viewport picks the
  * new size up through its own ResizeObserver. Width persists across sessions.
  */
+/**
+ * A drag handle on one edge of a panel. `left` and `right` resize the width;
+ * `top` resizes the height, for a panel docked across the bottom.
+ */
 export function makeResizer(options: {
   host: HTMLElement;
-  side: "left" | "right";
+  side: "left" | "right" | "top";
   cssVar: string;
   storageKey: string;
   min: number;
   max: number;
 }): void {
   const { host, side, cssVar, storageKey, min, max } = options;
-  const stored = Number(localStorage.getItem(storageKey));
+  const vertical = side === "top";
+  const stored = Number(safeStorageGet(storageKey));
   const clamp = (n: number): number => Math.min(max, Math.max(min, n));
   if (Number.isFinite(stored) && stored > 0) {
     document.documentElement.style.setProperty(cssVar, `${clamp(stored)}px`);
   }
 
   const handle = h("div", {
-    class: `resizer ${side === "left" ? "right" : "left"}`,
+    class: `resizer ${vertical ? "top" : side === "left" ? "right" : "left"}`,
     role: "separator",
     tabindex: "0",
     "aria-label": "Resize panel",
-    "aria-orientation": "vertical",
+    "aria-orientation": vertical ? "horizontal" : "vertical",
     "aria-valuemin": String(min),
     "aria-valuemax": String(max),
   });
@@ -738,17 +960,21 @@ export function makeResizer(options: {
   };
   // Persist the clamped target, not a re-measure: the CSS write is deferred to
   // a frame, so measuring here would store a width one step behind.
-  const persist = (): void => localStorage.setItem(storageKey, String(Math.round(target)));
+  const persist = (): void => {
+    safeStorageSet(storageKey, String(Math.round(target)));
+  };
 
   handle.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     handle.setPointerCapture(e.pointerId);
     document.body.classList.add("is-resizing");
-    const startX = e.clientX;
-    const startWidth = host.getBoundingClientRect().width;
+    const startX = vertical ? e.clientY : e.clientX;
+    const box = host.getBoundingClientRect();
+    const startWidth = vertical ? box.height : box.width;
     target = clamp(startWidth);
     const move = (ev: PointerEvent): void => {
-      apply(startWidth + (side === "left" ? ev.clientX - startX : startX - ev.clientX));
+      const at = vertical ? ev.clientY : ev.clientX;
+      apply(startWidth + (side === "left" ? at - startX : startX - at));
     };
     const up = (): void => {
       handle.removeEventListener("pointermove", move);
@@ -761,9 +987,12 @@ export function makeResizer(options: {
 
   handle.addEventListener("keydown", (e) => {
     const step = e.shiftKey ? 25 : 10;
-    const width = host.getBoundingClientRect().width;
-    if (e.key === "ArrowLeft") apply(width + (side === "left" ? -step : step));
-    else if (e.key === "ArrowRight") apply(width + (side === "left" ? step : -step));
+    const box = host.getBoundingClientRect();
+    const width = vertical ? box.height : box.width;
+    const less = vertical ? "ArrowDown" : "ArrowLeft";
+    const more = vertical ? "ArrowUp" : "ArrowRight";
+    if (e.key === less) apply(width + (side === "left" ? -step : step));
+    else if (e.key === more) apply(width + (side === "left" ? step : -step));
     else if (e.key === "Home") apply(min);
     else if (e.key === "End") apply(max);
     else return;

@@ -66,6 +66,27 @@ export interface IfcPropertySet {
   properties: IfcProperty[];
 }
 
+export interface IfcClassification {
+  system: string;
+  value: string | null;
+  name: string | null;
+  uri: string | null;
+}
+
+export interface IfcMaterial {
+  name: string;
+  category: string | null;
+  code: string | null;
+  uri: string | null;
+}
+
+export interface IfcRelationTarget {
+  relation: string;
+  expressID: number;
+  type: string;
+  name: string | null;
+}
+
 export interface ItemProperties {
   expressID: number;
   type: string;
@@ -73,6 +94,123 @@ export interface ItemProperties {
   attributes: IfcProperty[];
   /** Property sets and quantity sets attached via IfcRelDefinesByProperties. */
   psets: IfcPropertySet[];
+  /** Classification references associated with the occurrence or its type. */
+  classifications: IfcClassification[];
+  /** Materials resolved through single, layer, profile and constituent sets. */
+  materials: IfcMaterial[];
+  /** Direct and transitive parents used by IDS partOf facets. */
+  partOf: IfcRelationTarget[];
+}
+
+export interface IfcScheduleTime {
+  scheduleStart: string | null;
+  scheduleFinish: string | null;
+  scheduleDuration: string | null;
+  actualStart: string | null;
+  actualFinish: string | null;
+  actualDuration: string | null;
+  remainingTime: string | null;
+  completion: number | null;
+  statusTime: string | null;
+}
+
+export interface IfcWorkScheduleRecord {
+  expressID: number;
+  globalId: string;
+  name: string;
+  description: string;
+  identification: string;
+  status: string;
+  predefinedType: string;
+  creationDate: string | null;
+  startTime: string | null;
+  finishTime: string | null;
+  taskIds: number[];
+  modelIndex: number;
+  modelName: string;
+}
+
+export interface IfcTaskRecord {
+  expressID: number;
+  globalId: string;
+  name: string;
+  description: string;
+  identification: string;
+  status: string;
+  predefinedType: string;
+  workMethod: string;
+  priority: number | null;
+  isMilestone: boolean;
+  taskTime: IfcScheduleTime | null;
+  scheduleIds: number[];
+  parentTaskId: number | null;
+  childTaskIds: number[];
+  productIds: number[];
+  predecessorIds: number[];
+  successorIds: number[];
+  modelIndex: number;
+  modelName: string;
+}
+
+export interface IfcTaskSequenceRecord {
+  expressID: number;
+  predecessorId: number;
+  successorId: number;
+  sequenceType: string;
+  timeLag: string | null;
+  modelIndex: number;
+  modelName: string;
+}
+
+export interface IfcTaskGraph {
+  schedules: IfcWorkScheduleRecord[];
+  tasks: IfcTaskRecord[];
+  sequences: IfcTaskSequenceRecord[];
+}
+
+export interface OrganizeGroup {
+  expressID: number;
+  name: string | null;
+  /** IFC class of the group entity: IfcGroup, IfcSystem, IfcZone, ... */
+  ifcType: string;
+  ids: number[];
+}
+
+export interface OrganizeLayer {
+  name: string;
+  ids: number[];
+}
+
+export interface OrganizeClassification {
+  system: string;
+  code: string | null;
+  ids: number[];
+}
+
+export interface OrganizeMaterial {
+  name: string;
+  ids: number[];
+}
+
+export interface OrganizeIndex {
+  groups: OrganizeGroup[];
+  layers: OrganizeLayer[];
+  classifications: OrganizeClassification[];
+  materials: OrganizeMaterial[];
+}
+
+export interface GridAxisLine {
+  /** IfcGridAxis.AxisTag, e.g. "A" or "1". */
+  label: string | null;
+  axisGroup: 'U' | 'V' | 'W';
+  /** Flat xyz triples in MODEL coordinates (same frame as IfcMesh.matrix). */
+  points: number[];
+}
+
+export interface IfcGridInfo {
+  expressID: number;
+  name: string | null;
+  axes: GridAxisLine[];
 }
 
 export interface ModelStats {
@@ -111,11 +249,80 @@ export interface ModelBounds {
   max: Vec3;
 }
 
+export interface ProjectedCrsInfo {
+  expressID: number;
+  name: string | null;
+  description: string | null;
+  geodeticDatum: string | null;
+  verticalDatum: string | null;
+  mapProjection: string | null;
+  mapZone: string | null;
+  mapUnit: string | null;
+}
+
+export interface TrueNorthInfo {
+  direction: [number, number];
+  /** Clockwise angle from grid north to true north, in degrees. */
+  degreesFromGridNorth: number;
+}
+
+export interface MapConversionInfo {
+  kind: 'map-conversion';
+  expressID: number;
+  sourceCrsID: number | null;
+  targetCrsID: number | null;
+  eastings: number;
+  northings: number;
+  orthogonalHeight: number;
+  xAxisAbscissa: number;
+  xAxisOrdinate: number;
+  rotation: number;
+  scale: number;
+}
+
+export interface RigidOperationInfo {
+  kind: 'rigid-operation';
+  expressID: number;
+  sourceCrsID: number | null;
+  targetCrsID: number | null;
+  firstCoordinate: number;
+  secondCoordinate: number;
+  height: number;
+  coordinateKind: 'length' | 'angle' | 'unknown';
+}
+
+export type CoordinateOperationInfo = MapConversionInfo | RigidOperationInfo;
+
+export interface IfcGeoReference {
+  schema: string;
+  projectedCrs: ProjectedCrsInfo | null;
+  operation: CoordinateOperationInfo | null;
+  trueNorth: TrueNorthInfo | null;
+  warnings: string[];
+}
+
+export type ModelTransformSource = 'none' | 'automatic' | 'manual';
+
+/** Affine placement from one model's engineering coordinates into the federation frame. */
+export interface ModelTransform {
+  translation: [number, number, number];
+  rotationZ: number;
+  scale: number;
+  source: ModelTransformSource;
+  recordedAt?: string;
+}
+
+export interface GeoreferencedPoint {
+  crs: string;
+  coordinates: [number, number, number];
+}
+
 export interface LoadedModel {
   modelID: number;
   meshes: IfcMesh[];
   bounds: ModelBounds;
   stats: ModelStats;
+  geo: IfcGeoReference;
 }
 
 export interface LoadOptions {
@@ -149,6 +356,9 @@ export interface IfcEngine {
   getSpatialTree(modelID: number): SpatialNode;
   getItemProperties(modelID: number, expressID: number): ItemProperties;
   getCountsByType(modelID: number): Record<string, number>;
+  getTaskGraph(modelID: number): IfcTaskGraph;
+  getOrganizeIndex(modelID: number): OrganizeIndex;
+  getGridAxes(modelID: number): IfcGridInfo[];
   dispose(modelID: number): void;
 }
 
@@ -158,6 +368,7 @@ export interface LoadedModelMeta {
   bounds: ModelBounds;
   stats: ModelStats;
   tree: SpatialNode | null;
+  geo: IfcGeoReference;
 }
 
 export interface AsyncLoadOptions {
@@ -182,6 +393,9 @@ export interface AsyncIfcEngine {
   ): Promise<void>;
   getItemProperties(modelID: number, expressID: number): Promise<ItemProperties>;
   getCountsByType(modelID: number): Promise<Record<string, number>>;
+  getTaskGraph(modelID: number): Promise<IfcTaskGraph>;
+  getOrganizeIndex(modelID: number): Promise<OrganizeIndex>;
+  getGridAxes(modelID: number): Promise<IfcGridInfo[]>;
   dispose(modelID: number): void;
   /** Abort the in-flight load, if any. The load promise rejects with CancelledError. */
   cancel(): void;

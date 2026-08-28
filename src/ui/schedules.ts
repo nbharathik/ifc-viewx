@@ -1,17 +1,24 @@
 // Element schedules: pick a class, add pset columns, get a table. Property
 // columns resolve through the element type, which is the part a plain
-// instance read gets wrong. Runs in this tab. Rows select in the viewer; the
-// table exports as CSV.
+// instance read gets wrong. Runs as a Plugins workspace. Rows select in the
+// viewer; the table exports as CSV.
 import { h, icon, spinner, toast } from "./kit.js";
 import { emptyState } from "./shell.js";
-import { saveCsv, type Value } from "../sdk/data.js";
+import { saveCsv, type Value } from "../data/model.js";
+import {
+  buildTable, describeDiff, diffTable, fromScheduleRows, parseDelimited, sniffDelimiter, toEditOps,
+  type TableRow,
+} from "../ifc/tabular.js";
 import type { ScheduleReport } from "../ifc/ifcEngine.js";
+import type { EditOp } from "../ifc/edits.js";
 
 export interface ScheduleActions {
   /** Element classes present in the model, most common first. */
   types(): string[];
   run(type: string, properties: string[]): Promise<ScheduleReport>;
   select(expressID: number): void;
+  /** Stage edits from an imported sheet. Never applies; the user does that. */
+  stageEdits(ops: EditOp[]): Promise<void>;
 }
 
 export class SchedulePanel {
@@ -19,23 +26,39 @@ export class SchedulePanel {
   private readonly props = h("input", { type: "text", placeholder: "Pset.Property, Property", list: "schedule-props", "aria-label": "Property columns" });
   private readonly datalist = h("datalist", { id: "schedule-props" });
   private readonly runBtn = h("button", { class: "btn accent", type: "button", text: "Run" });
-  private readonly exportBtn = h("button", { class: "btn", type: "button", title: "Download CSV" }, [icon("download", 14)]);
+  private readonly exportBtn = h("button", { class: "btn", type: "button", title: "Download CSV", "aria-label": "Download CSV" }, [icon("download", 14)]);
+  private readonly importBtn = h("button", { class: "btn", type: "button", title: "Import an edited CSV, staged for approval", "aria-label": "Import an edited CSV" }, [icon("upload", 14)]);
+  private readonly importInput = h("input", { type: "file", accept: ".csv,.txt,.tsv", hidden: "" });
   private readonly status = h("div", { class: "status-line" });
   private readonly host = h("div", { class: "grid-wrap hidden" });
   private readonly empty = emptyState("table", "No schedule yet", "Pick a class and run to build a table of every element.");
   private report: ScheduleReport | null = null;
+  private runSeq = 0;
 
   constructor(mount: HTMLElement, private readonly actions: ScheduleActions) {
     this.exportBtn.disabled = true;
     this.runBtn.addEventListener("click", () => void this.run());
     this.exportBtn.addEventListener("click", () => this.exportCsv());
+    this.importBtn.disabled = true;
+    this.importBtn.addEventListener("click", () => this.importInput.click());
+    this.importInput.addEventListener("change", () => {
+      const file = this.importInput.files?.[0];
+      this.importInput.value = "";
+      if (file) {
+        void this.importCsv(file).catch((err: Error) => {
+          this.status.textContent = err.message;
+          this.status.classList.add("error");
+        });
+      }
+    });
     this.props.addEventListener("keydown", (e) => {
       if (e.key === "Enter") void this.run();
     });
 
     mount.appendChild(
       h("div", { class: "page" }, [
-        h("div", { class: "row" }, [this.type, this.runBtn, this.exportBtn]),
+        h("div", { class: "row" }, [this.type, this.runBtn, this.exportBtn, this.importBtn]),
+        this.importInput,
         this.props,
         this.datalist,
         this.status,
@@ -48,6 +71,9 @@ export class SchedulePanel {
 
   /** Repopulate the class list; call after a model loads. */
   refreshTypes(): void {
+    this.runSeq += 1;
+    this.runBtn.disabled = false;
+    this.runBtn.classList.remove("busy");
     const current = this.type.value;
     const types = this.actions.types();
     this.type.replaceChildren(
@@ -63,6 +89,7 @@ export class SchedulePanel {
   private clear(): void {
     this.report = null;
     this.exportBtn.disabled = true;
+    this.importBtn.disabled = true;
     this.host.replaceChildren();
     this.host.classList.add("hidden");
     this.empty.classList.remove("hidden");
@@ -72,6 +99,7 @@ export class SchedulePanel {
 
   private async run(): Promise<void> {
     if (this.runBtn.disabled) return;
+    const mine = ++this.runSeq;
     const type = this.type.value || "IfcElement";
     const properties = this.props.value
       .split(",")
@@ -85,17 +113,21 @@ export class SchedulePanel {
     this.status.classList.remove("error");
     try {
       const report = await this.actions.run(type, properties);
+      if (mine !== this.runSeq) return;
       this.report = report;
       this.render(report);
     } catch (err) {
+      if (mine !== this.runSeq) return;
       // A failure with the previous run's table still on screen reads as if
       // that table were the result; drop it, then say what went wrong.
       this.clear();
       this.status.textContent = err instanceof Error ? err.message : String(err);
       this.status.classList.add("error");
     } finally {
-      this.runBtn.disabled = false;
-      this.runBtn.classList.remove("busy");
+      if (mine === this.runSeq) {
+        this.runBtn.disabled = false;
+        this.runBtn.classList.remove("busy");
+      }
     }
   }
 
@@ -104,6 +136,8 @@ export class SchedulePanel {
       ...report.availableProperties.map((name) => h("option", { value: name })),
     );
     this.exportBtn.disabled = report.rows.length === 0;
+    // Importing compares against the table on screen, so it needs one.
+    this.importBtn.disabled = report.rows.length === 0;
     this.status.textContent = `${report.returned.toLocaleString()} of ${report.total.toLocaleString()} ${report.type}${
       report.truncated ? " · truncated" : ""
     }`;
@@ -120,27 +154,87 @@ export class SchedulePanel {
 
     const head = h("tr", {}, report.columns.map((name) => h("th", { text: name, title: name })));
     const body = h("tbody");
-    for (const row of report.rows) {
+    const renderedRows: HTMLTableRowElement[] = [];
+    let focusIndex = 0;
+    const focusAt = (next: number, focus = true): void => {
+      const bounded = Math.max(0, Math.min(renderedRows.length - 1, next));
+      renderedRows[focusIndex]?.setAttribute("tabindex", "-1");
+      focusIndex = bounded;
+      renderedRows[focusIndex]?.setAttribute("tabindex", "0");
+      if (focus) renderedRows[focusIndex]?.focus();
+    };
+    for (const [index, row] of report.rows.entries()) {
       const id = Number(row.expressID);
-      const tr = h("tr", { title: `Select #${id}` }, report.columns.map((name) => {
+      const tr = h("tr", { title: `Select #${id}`, tabindex: index === 0 ? "0" : "-1", role: "button", "aria-label": `Select element ${id}` }, report.columns.map((name) => {
         const value = row[name];
         const text = value === null || value === undefined ? "" : String(value);
         return h("td", { class: typeof value === "number" ? "num" : "", text, title: text });
       }));
-      tr.addEventListener("click", () => {
+      const select = (): void => {
+        focusAt(index, false);
         body.querySelector("tr.sel")?.classList.remove("sel");
         tr.classList.add("sel");
         if (Number.isFinite(id)) this.actions.select(id);
+      };
+      tr.addEventListener("click", select);
+      tr.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          select();
+          return;
+        }
+        const next = event.key === "ArrowDown" ? index + 1
+          : event.key === "ArrowUp" ? index - 1
+            : event.key === "Home" ? 0
+              : event.key === "End" ? report.rows.length - 1
+                : null;
+        if (next === null) return;
+        event.preventDefault();
+        focusAt(next);
       });
+      renderedRows.push(tr);
       body.appendChild(tr);
     }
     this.host.replaceChildren(h("table", { class: "grid" }, [h("thead", {}, [head]), body]));
   }
 
+  /**
+   * The rows as the round trip sees them. One extraction feeds both the
+   * export and the re-import comparison, so an edited sheet is diffed against
+   * exactly what was written out.
+   */
+  private tableRows(): TableRow[] {
+    if (!this.report) return [];
+    return fromScheduleRows(this.report.rows, this.report.columns);
+  }
+
+  /**
+   * Read an edited sheet back. Nothing is written here: the changes become
+   * staged edits and wait for Apply, the same as an edit from the assistant.
+   */
+  private async importCsv(file: File): Promise<void> {
+    const current = this.tableRows();
+    if (current.length === 0) return toast("Run a schedule first, then export it to edit", "info");
+    const text = await file.text();
+    const incoming = parseDelimited(text, sniffDelimiter(text));
+    const diff = diffTable(current, incoming);
+    this.status.textContent = describeDiff(diff);
+    this.status.classList.toggle("error", diff.unknown.length > 0 || diff.unknownColumns.length > 0);
+    if (diff.changes.length === 0) {
+      toast(diff.unknown.length ? "Nothing to apply; no row matched" : "No changes in that file", "info");
+      return;
+    }
+    await this.actions.stageEdits(toEditOps(diff));
+  }
+
   private exportCsv(): void {
     if (!this.report) return;
-    const { columns, rows, type, truncated, total } = this.report;
-    saveCsv(`${type}-schedule.csv`, columns, rows.map((row) => columns.map((name) => row[name] as Value)));
+    const { type, truncated, total } = this.report;
+    // Written in the round trip's own column grammar, so the file that comes
+    // back is compared against exactly the names that went out.
+    const table = buildTable(this.tableRows());
+    const rows = table.slice(1);
+    saveCsv(`${type}-schedule.csv`, table[0], rows as Value[][]);
     // The engine caps a run, so a CSV can be a slice; saying so beats a file
     // that looks complete and is not.
     toast(

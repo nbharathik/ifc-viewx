@@ -8,16 +8,44 @@ import {
   IFCRELAGGREGATES,
   IFCRELCONTAINEDINSPATIALSTRUCTURE,
   IFCRELDEFINESBYPROPERTIES,
+  IFCRELDEFINESBYTYPE,
+  IFCRELASSOCIATESCLASSIFICATION,
+  IFCRELASSOCIATESMATERIAL,
+  IFCEXTERNALREFERENCERELATIONSHIP,
+  IFCMATERIALCLASSIFICATIONRELATIONSHIP,
+  IFCRELNESTS,
+  IFCRELASSIGNSTOCONTROL,
+  IFCRELASSIGNSTOPROCESS,
+  IFCRELSEQUENCE,
+  IFCRELASSIGNSTOGROUP,
+  IFCRELVOIDSELEMENT,
+  IFCRELFILLSELEMENT,
   IFCSPACE,
   IFCOPENINGELEMENT,
+  IFCTASK,
+  IFCWORKSCHEDULE,
+  IFCPRODUCT,
+  IFCPRESENTATIONLAYERASSIGNMENT,
+  IFCGRID,
+  IFCUNITASSIGNMENT,
 } from 'web-ifc';
+
+import { extractTaskGraph } from '../../ifc/taskGraph.js';
+import { extractGridAxes, lengthUnitFactor, multiply, planeAngleFactor } from '../../ifc/gridAxes.js';
 
 import type {
   IfcEngine,
   IfcMesh,
+  IfcClassification,
+  IfcGridInfo,
+  IfcMaterial,
+  IfcRelationTarget,
   IfcProperty,
   IfcPropertySet,
+  IfcTaskGraph,
   ItemProperties,
+  OrganizeGroup,
+  OrganizeIndex,
   LazyCategory,
   LoadOptions,
   LoadProgress,
@@ -29,6 +57,7 @@ import type {
   SpatialNode,
   Vec3,
 } from './types.js';
+import { readIfcGeoReference } from '../../ifc/georeferencing.js';
 
 const CATEGORY_CODES: Record<LazyCategory, number> = {
   IfcSpace: IFCSPACE,
@@ -92,6 +121,11 @@ interface CachedGeometry {
 interface ModelState {
   /** elementExpressID -> property-definition expressIDs (psets + qtos). */
   relDefsByObject: Map<number, number[]> | null;
+  typeByObject: Map<number, number> | null;
+  classificationsByObject: Map<number, number[]> | null;
+  materialsByObject: Map<number, number[]> | null;
+  externalRefsByResource: Map<number, number[]> | null;
+  partOfByObject: Map<number, Array<{ relation: string; parent: number }>> | null;
   /** geometryExpressID -> converted triangle data, shared across placements. */
   geometryCache: Map<number, CachedGeometry>;
 }
@@ -212,15 +246,27 @@ export class WebIfcAdapter implements IfcEngine {
     // The vector is a wasm allocation; only its size is wanted, so it goes
     // straight back rather than sitting in a heap capped at 32 bits.
     const allLines = this.api.GetAllLines(modelID);
-    const totalEntities = allLines.size();
-    (allLines as unknown as Deletable).delete?.();
+    let totalEntities: number;
+    try {
+      totalEntities = allLines.size();
+    } finally {
+      (allLines as unknown as Deletable).delete?.();
+    }
     if (totalEntities === 0) {
       this.dispose(modelID);
       throw new Error('No IFC entities found: the file is empty or not a valid IFC model.');
     }
     emit(onProgress, { phase: 'parsing', entities: 0, totalEntities, meshes: 0 });
 
-    this.models.set(modelID, { relDefsByObject: null, geometryCache: new Map() });
+    this.models.set(modelID, {
+      relDefsByObject: null,
+      typeByObject: null,
+      classificationsByObject: null,
+      materialsByObject: null,
+      externalRefsByResource: null,
+      partOfByObject: null,
+      geometryCache: new Map(),
+    });
 
     const meshes: IfcMesh[] = [];
     const seenElements = new Set<number>();
@@ -295,14 +341,19 @@ export class WebIfcAdapter implements IfcEngine {
       meshes: meshCount,
     });
 
-    return { modelID, meshes, bounds, stats };
+    const geo = readIfcGeoReference(this.api, modelID);
+    return { modelID, meshes, bounds, stats, geo };
   }
 
   loadCategory(modelID: number, category: LazyCategory, onMesh?: (mesh: IfcMesh) => void): IfcMesh[] {
     const code = CATEGORY_CODES[category];
     const ids = this.api.GetLineIDsWithType(modelID, code);
     const expressIDs: number[] = [];
-    for (let i = 0; i < ids.size(); i++) expressIDs.push(ids.get(i));
+    try {
+      for (let i = 0; i < ids.size(); i++) expressIDs.push(ids.get(i));
+    } finally {
+      (ids as unknown as Deletable).delete?.();
+    }
     if (expressIDs.length === 0) return [];
 
     const meshes: IfcMesh[] = [];
@@ -376,53 +427,54 @@ export class WebIfcAdapter implements IfcEngine {
     // and the interleaved buffer is then split anyway, so the public call is
     // one full copy of every vertex for nothing. Both views are read below
     // before anything calls back into wasm, which is what could move the heap.
-    const verts = this.heapView(
-      'HEAPF32',
-      geometry.GetVertexData(),
-      geometry.GetVertexDataSize(),
-    ) as Float32Array;
-    const rawIndices = this.heapView(
-      'HEAPU32',
-      geometry.GetIndexData(),
-      geometry.GetIndexDataSize(),
-    ) as Uint32Array;
+    try {
+      const verts = this.heapView(
+        'HEAPF32',
+        geometry.GetVertexData(),
+        geometry.GetVertexDataSize(),
+      ) as Float32Array;
+      const rawIndices = this.heapView(
+        'HEAPU32',
+        geometry.GetIndexData(),
+        geometry.GetIndexDataSize(),
+      ) as Uint32Array;
 
-    const vertexCount = verts.length / 6;
-    const positions = new Float32Array(vertexCount * 3);
-    const normals = new Float32Array(vertexCount * 3);
-    let minX = Infinity, minY = Infinity, minZ = Infinity;
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-    for (let v = 0; v < vertexCount; v++) {
-      const px = verts[v * 6];
-      const py = verts[v * 6 + 1];
-      const pz = verts[v * 6 + 2];
-      positions[v * 3] = px;
-      positions[v * 3 + 1] = py;
-      positions[v * 3 + 2] = pz;
-      normals[v * 3] = verts[v * 6 + 3];
-      normals[v * 3 + 1] = verts[v * 6 + 4];
-      normals[v * 3 + 2] = verts[v * 6 + 5];
-      if (px < minX) minX = px;
-      if (py < minY) minY = py;
-      if (pz < minZ) minZ = pz;
-      if (px > maxX) maxX = px;
-      if (py > maxY) maxY = py;
-      if (pz > maxZ) maxZ = pz;
+      const vertexCount = verts.length / 6;
+      const positions = new Float32Array(vertexCount * 3);
+      const normals = new Float32Array(vertexCount * 3);
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      for (let v = 0; v < vertexCount; v++) {
+        const px = verts[v * 6];
+        const py = verts[v * 6 + 1];
+        const pz = verts[v * 6 + 2];
+        positions[v * 3] = px;
+        positions[v * 3 + 1] = py;
+        positions[v * 3 + 2] = pz;
+        normals[v * 3] = verts[v * 6 + 3];
+        normals[v * 3 + 1] = verts[v * 6 + 4];
+        normals[v * 3 + 2] = verts[v * 6 + 5];
+        if (px < minX) minX = px;
+        if (py < minY) minY = py;
+        if (pz < minZ) minZ = pz;
+        if (px > maxX) maxX = px;
+        if (py > maxY) maxY = py;
+        if (pz > maxZ) maxZ = pz;
+      }
+      const indices = new Uint32Array(rawIndices);
+      const entry: CachedGeometry = {
+        geometry: { positions, normals, indices },
+        localBounds: {
+          min: { x: minX, y: minY, z: minZ },
+          max: { x: maxX, y: maxY, z: maxZ },
+        },
+        triangles: indices.length / 3,
+      };
+      state?.geometryCache.set(geometryID, entry);
+      return entry;
+    } finally {
+      geometry.delete();
     }
-    // One copy out of the heap view, taken before delete() frees it.
-    const indices = new Uint32Array(rawIndices);
-    geometry.delete();
-
-    const entry: CachedGeometry = {
-      geometry: { positions, normals, indices },
-      localBounds: {
-        min: { x: minX, y: minY, z: minZ },
-        max: { x: maxX, y: maxY, z: maxZ },
-      },
-      triangles: indices.length / 3,
-    };
-    state?.geometryCache.set(geometryID, entry);
-    return entry;
   }
 
   getSpatialTree(modelID: number): SpatialNode {
@@ -435,10 +487,13 @@ export class WebIfcAdapter implements IfcEngine {
     );
 
     const projects = this.api.GetLineIDsWithType(modelID, IFCPROJECT);
-    if (projects.size() === 0) {
-      throw new Error('No IfcProject found in model');
+    let rootID: number;
+    try {
+      if (projects.size() === 0) throw new Error('No IfcProject found in model');
+      rootID = projects.get(0);
+    } finally {
+      (projects as unknown as Deletable).delete?.();
     }
-    const rootID = projects.get(0);
     const visited = new Set<number>();
 
     const build = (id: number): SpatialNode => {
@@ -471,18 +526,48 @@ export class WebIfcAdapter implements IfcEngine {
       attributes.push({ name: key, value: unwrap(raw), unit: valueUnit(raw) });
     }
 
+    const typeID = this.typeFor(modelID, expressID);
     const psets: IfcPropertySet[] = [];
     for (const defID of this.relDefsFor(modelID, expressID)) {
       const def: any = this.api.GetLine(modelID, defID);
       const set = this.readPropertyDefinition(modelID, def);
       if (set) psets.push(set);
     }
+    if (typeID !== null) {
+      const typeLine: any = this.api.GetLine(modelID, typeID);
+      for (const handle of Array.isArray(typeLine.HasPropertySets) ? typeLine.HasPropertySets : []) {
+        if (typeof handle?.value !== 'number') continue;
+        const set = this.readPropertyDefinition(modelID, this.api.GetLine(modelID, handle.value));
+        if (set && !psets.some((item) => item.expressID === set.expressID)) psets.push(set);
+      }
+    }
+
+    const targets = typeID === null ? [expressID] : [expressID, typeID];
+    const classifications = this.associationsFor(
+      modelID,
+      'classificationsByObject',
+      IFCRELASSOCIATESCLASSIFICATION,
+      'RelatingClassification',
+      targets,
+    ).map((id) => this.readClassification(modelID, id)).filter(
+      (item: IfcClassification | null): item is IfcClassification => item !== null,
+    );
+    const materials = this.associationsFor(
+      modelID,
+      'materialsByObject',
+      IFCRELASSOCIATESMATERIAL,
+      'RelatingMaterial',
+      targets,
+    ).flatMap((id) => this.readMaterials(modelID, id));
 
     return {
       expressID,
       type: this.typeName(modelID, expressID),
       attributes,
       psets,
+      classifications: uniqueBy(classifications, (item) => `${item.system}|${item.value}|${item.uri}`),
+      materials: uniqueBy(materials, (item) => `${item.name}|${item.code}|${item.uri}`),
+      partOf: this.partOfFor(modelID, expressID),
     };
   }
 
@@ -516,6 +601,16 @@ export class WebIfcAdapter implements IfcEngine {
     return name;
   }
 
+  /** Runs fn over a GetLineIDsWithType scan, then frees the embind vector. */
+  private scanType(modelID: number, type: number, inherited: boolean, fn: (expressID: number) => void): void {
+    const ids = this.api.GetLineIDsWithType(modelID, type, inherited);
+    try {
+      for (let i = 0; i < ids.size(); i++) fn(ids.get(i));
+    } finally {
+      (ids as unknown as Deletable).delete?.();
+    }
+  }
+
   private relationMap(
     modelID: number,
     relType: number,
@@ -524,16 +619,20 @@ export class WebIfcAdapter implements IfcEngine {
   ): Map<number, number[]> {
     const map = new Map<number, number[]>();
     const rels = this.api.GetLineIDsWithType(modelID, relType);
-    for (let i = 0; i < rels.size(); i++) {
-      const rel: any = this.api.GetLine(modelID, rels.get(i));
-      const parent = rel[fromKey];
-      if (!parent || typeof parent.value !== 'number') continue;
-      const related = rel[toKey];
-      if (!Array.isArray(related)) continue;
-      const ids = related.map((h: any) => h.value).filter((v: unknown) => typeof v === 'number');
-      const existing = map.get(parent.value);
-      if (existing) existing.push(...ids);
-      else map.set(parent.value, ids);
+    try {
+      for (let i = 0; i < rels.size(); i++) {
+        const rel: any = this.api.GetLine(modelID, rels.get(i));
+        const parent = rel[fromKey];
+        if (!parent || typeof parent.value !== 'number') continue;
+        const related = rel[toKey];
+        if (!Array.isArray(related)) continue;
+        const ids = related.map((h: any) => h.value).filter((v: unknown) => typeof v === 'number');
+        const existing = map.get(parent.value);
+        if (existing) existing.push(...ids);
+        else map.set(parent.value, ids);
+      }
+    } finally {
+      (rels as unknown as Deletable).delete?.();
     }
     return map;
   }
@@ -541,6 +640,11 @@ export class WebIfcAdapter implements IfcEngine {
   private relDefsFor(modelID: number, expressID: number): number[] {
     const state = this.models.get(modelID) ?? {
       relDefsByObject: null,
+      typeByObject: null,
+      classificationsByObject: null,
+      materialsByObject: null,
+      externalRefsByResource: null,
+      partOfByObject: null,
       geometryCache: new Map<number, CachedGeometry>(),
     };
     if (!state.relDefsByObject) {
@@ -552,13 +656,12 @@ export class WebIfcAdapter implements IfcEngine {
 
   private buildRelDefIndex(modelID: number): Map<number, number[]> {
     const index = new Map<number, number[]>();
-    const rels = this.api.GetLineIDsWithType(modelID, IFCRELDEFINESBYPROPERTIES);
-    for (let i = 0; i < rels.size(); i++) {
-      const rel: any = this.api.GetLine(modelID, rels.get(i));
+    this.scanType(modelID, IFCRELDEFINESBYPROPERTIES, false, (relID) => {
+      const rel: any = this.api.GetLine(modelID, relID);
       const def = rel.RelatingPropertyDefinition;
-      if (!def || typeof def.value !== 'number') continue;
+      if (!def || typeof def.value !== 'number') return;
       const objects = rel.RelatedObjects;
-      if (!Array.isArray(objects)) continue;
+      if (!Array.isArray(objects)) return;
       for (const handle of objects) {
         const objID = handle?.value;
         if (typeof objID !== 'number') continue;
@@ -566,8 +669,203 @@ export class WebIfcAdapter implements IfcEngine {
         if (existing) existing.push(def.value);
         else index.set(objID, [def.value]);
       }
-    }
+    });
     return index;
+  }
+
+  private typeFor(modelID: number, expressID: number): number | null {
+    const state = this.models.get(modelID);
+    if (!state) return null;
+    if (!state.typeByObject) {
+      const typeIndex = new Map<number, number>();
+      this.scanType(modelID, IFCRELDEFINESBYTYPE, false, (relID) => {
+        const rel: any = this.api.GetLine(modelID, relID);
+        const typeID = rel.RelatingType?.value;
+        if (typeof typeID !== 'number' || !Array.isArray(rel.RelatedObjects)) return;
+        for (const object of rel.RelatedObjects) {
+          if (typeof object?.value === 'number') typeIndex.set(object.value, typeID);
+        }
+      });
+      state.typeByObject = typeIndex;
+    }
+    return state.typeByObject.get(expressID) ?? null;
+  }
+
+  private associationsFor(
+    modelID: number,
+    key: 'classificationsByObject' | 'materialsByObject',
+    relationType: number,
+    relatingKey: string,
+    targets: number[],
+  ): number[] {
+    const state = this.models.get(modelID);
+    if (!state) return [];
+    if (!state[key]) {
+      const index = new Map<number, number[]>();
+      this.scanType(modelID, relationType, false, (relID) => {
+        const rel: any = this.api.GetLine(modelID, relID);
+        const relatedID = rel[relatingKey]?.value;
+        if (typeof relatedID !== 'number' || !Array.isArray(rel.RelatedObjects)) return;
+        for (const object of rel.RelatedObjects) {
+          if (typeof object?.value !== 'number') continue;
+          const current = index.get(object.value) ?? [];
+          current.push(relatedID);
+          index.set(object.value, current);
+        }
+      });
+      state[key] = index;
+    }
+    return [...new Set(targets.flatMap((id) => state[key]?.get(id) ?? []))];
+  }
+
+  private readClassification(modelID: number, expressID: number): IfcClassification | null {
+    let line: any = this.api.GetLine(modelID, expressID);
+    let value: string | null = null;
+    let name: string | null = null;
+    let uri: string | null = null;
+    let system = '';
+    const seen = new Set<number>();
+    for (let depth = 0; line && depth < 12; depth++) {
+      const id = line.expressID;
+      if (typeof id === 'number' && seen.has(id)) break;
+      if (typeof id === 'number') seen.add(id);
+      const type = typeof id === 'number' ? this.typeName(modelID, id) : '';
+      const lineName = asString(unwrap(line.Name));
+      if (type === 'IfcClassification') {
+        system = lineName ?? asString(unwrap(line.Source)) ?? system;
+        uri ??= asString(unwrap(line.Location)) ?? asString(unwrap(line.Specification));
+        break;
+      }
+      value ??= asString(unwrap(line.Identification)) ?? asString(unwrap(line.ItemReference));
+      name ??= lineName;
+      uri ??= asString(unwrap(line.Location));
+      const sourceID = line.ReferencedSource?.value;
+      if (typeof sourceID !== 'number') break;
+      line = this.api.GetLine(modelID, sourceID);
+    }
+    if (!system) system = name ?? '';
+    if (!system && !value && !uri) return null;
+    return { system, value, name, uri };
+  }
+
+  private readMaterials(modelID: number, expressID: number): IfcMaterial[] {
+    const found: IfcMaterial[] = [];
+    const seen = new Set<number>();
+    const walk = (id: number): void => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      const line: any = this.api.GetLine(modelID, id);
+      if (!line) return;
+      if (this.typeName(modelID, id) === 'IfcMaterial') {
+        const name = asString(unwrap(line.Name)) ?? 'Unnamed material';
+        const reference = this.materialReferences(modelID, id)[0] ?? null;
+        found.push({
+          name,
+          category: asString(unwrap(line.Category)),
+          code: reference?.value ?? null,
+          uri: reference?.uri ?? null,
+        });
+        return;
+      }
+      for (const key of [
+        'ForLayerSet', 'ForProfileSet', 'MaterialLayers', 'MaterialProfiles',
+        'MaterialConstituents', 'Materials', 'Material',
+      ]) {
+        const value = line[key];
+        const handles = Array.isArray(value) ? value : value ? [value] : [];
+        for (const handle of handles) if (typeof handle?.value === 'number') walk(handle.value);
+      }
+    };
+    walk(expressID);
+    return found;
+  }
+
+  private materialReferences(modelID: number, materialID: number): IfcClassification[] {
+    const state = this.models.get(modelID);
+    if (!state) return [];
+    if (!state.externalRefsByResource) {
+      const index = new Map<number, number[]>();
+      const add = (resourceID: number, references: number[]): void => {
+        const current = index.get(resourceID) ?? [];
+        current.push(...references);
+        index.set(resourceID, current);
+      };
+      this.scanType(modelID, IFCEXTERNALREFERENCERELATIONSHIP, false, (relID) => {
+        const rel: any = this.api.GetLine(modelID, relID);
+        const referenceID = rel.RelatingReference?.value;
+        if (typeof referenceID !== 'number' || !Array.isArray(rel.RelatedResourceObjects)) return;
+        for (const resource of rel.RelatedResourceObjects) {
+          if (typeof resource?.value === 'number') add(resource.value, [referenceID]);
+        }
+      });
+      this.scanType(modelID, IFCMATERIALCLASSIFICATIONRELATIONSHIP, false, (relID) => {
+        const rel: any = this.api.GetLine(modelID, relID);
+        const materialID_ = rel.ClassifiedMaterial?.value;
+        const references = Array.isArray(rel.MaterialClassifications)
+          ? rel.MaterialClassifications.map((item: any) => item?.value).filter((id: unknown): id is number => typeof id === 'number')
+          : [];
+        if (typeof materialID_ === 'number') add(materialID_, references);
+      });
+      state.externalRefsByResource = index;
+    }
+    return (state.externalRefsByResource.get(materialID) ?? []).map((id) => this.readClassification(modelID, id)).filter(
+      (item: IfcClassification | null): item is IfcClassification => item !== null,
+    );
+  }
+
+  private partOfFor(modelID: number, expressID: number): IfcRelationTarget[] {
+    const state = this.models.get(modelID);
+    if (!state) return [];
+    if (!state.partOfByObject) {
+      const index = new Map<number, Array<{ relation: string; parent: number }>>();
+      const add = (child: number, parent: number, relation: string): void => {
+        const current = index.get(child) ?? [];
+        current.push({ relation, parent });
+        index.set(child, current);
+      };
+      const many = (type: number, parentKey: string, childrenKey: string, relation: string): void => {
+        this.scanType(modelID, type, false, (relID) => {
+          const line: any = this.api.GetLine(modelID, relID);
+          const parent = line[parentKey]?.value;
+          if (typeof parent !== 'number' || !Array.isArray(line[childrenKey])) return;
+          for (const child of line[childrenKey]) if (typeof child?.value === 'number') add(child.value, parent, relation);
+        });
+      };
+      const one = (type: number, parentKey: string, childKey: string, relation: string): void => {
+        this.scanType(modelID, type, false, (relID) => {
+          const line: any = this.api.GetLine(modelID, relID);
+          const parent = line[parentKey]?.value;
+          const child = line[childKey]?.value;
+          if (typeof parent === 'number' && typeof child === 'number') add(child, parent, relation);
+        });
+      };
+      many(IFCRELAGGREGATES, 'RelatingObject', 'RelatedObjects', 'IFCRELAGGREGATES');
+      many(IFCRELCONTAINEDINSPATIALSTRUCTURE, 'RelatingStructure', 'RelatedElements', 'IFCRELCONTAINEDINSPATIALSTRUCTURE');
+      many(IFCRELNESTS, 'RelatingObject', 'RelatedObjects', 'IFCRELNESTS');
+      many(IFCRELASSIGNSTOGROUP, 'RelatingGroup', 'RelatedObjects', 'IFCRELASSIGNSTOGROUP');
+      one(IFCRELVOIDSELEMENT, 'RelatingBuildingElement', 'RelatedOpeningElement', 'IFCRELVOIDSELEMENT');
+      one(IFCRELFILLSELEMENT, 'RelatingOpeningElement', 'RelatedBuildingElement', 'IFCRELFILLSELEMENT');
+      state.partOfByObject = index;
+    }
+
+    const found: IfcRelationTarget[] = [];
+    const seen = new Set<number>([expressID]);
+    const visit = (id: number): void => {
+      for (const link of state.partOfByObject?.get(id) ?? []) {
+        if (seen.has(link.parent)) continue;
+        seen.add(link.parent);
+        const line: any = this.api.GetLine(modelID, link.parent);
+        found.push({
+          relation: link.relation,
+          expressID: link.parent,
+          type: this.typeName(modelID, link.parent),
+          name: asString(unwrap(line?.Name)),
+        });
+        visit(link.parent);
+      }
+    };
+    visit(expressID);
+    return found;
   }
 
   private readPropertyDefinition(modelID: number, def: any): IfcPropertySet | null {
@@ -614,14 +912,235 @@ export class WebIfcAdapter implements IfcEngine {
     return { name, value, unit };
   }
 
+  /** Native planning graph, extracted only when a schedule consumer asks. */
+  getTaskGraph(modelID: number): IfcTaskGraph {
+    if (!this.models.has(modelID)) return { schedules: [], tasks: [], sequences: [] };
+    const lines = (type: number): Array<Record<string, unknown> & { expressID?: number }> => {
+      const found: Array<Record<string, unknown> & { expressID?: number }> = [];
+      this.scanType(modelID, type, false, (expressID) => {
+        const line = this.api.GetLine(modelID, expressID) as Record<string, unknown> & { expressID?: number };
+        if (line) found.push(line);
+      });
+      return found;
+    };
+    return extractTaskGraph({
+      schedules: lines(IFCWORKSCHEDULE),
+      tasks: lines(IFCTASK),
+      controls: lines(IFCRELASSIGNSTOCONTROL),
+      nests: lines(IFCRELNESTS),
+      aggregates: lines(IFCRELAGGREGATES),
+      processAssignments: lines(IFCRELASSIGNSTOPROCESS),
+      sequences: lines(IFCRELSEQUENCE),
+      line: (expressID) => this.api.GetLine(modelID, expressID) as Record<string, unknown> | null,
+    });
+  }
+
+  /** Groups, layers, classifications and materials, aggregated for an Organize panel. */
+  getOrganizeIndex(modelID: number): OrganizeIndex {
+    if (!this.models.has(modelID)) return { groups: [], layers: [], classifications: [], materials: [] };
+    const state = this.models.get(modelID)!;
+    const sortedIds = (ids: Set<number>): number[] => [...ids].sort((a, b) => a - b);
+
+    const groupMembers = new Map<number, Set<number>>();
+    this.scanType(modelID, IFCRELASSIGNSTOGROUP, true, (relID) => {
+      const rel: any = this.api.GetLine(modelID, relID);
+      const groupID = rel?.RelatingGroup?.value;
+      if (typeof groupID !== 'number' || !Array.isArray(rel.RelatedObjects)) return;
+      let members = groupMembers.get(groupID);
+      if (!members) {
+        members = new Set();
+        groupMembers.set(groupID, members);
+      }
+      for (const handle of rel.RelatedObjects) {
+        if (typeof handle?.value === 'number') members.add(handle.value);
+      }
+    });
+    const groups: OrganizeGroup[] = [...groupMembers].map(([expressID, ids]) => {
+      const line: any = this.api.GetLine(modelID, expressID);
+      return {
+        expressID,
+        name: asString(unwrap(line?.Name)),
+        ifcType: this.typeName(modelID, expressID),
+        ids: sortedIds(ids),
+      };
+    });
+
+    const owners = new Map<number, Set<number>>();
+    const record = (id: number, productID: number): void => {
+      let set = owners.get(id);
+      if (!set) {
+        set = new Set();
+        owners.set(id, set);
+      }
+      set.add(productID);
+    };
+    const products = this.api.GetLineIDsWithType(modelID, IFCPRODUCT, true);
+    try {
+      for (let i = 0; i < products.size(); i++) {
+        const productID = products.get(i);
+        const product: any = this.api.GetLine(modelID, productID);
+        const shapeID = product?.Representation?.value;
+        if (typeof shapeID !== 'number') continue;
+        const shape: any = this.api.GetLine(modelID, shapeID);
+        if (!Array.isArray(shape?.Representations)) continue;
+        for (const repHandle of shape.Representations) {
+          const repID = repHandle?.value;
+          if (typeof repID !== 'number') continue;
+          record(repID, productID);
+          const rep: any = this.api.GetLine(modelID, repID);
+          if (!Array.isArray(rep?.Items)) continue;
+          for (const itemHandle of rep.Items) {
+            const itemID = itemHandle?.value;
+            if (typeof itemID !== 'number') continue;
+            record(itemID, productID);
+            if (this.typeName(modelID, itemID) !== 'IfcMappedItem') continue;
+            const sourceID = (this.api.GetLine(modelID, itemID) as any)?.MappingSource?.value;
+            if (typeof sourceID !== 'number') continue;
+            const mappedRepID = (this.api.GetLine(modelID, sourceID) as any)?.MappedRepresentation?.value;
+            if (typeof mappedRepID !== 'number') continue;
+            record(mappedRepID, productID);
+            const mappedRep: any = this.api.GetLine(modelID, mappedRepID);
+            if (!Array.isArray(mappedRep?.Items)) continue;
+            for (const inner of mappedRep.Items) {
+              if (typeof inner?.value === 'number') record(inner.value, productID);
+            }
+          }
+        }
+      }
+    } finally {
+      (products as unknown as Deletable).delete?.();
+    }
+
+    const layerSets = new Map<string, Set<number>>();
+    this.scanType(modelID, IFCPRESENTATIONLAYERASSIGNMENT, true, (layerID) => {
+      const layer: any = this.api.GetLine(modelID, layerID);
+      const name = asString(unwrap(layer?.Name));
+      if (!name || !Array.isArray(layer.AssignedItems)) return;
+      let set = layerSets.get(name);
+      if (!set) {
+        set = new Set();
+        layerSets.set(name, set);
+      }
+      for (const handle of layer.AssignedItems) {
+        const id = handle?.value;
+        if (typeof id !== 'number') continue;
+        for (const productID of owners.get(id) ?? []) set.add(productID);
+      }
+    });
+
+    this.associationsFor(modelID, 'classificationsByObject', IFCRELASSOCIATESCLASSIFICATION, 'RelatingClassification', []);
+    this.associationsFor(modelID, 'materialsByObject', IFCRELASSOCIATESMATERIAL, 'RelatingMaterial', []);
+    this.typeFor(modelID, 0);
+    const occurrencesByType = new Map<number, number[]>();
+    for (const [objectID, typeID] of state.typeByObject ?? []) {
+      const list = occurrencesByType.get(typeID);
+      if (list) list.push(objectID);
+      else occurrencesByType.set(typeID, [objectID]);
+    }
+
+    const classGroups = new Map<string, { system: string; code: string | null; ids: Set<number> }>();
+    const classCache = new Map<number, IfcClassification | null>();
+    for (const [objectID, refIds] of state.classificationsByObject ?? []) {
+      const targets = occurrencesByType.get(objectID) ?? [objectID];
+      for (const refID of refIds) {
+        let item = classCache.get(refID);
+        if (item === undefined) {
+          item = this.readClassification(modelID, refID);
+          classCache.set(refID, item);
+        }
+        if (!item) continue;
+        const key = `${item.system}|${item.value}`;
+        let entry = classGroups.get(key);
+        if (!entry) {
+          entry = { system: item.system, code: item.value, ids: new Set() };
+          classGroups.set(key, entry);
+        }
+        for (const id of targets) entry.ids.add(id);
+      }
+    }
+
+    const materialSets = new Map<string, Set<number>>();
+    const materialCache = new Map<number, IfcMaterial[]>();
+    for (const [objectID, materialIds] of state.materialsByObject ?? []) {
+      const targets = occurrencesByType.get(objectID) ?? [objectID];
+      for (const materialID of materialIds) {
+        let found = materialCache.get(materialID);
+        if (!found) {
+          found = this.readMaterials(modelID, materialID);
+          materialCache.set(materialID, found);
+        }
+        for (const material of found) {
+          let set = materialSets.get(material.name);
+          if (!set) {
+            set = new Set();
+            materialSets.set(material.name, set);
+          }
+          for (const id of targets) set.add(id);
+        }
+      }
+    }
+
+    return {
+      groups: groups.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')),
+      layers: [...layerSets]
+        .map(([name, ids]) => ({ name, ids: sortedIds(ids) }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+      classifications: [...classGroups.values()]
+        .map((entry) => ({ system: entry.system, code: entry.code, ids: sortedIds(entry.ids) }))
+        .sort((a, b) => `${a.system}|${a.code ?? ''}`.localeCompare(`${b.system}|${b.code ?? ''}`)),
+      materials: [...materialSets]
+        .map(([name, ids]) => ({ name, ids: sortedIds(ids) }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    };
+  }
+
+  /** IfcGrid axis polylines in the IfcMesh.matrix frame, placement chain evaluated in JS. */
+  getGridAxes(modelID: number): IfcGridInfo[] {
+    if (!this.models.has(modelID)) return [];
+    const line = (expressID: number): (Record<string, unknown> & { expressID?: number }) | null =>
+      (this.api.GetLine(modelID, expressID) as Record<string, unknown> & { expressID?: number }) ?? null;
+    const typeName = (expressID: number): string => this.typeName(modelID, expressID);
+    const grids: Array<Record<string, unknown> & { expressID?: number }> = [];
+    this.scanType(modelID, IFCGRID, false, (id) => {
+      const grid = line(id);
+      if (grid) grids.push(grid);
+    });
+    const unitIds: number[] = [];
+    this.scanType(modelID, IFCUNITASSIGNMENT, false, (id) => {
+      unitIds.push(id);
+    });
+    const assignment = unitIds.length > 0 ? line(unitIds[0]) : null;
+    // Match the Z-up flip and length unit scale web-ifc bakes into mesh matrices.
+    const factor = lengthUnitFactor(assignment, line, typeName);
+    const zUpToYUp = [1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1];
+    const unitScale = [factor, 0, 0, 0, 0, factor, 0, 0, 0, 0, factor, 0, 0, 0, 0, 1];
+    const conversion = multiply(this.api.GetCoordinationMatrix(modelID), multiply(zUpToYUp, unitScale));
+    return extractGridAxes({
+      grids,
+      line,
+      typeName,
+      angleFactor: planeAngleFactor(assignment, line, typeName),
+      coordinationMatrix: conversion,
+    });
+  }
+
   /** Entity counts per IFC class. One index scan per type; not on the load path. */
   getCountsByType(modelID: number): Record<string, number> {
     const counts: Record<string, number> = {};
     const types = this.api.GetAllTypesOfModel(modelID) as Array<{ typeID: number; typeName: string }>;
     for (const { typeID, typeName } of types) {
-      counts[typeName] = this.api.GetLineIDsWithType(modelID, typeID).size();
+      const ids = this.api.GetLineIDsWithType(modelID, typeID);
+      try {
+        counts[typeName] = ids.size();
+      } finally {
+        (ids as unknown as Deletable).delete?.();
+      }
     }
     return counts;
+  }
+
+  disposeAll(): void {
+    for (const modelID of [...this.models.keys()]) this.dispose(modelID);
   }
 }
 
@@ -665,6 +1184,16 @@ function emit(cb: ((p: LoadProgress) => void) | undefined, progress: LoadProgres
 
 function now(): number {
   return typeof performance !== 'undefined' ? performance.now() : Date.now();
+}
+
+function uniqueBy<T>(items: T[], key: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const value = key(item);
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
 }
 
 function expandBoundsByAabb(

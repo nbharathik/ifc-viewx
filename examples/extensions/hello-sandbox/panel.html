@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sandbox Hello</title>
+  <style>
+    .summary { display: grid; grid-template-columns: 1fr auto; gap: 5px 10px; padding: 8px; border: 1px solid var(--line); border-radius: var(--r2); }
+    .summary b { font-family: var(--mono); color: var(--accent-hi); }
+    h1 { margin: 0; font-size: 15px; font-weight: 620; }
+  </style>
+</head>
+<body>
+  <main class="ifcx-page">
+    <h1>Sandbox Hello</h1>
+    <p class="ifcx-note">These values cross the permission-checked message port. This frame cannot read the viewer page.</p>
+    <div class="summary" id="summary"><span>Waiting for the host</span><b>...</b></div>
+    <button id="refresh" type="button">Refresh</button>
+  </main>
+  <script>
+    IFCViewX.ready().then((api) => {
+      const summary = document.getElementById("summary");
+      const render = async () => {
+        const [classes, selection] = await Promise.all([api.model.classes(), api.view.selection()]);
+        summary.replaceChildren();
+        const rows = [
+          ["IFC classes", classes.length],
+          ["Selected elements", selection.length],
+        ];
+        for (const [label, value] of rows) {
+          const name = document.createElement("span");
+          name.textContent = label;
+          const count = document.createElement("b");
+          count.textContent = String(value);
+          summary.append(name, count);
+        }
+      };
+      document.getElementById("refresh").addEventListener("click", render);
+      api.on("model", render);
+      api.on("selection", render);
+      render();
+    });
+  </script>
+</body>
+</html>

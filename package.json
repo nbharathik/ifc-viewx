@@ -1,29 +1,55 @@
 {
   "name": "ifc-viewer-browser",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "description": "Fast browser-based IFC viewer with Python (IfcOpenShell/Pyodide) editing, LLM assistance, and MCP bridge",
   "scripts": {
     "dev": "vite",
     "build": "npm run check && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "check": "tsc --noEmit && node scripts/check-plugins.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "eval": "node scripts/eval-assistant.mjs",
+    "boundaries": "node scripts/check-boundaries.mjs",
+    "contracts:check": "node scripts/public-contracts.mjs --check",
+    "contracts:update": "node scripts/public-contracts.mjs --write",
+    "contracts:types:check": "node scripts/sdk-type-contracts.mjs --check",
+    "contracts:types:update": "node scripts/sdk-type-contracts.mjs --write",
+    "metrics": "node scripts/project-metrics.mjs",
+    "check": "tsc --noEmit && node scripts/check-plugins.mjs && npm run boundaries && npm run contracts:check && vitest run",
     "new-plugin": "node scripts/new-plugin.mjs",
+    "extension:package": "node scripts/extension-package.mjs",
+    "extension:dev": "node scripts/extension-package.mjs --watch",
     "bump": "node scripts/bump-version.mjs",
     "catalog": "node scripts/gen-catalog.mjs",
     "docs": "npm run catalog && mkdocs serve -a 127.0.0.1:8010",
-    "docs:build": "npm run catalog && mkdocs build -d dist/docs"
+    "docs:build": "npm run catalog && mkdocs build --strict -d dist/docs"
   },
   "dependencies": {
+    "fflate": "0.8.3",
+    "pdfjs-dist": "6.2.108",
     "three": "0.184.0",
+    "three-mesh-bvh": "^0.9.14",
     "web-ifc": "0.0.77"
   },
   "devDependencies": {
+    "@types/jsdom": "30.0.0",
+    "@types/node": "^22.0.0",
     "@types/three": "0.184.1",
+    "esbuild": "0.25.12",
+    "jsdom": "^29.1.1",
     "typescript": "^5.6.0",
     "vite": "^6.0.0",
-    "vite-plugin-static-copy": "^2.2.0"
+    "vite-plugin-static-copy": "^2.2.0",
+    "vitest": "^3.2.7"
+  },
+  "overrides": {
+    "nanoid": "3.3.18"
   }
 }

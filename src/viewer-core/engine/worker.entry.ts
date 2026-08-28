@@ -130,6 +130,7 @@ async function handleLoad(req: Extract<WorkerRequest, { type: 'load' }>): Promis
       bounds: model.bounds,
       stats: { ...model.stats, downloadMs },
       tree,
+      geo: model.geo,
     },
   });
 }
@@ -186,6 +187,21 @@ scope.onmessage = (e: MessageEvent<WorkerRequest>) => {
         case 'getCounts': {
           if (!adapter) throw new Error('worker: getCounts before init');
           post({ type: 'counts', id: req.id, result: adapter.getCountsByType(req.modelID) });
+          break;
+        }
+        case 'getTaskGraph': {
+          if (!adapter) throw new Error('worker: getTaskGraph before init');
+          post({ type: 'taskGraph', id: req.id, result: adapter.getTaskGraph(req.modelID) });
+          break;
+        }
+        case 'getOrganizeIndex': {
+          if (!adapter) throw new Error('worker: getOrganizeIndex before init');
+          post({ type: 'organizeIndex', id: req.id, result: adapter.getOrganizeIndex(req.modelID) });
+          break;
+        }
+        case 'getGridAxes': {
+          if (!adapter) throw new Error('worker: getGridAxes before init');
+          post({ type: 'gridAxes', id: req.id, result: adapter.getGridAxes(req.modelID) });
           break;
         }
         case 'dispose':

@@ -1,0 +1,498 @@
+{
+  "schemaVersion": 1,
+  "typescriptVersion": "5.9.3",
+  "entry": "src/sdk/index.ts",
+  "digest": "4d53a2add96a3a5a630db1638f07f83f78cd12b3a3401c51bf591f99dbaabc0c",
+  "files": [
+    {
+      "path": "src/app/release.d.ts",
+      "bytes": 373,
+      "sha256": "4bfd0e5edf2e35ac310d53ca958b935af15298e0763771f7a35d7edb7f0469e2"
+    },
+    {
+      "path": "src/capabilities/results.d.ts",
+      "bytes": 1441,
+      "sha256": "ba4a9d61445f6e3ac933138cf7eb9e9833bb5be15e8989fb08d960e07e319581"
+    },
+    {
+      "path": "src/capabilities/types.d.ts",
+      "bytes": 2645,
+      "sha256": "86c4e71e7d9f984a682dc514752b02e115fb09989f6d325341b52e95f8e25753"
+    },
+    {
+      "path": "src/compare/modelCompare.d.ts",
+      "bytes": 1537,
+      "sha256": "195aba79205a18d1c881934771e6305e41a70c6984089116fb57ede137a2d573"
+    },
+    {
+      "path": "src/data/computed.d.ts",
+      "bytes": 3757,
+      "sha256": "2cff56b8815e425e786a8ab0300e05085ff08770f221eb4b1c9c33fc6befc7dc"
+    },
+    {
+      "path": "src/data/model.d.ts",
+      "bytes": 3046,
+      "sha256": "16a2bcda97794be1c23ed05fc85aa3a61d04789c4f136d8d92198b9a246cb12a"
+    },
+    {
+      "path": "src/data/types.d.ts",
+      "bytes": 649,
+      "sha256": "92943bdb4b6d58a5b5df4463790050414257385b50b043fac7f4b22d495c5c93"
+    },
+    {
+      "path": "src/data/xlsx.d.ts",
+      "bytes": 268,
+      "sha256": "341968d85e2e947e4a35a6a733e50402bbb965360b358505cd9862d1ba8c8005"
+    },
+    {
+      "path": "src/export/mesh.d.ts",
+      "bytes": 1263,
+      "sha256": "a89fc299d0e58d8779ecd27e7bb2c486fe71637407bca31a96916d13462bc78b"
+    },
+    {
+      "path": "src/extensions/api.d.ts",
+      "bytes": 10629,
+      "sha256": "f0a65731b257d75db905b92fbbf5b50406a1b06c01d882091fe52d6cb6465335"
+    },
+    {
+      "path": "src/geo/coordinates.d.ts",
+      "bytes": 1450,
+      "sha256": "c59fa790752cbb0f1e5e3c66d7af58595bfce2795ecff3961de84ee81f9aab07"
+    },
+    {
+      "path": "src/geo/solar.d.ts",
+      "bytes": 1718,
+      "sha256": "d5a122a300c574d9b3564d3be5c9f58c0cb04651345582729af12eb1751b5826"
+    },
+    {
+      "path": "src/geometry/clash/broadphase.d.ts",
+      "bytes": 948,
+      "sha256": "6080acf9b29e1b03e3606195905888a90be9b944380ff402ad01bbe86713622d"
+    },
+    {
+      "path": "src/geometry/clash/narrow.d.ts",
+      "bytes": 2574,
+      "sha256": "d6706d7226012cf3b796ab801fd0e4a28e6bbd3fbcc2ea5300bca37f135c7e41"
+    },
+    {
+      "path": "src/geometry/clash/sweep.d.ts",
+      "bytes": 597,
+      "sha256": "a0d0e427f49c2a915891a7b71470344fc727de12659ad7f14d190da6746f9a77"
+    },
+    {
+      "path": "src/geometry/clash/types.d.ts",
+      "bytes": 3001,
+      "sha256": "a1947ae804f8bdca81bd7a68d9d72260d1b0586bbfb40245fc43b5d15dee6470"
+    },
+    {
+      "path": "src/geometry/clash/workflow.d.ts",
+      "bytes": 1772,
+      "sha256": "cab3f7965f7d76c47b389045f1b33706ac8dbb1e6a77c1aecd5e9976027dea2e"
+    },
+    {
+      "path": "src/geometry/deviation.d.ts",
+      "bytes": 579,
+      "sha256": "fc63487ac9b71f26cbaa839457112a8e042347e22b8701bb5ad7a4d05aae59a8"
+    },
+    {
+      "path": "src/geometry/deviationQuery.d.ts",
+      "bytes": 517,
+      "sha256": "c06e4d0f26cda1f978bc5dd39fefcb84af04e67beebafe6fd55f02dc5f6cc3ca"
+    },
+    {
+      "path": "src/geometry/distance.d.ts",
+      "bytes": 444,
+      "sha256": "d67712a52cb00d5f2431f4cc8e28982edce1180bbd07db5ac16b0aadc229f1d9"
+    },
+    {
+      "path": "src/geometry/distanceQuery.d.ts",
+      "bytes": 225,
+      "sha256": "2f62caec025d4655b98d0d171f322ff518114f9a44f42d439499c9a97824fdbe"
+    },
+    {
+      "path": "src/geometry/geometryIndex.d.ts",
+      "bytes": 2109,
+      "sha256": "2219127cdbf5cd46eac368d7897d72665c17939867fd3c6052878e7783a3cecb"
+    },
+    {
+      "path": "src/geometry/laser.d.ts",
+      "bytes": 500,
+      "sha256": "17d2472849b54a46d2e30af0a3f1947b17d5fb46b9d21b486fce5c24451051e7"
+    },
+    {
+      "path": "src/geometry/laserQuery.d.ts",
+      "bytes": 342,
+      "sha256": "e643dfa9a846b4909539028ef2c65497ba29b21625fafbe59526aeb9bf47e326"
+    },
+    {
+      "path": "src/geometry/meshQuery.d.ts",
+      "bytes": 503,
+      "sha256": "56f6e5be49656a42b5b9117a20cebf9f09076aeb660f8036b30d4866cbf58cc0"
+    },
+    {
+      "path": "src/geometry/meshes.d.ts",
+      "bytes": 509,
+      "sha256": "b70a50a42d81f5d94961ac28371c2f4a39b798629c0467fa1ab304e6a96a7652"
+    },
+    {
+      "path": "src/geometry/modelTransform.d.ts",
+      "bytes": 727,
+      "sha256": "c58fce7926b05288bff4ed755c49e0d6d37da433845d0f13755ea195772db824"
+    },
+    {
+      "path": "src/geometry/placementBroadPhase.d.ts",
+      "bytes": 1793,
+      "sha256": "8fa84fde88430bbea3256b7667ce9b6638f78b0e38ff47f6db90a29597bf2678"
+    },
+    {
+      "path": "src/geometry/plane.d.ts",
+      "bytes": 791,
+      "sha256": "999102510fe7b8afd56bc1fea9895af4ff5ac04f33d99388a66b7559c5806787"
+    },
+    {
+      "path": "src/geometry/planeQuery.d.ts",
+      "bytes": 382,
+      "sha256": "6ec8a3097dc9d802894957dc24afe6b1dcc91f7ee27f5e1c4d4908d6b8269218"
+    },
+    {
+      "path": "src/geometry/section.d.ts",
+      "bytes": 542,
+      "sha256": "cebe468c197fee9601d627dc81abbae55d5f04ce2452ce56d584d7f91a5ae512"
+    },
+    {
+      "path": "src/geometry/sectionQuery.d.ts",
+      "bytes": 392,
+      "sha256": "ae3b5f4b5e9d03cbf1d36d8b724963d187bd94b87044eb4b506254bde59f802d"
+    },
+    {
+      "path": "src/geometry/service.d.ts",
+      "bytes": 2073,
+      "sha256": "900392659e8da227b479e2e9bd3439a91d41dc6eb9e01d5747bec1df18c68163"
+    },
+    {
+      "path": "src/geometry/signature.d.ts",
+      "bytes": 593,
+      "sha256": "41668ebc178c9de03ec79c98dfb9ed70bd6fce2e57db8cd3ff43376e7c6ea770"
+    },
+    {
+      "path": "src/geometry/signatureQuery.d.ts",
+      "bytes": 401,
+      "sha256": "396523e5cad77ef4b492a8edc23a79b4517603e9d6b6409aded7d182d930270c"
+    },
+    {
+      "path": "src/geometry/signatures.d.ts",
+      "bytes": 410,
+      "sha256": "de8a8c37d870668c8c9e74c571908031350ef63ea01d6eb138f3db3e78f613de"
+    },
+    {
+      "path": "src/geometry/sun.d.ts",
+      "bytes": 958,
+      "sha256": "ba0c380c581535809415ced2bcae84ae28a7ef9b44af30cbd4fdc02dc92dc16b"
+    },
+    {
+      "path": "src/geometry/sunQuery.d.ts",
+      "bytes": 507,
+      "sha256": "2a7829807b9cafadf4558a04a7948bb3bafdc5a2fdb1426a04b53531b9cfd266"
+    },
+    {
+      "path": "src/geometry/sunValidation.d.ts",
+      "bytes": 1018,
+      "sha256": "0027bfadf21ab4be1a5bbbbd924d8b97bef0d035cfe37c99c126fd65b8c8ee32"
+    },
+    {
+      "path": "src/geometry/types.d.ts",
+      "bytes": 9424,
+      "sha256": "6e74d9218cfdc9f4cabf2e6392df845d42e64e6120c13996566284fe2cc94271"
+    },
+    {
+      "path": "src/geometry/volumeQuery.d.ts",
+      "bytes": 354,
+      "sha256": "a783e3f42e0bc09723f97130bbada598acdc59ee595025d3902d954e80458b9d"
+    },
+    {
+      "path": "src/geometry/volumes.d.ts",
+      "bytes": 350,
+      "sha256": "3984a9274540402563a36b99a6230c6e217a1b5395fb4e24e98ffde22ae20f02"
+    },
+    {
+      "path": "src/ids/bsdd.d.ts",
+      "bytes": 392,
+      "sha256": "27211d7286d803691cd4f7cfefcf2972828131cd6c657a40c78791fb729400b6"
+    },
+    {
+      "path": "src/ids/document.d.ts",
+      "bytes": 1925,
+      "sha256": "4b1af835db90c7371fbcc34e3279c3a54ee5d3545edb586932cf2f592f1600e8"
+    },
+    {
+      "path": "src/ifc/clash.d.ts",
+      "bytes": 1723,
+      "sha256": "b3c6dfda0890d3e026837973ac3f36fcbf23b253ca3b75d7cef88c1ca954b587"
+    },
+    {
+      "path": "src/ifc/georeferencing.d.ts",
+      "bytes": 202,
+      "sha256": "5530ff43f030f28ca06ff23abc7eae3a50f1122ef6807c9bc7fbbbad25c7b060"
+    },
+    {
+      "path": "src/ifc/gridAxes.d.ts",
+      "bytes": 1532,
+      "sha256": "ecfaab8c84cde224810d9cd3021cedfedc6532342cd452c153714e1f12e60f33"
+    },
+    {
+      "path": "src/ifc/taskGraph.d.ts",
+      "bytes": 466,
+      "sha256": "0c544d8f1dcae00fe1d10bf799dc83c961ac207205a6de02c57e52e4747b3277"
+    },
+    {
+      "path": "src/llm/actions.d.ts",
+      "bytes": 1596,
+      "sha256": "06355be93abbd83c69e1084119fdc1df9d4c875f8b2a153a56c291da1980a5aa"
+    },
+    {
+      "path": "src/llm/retrieval.d.ts",
+      "bytes": 794,
+      "sha256": "3010c7b2f7941cc1003555955be20b416360dc19eeffc4e0a9b4c03707e79f3f"
+    },
+    {
+      "path": "src/pointcloud/las.d.ts",
+      "bytes": 2007,
+      "sha256": "421ec6a5bbc5aabe1d06f200b1ea25b26506b10e2e2903608c6a372cd70c2910"
+    },
+    {
+      "path": "src/results/docket.d.ts",
+      "bytes": 779,
+      "sha256": "277ac132fa32cd5f192aec131b592dacc3c4e55ef81f72f30eac28d565ea1360"
+    },
+    {
+      "path": "src/results/findings.d.ts",
+      "bytes": 473,
+      "sha256": "13472c489800f64ea4a291f80bbb7c7635c0ecb7a417aecccc276a90bc21fe6c"
+    },
+    {
+      "path": "src/rules/contextModel.d.ts",
+      "bytes": 1065,
+      "sha256": "62d28671c8a402a2c7f180832991f7206fe4f590d4000367c2b62dc1103e96e7"
+    },
+    {
+      "path": "src/rules/engine.d.ts",
+      "bytes": 5160,
+      "sha256": "386f9a81e666d2ce503294e1b5e27b0f4bc22503edc0f58386ee8b13c2f30b40"
+    },
+    {
+      "path": "src/rules/library.d.ts",
+      "bytes": 197,
+      "sha256": "b883fd08b8eff938c66b39ac6f8c76c9f1c56eee907d7ec32d14d44eb2b1d0d6"
+    },
+    {
+      "path": "src/sdk/contributions.d.ts",
+      "bytes": 3237,
+      "sha256": "1b70ecd170fce2ab4792ff6579933ecdaefa5f3636e85ac5e7144fa55f9f5095"
+    },
+    {
+      "path": "src/sdk/data.d.ts",
+      "bytes": 34,
+      "sha256": "ad1e1cd35410ee81ed83fb45b2da187ecda3dbc5ae230a8c1416b9a97551973f"
+    },
+    {
+      "path": "src/sdk/define.d.ts",
+      "bytes": 151,
+      "sha256": "7532ad6500c3c75fee5903d63d40a82ba20311f4b2eb92a7615f0da254082bcb"
+    },
+    {
+      "path": "src/sdk/index.d.ts",
+      "bytes": 5901,
+      "sha256": "aa3ee1d553bd4ef7894e09e8ab8c0a886ad764f8801db1a7c1f7444ed39f93c0"
+    },
+    {
+      "path": "src/sdk/parse.d.ts",
+      "bytes": 816,
+      "sha256": "0298ec13fcc9ed70c2550ce4bd2ead68e419b17ed881c8fa656676ee6f680e0a"
+    },
+    {
+      "path": "src/sdk/types.d.ts",
+      "bytes": 38,
+      "sha256": "c6f0dad7dd9f2cfdffc5c5880e88548ea1d58ca8da20e33cec16ab3a66e1c0d4"
+    },
+    {
+      "path": "src/sdk/ui.d.ts",
+      "bytes": 2885,
+      "sha256": "03d66d3ead70d2c1abd8334ada6a7e0e443b04329d1ef4813166ca0ed0cb20a5"
+    },
+    {
+      "path": "src/sheets/sheet.d.ts",
+      "bytes": 5359,
+      "sha256": "b11e3db903ed7f0dfd7f17978f5ff76303b9591211d572fddb0f9358e2d3f16b"
+    },
+    {
+      "path": "src/ui/commands.d.ts",
+      "bytes": 1779,
+      "sha256": "a7b203baf1c0da212af00c00c12cbc3bd28661fef762713e656864f80c6ff5e7"
+    },
+    {
+      "path": "src/ui/filters.d.ts",
+      "bytes": 3161,
+      "sha256": "92ed99339252cf9aeb29ec0144f5fdbc54b6f61acf9f0ca3eb4600c88d826e68"
+    },
+    {
+      "path": "src/ui/ids.d.ts",
+      "bytes": 4450,
+      "sha256": "4a70cfbc28a6b713ca0cccf3cf76f04e76fbbf36f00067a43c47374c0dda6110"
+    },
+    {
+      "path": "src/ui/kit.d.ts",
+      "bytes": 7336,
+      "sha256": "bd59ab3e0a125aef161ac7756a3e6cb4dec818850d27fac2956860c9f7a35e5d"
+    },
+    {
+      "path": "src/ui/resultsDock.d.ts",
+      "bytes": 1777,
+      "sha256": "168d9113c11779f4ef258ec06e0ae375198c023a2ea688af6294636aa47c1d55"
+    },
+    {
+      "path": "src/ui/shell.d.ts",
+      "bytes": 3641,
+      "sha256": "d961aa6abb7adc6aa3e970f2b9025d8471c2b00250e287d1eb388a48f8fa2d9c"
+    },
+    {
+      "path": "src/viewer-core/arrange.d.ts",
+      "bytes": 895,
+      "sha256": "568a79defd7c3a7cc9c4e05d8a9e5e3754a914ac854676ef62660aadcf0433de"
+    },
+    {
+      "path": "src/viewer-core/engine/adapter.d.ts",
+      "bytes": 2922,
+      "sha256": "423eb6d9f25227fe44a4b0587305855cb580025091f5cc86844e871c932171da"
+    },
+    {
+      "path": "src/viewer-core/engine/cache.d.ts",
+      "bytes": 2712,
+      "sha256": "c5cd3903afc0892cfa2067b339cd8054aa7fca307b3935746fead03e6a5c3c01"
+    },
+    {
+      "path": "src/viewer-core/engine/inlineEngine.d.ts",
+      "bytes": 1170,
+      "sha256": "4705b021e6f87e88b7dd6e8dc0bda4006b4489431da239e6b6a452a21544cd5e"
+    },
+    {
+      "path": "src/viewer-core/engine/packets.d.ts",
+      "bytes": 4052,
+      "sha256": "2bc3eb63c35aa35a94ade553bb707b8fb497c9fcc09a9cf07642e4dea3510a3b"
+    },
+    {
+      "path": "src/viewer-core/engine/types.d.ts",
+      "bytes": 11809,
+      "sha256": "3e2ea2fb292d6969839ecc87e03203532d6aaa2d964b38cf7ceb4d1dba262402"
+    },
+    {
+      "path": "src/viewer-core/engine/workerEngine.d.ts",
+      "bytes": 2353,
+      "sha256": "812a67bd6ebfb83cab1029979e324cf7cb9baac7a116f78a3d17e93c711cd261"
+    },
+    {
+      "path": "src/viewer-core/federation.d.ts",
+      "bytes": 507,
+      "sha256": "ce66dc26ca4f000a861a29ec74aa66f91f3697daa21c9bc0e7fdfd3110b6f00e"
+    },
+    {
+      "path": "src/viewer-core/flyStats.d.ts",
+      "bytes": 1317,
+      "sha256": "0a27118fcbeb611b00cab5def0ccc0707658b576979fbdde358dfb444439e594"
+    },
+    {
+      "path": "src/viewer-core/ids.d.ts",
+      "bytes": 841,
+      "sha256": "42506c9f5d8cec3fe362138a8667b18e11dbfe3103d0698ff99c598452069eb0"
+    },
+    {
+      "path": "src/viewer-core/measurements.d.ts",
+      "bytes": 4198,
+      "sha256": "0d1fe0d503a24e4b2d200037ec5112548f2c3a047bd99ad29d9acd957c6a7bf6"
+    },
+    {
+      "path": "src/viewer-core/panels/axisGizmo.d.ts",
+      "bytes": 1306,
+      "sha256": "646598bee6630ca223d9336d2428fcc4b40b1f40cfe0dfac34be16aea4949f90"
+    },
+    {
+      "path": "src/viewer-core/panels/overlays.d.ts",
+      "bytes": 636,
+      "sha256": "25fe224034a308dc0dfae0f6a83998a8cfccfddd3686e538f2b5f234a87fcae4"
+    },
+    {
+      "path": "src/viewer-core/panels/perfHud.d.ts",
+      "bytes": 925,
+      "sha256": "19080ca64f06a5a2ade19c71ab3d99405fcba6f9912a881b130e70b20e17ddfc"
+    },
+    {
+      "path": "src/viewer-core/panels/properties.d.ts",
+      "bytes": 1139,
+      "sha256": "7a8b76f2e0718a0e0bd7009392fa12aa520ad6c25f24831e3d3b299dde745313"
+    },
+    {
+      "path": "src/viewer-core/panels/styles.d.ts",
+      "bytes": 64,
+      "sha256": "e30c51d673d81fa8fd057afe2f665f280e236fd8bf7498f62cbd5ba0bf7b0c43"
+    },
+    {
+      "path": "src/viewer-core/panels/tree.d.ts",
+      "bytes": 4453,
+      "sha256": "032e199e59ab2fbdc6b31358701a1e1109ce035c369a7519fd077866f5d21927"
+    },
+    {
+      "path": "src/viewer-core/scene/batcher.d.ts",
+      "bytes": 13468,
+      "sha256": "ef4266e3a2e4034e2502affa1d719e6d6f1579ab77e459b6e6eb4445a3713d18"
+    },
+    {
+      "path": "src/viewer-core/scene/controls.d.ts",
+      "bytes": 7206,
+      "sha256": "41be92eee021a3e0f90b06a014c090e850c2f8af8e1686e38bc1009543b0b54f"
+    },
+    {
+      "path": "src/viewer-core/scene/scene.d.ts",
+      "bytes": 21247,
+      "sha256": "1b1e39ece9f3c47f907d1791b2ed0c6e078eace5f34e864b00fb3251cd08cacc"
+    },
+    {
+      "path": "src/viewer-core/scene/triangleStore.d.ts",
+      "bytes": 2423,
+      "sha256": "515c36a633a499039e2cc86f4e74e6f66f0fde56a6ca4208f5ea8b3f847b93b4"
+    },
+    {
+      "path": "src/viewer-core/scene/webgl.d.ts",
+      "bytes": 1398,
+      "sha256": "1c4c55ea9fbcdb433055b85eaed558d6d343863f4b10f0f6cff5f38ab002cee4"
+    },
+    {
+      "path": "src/viewer-core/scene/xr.d.ts",
+      "bytes": 1622,
+      "sha256": "d05a1a2dac8bd128613b58c816f755efccf436423a0ffbbbe08afe90ea9829e6"
+    },
+    {
+      "path": "src/viewer-core/sections.d.ts",
+      "bytes": 1237,
+      "sha256": "7db90904307d85c384a5971f8267470dee0115964df1d72d188b9a6a60a857ed"
+    },
+    {
+      "path": "src/viewer-core/viewer.d.ts",
+      "bytes": 21700,
+      "sha256": "d9685f1a67935fa61d8509586bd7c022cb2f069a8d3c75aae0f54cd231f328bf"
+    },
+    {
+      "path": "src/viewer-core/visibility.d.ts",
+      "bytes": 380,
+      "sha256": "d10af221924a244ee3cf6abae0af1584aa3a14006d9a6ccc23d667ff53927e5e"
+    },
+    {
+      "path": "src/views/color.d.ts",
+      "bytes": 2316,
+      "sha256": "ffa6d4ec20b7540204f5a9a11efcca94e2aeeb6ad90f43a3cfa123e2aceb702c"
+    },
+    {
+      "path": "src/views/definition.d.ts",
+      "bytes": 6642,
+      "sha256": "7779fc9d898dbe2186387b500fa76b5baf1080cc6d19a040dcdd24eb39761cc3"
+    }
+  ]
+}

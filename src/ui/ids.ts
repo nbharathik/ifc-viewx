@@ -1,13 +1,20 @@
-// IDS: load a buildingSMART Information Delivery Specification and check the
-// model against it in this tab. Entity, attribute and property facets are
-// evaluated. Classification, material and partOf need data the viewer does not
-// carry, so they are listed as unchecked rather than silently passed.
+// IDS validation shared by the inspector, assistant and IDS Studio plugin.
+import { publishDocket, type DocketRow } from "./resultsDock.js";
 import { h, icon, spinner } from "./kit.js";
 import { emptyState } from "./shell.js";
 import { scanElements } from "./filters.js";
-import type { ItemProperties, Viewer } from "../viewer-core/viewer.js";
+import type { ItemProperties, Viewer, SpatialNode } from "../viewer-core/viewer.js";
 
 type Matcher = (value: string) => boolean;
+
+/**
+ * What a facet knows besides the element's own properties. Today that is its
+ * spatial ancestry, which is what `partOf` asks about and what no property
+ * read can answer.
+ */
+export interface FacetContext {
+  ancestors(expressID: number): Array<{ type: string; name: string }>;
+}
 
 interface Facet {
   kind: string;
@@ -15,27 +22,38 @@ interface Facet {
   label: string;
   /** Prefilter on the IFC class, so a spec only reads what it is about. */
   typeTest?: (type: string) => boolean;
-  test(props: ItemProperties): boolean;
+  test(props: ItemProperties, context: FacetContext): boolean;
+  correction?: string;
 }
 
-interface Spec {
+export interface Spec {
   name: string;
   description: string;
+  minOccurs: number;
+  maxOccurs: number | null;
   applicability: Facet[];
   requirements: Facet[];
 }
 
-interface SpecResult {
+export interface SpecResult {
   spec: Spec;
   applicable: number;
   passed: number;
-  failures: Array<{ id: number; reason: string }>;
+  failures: Array<{ id: number; reason: string; suggestion?: string }>;
   truncated: boolean;
   /** Elements the viewer could not read at all (geometry-only .ifcx). */
   unreadable: number;
+  applicabilityIssue: string | null;
+  /**
+   * Applicability facets this app cannot evaluate. Non-empty means the spec
+   * was NOT run: without applicability there is no way to know which elements
+   * it covers, and reporting a pass over the wrong set is worse than
+   * reporting nothing.
+   */
+  blocked: string[];
 }
 
-interface IdsDocument {
+export interface IdsDocument {
   title: string;
   fileName: string;
   specs: Spec[];
@@ -48,12 +66,15 @@ interface IdsDocument {
  */
 let loaded: IdsDocument | null = null;
 
-const loadedIds = (): IdsDocument | null => loaded;
+export const loadedIds = (): IdsDocument | null => loaded;
 
 /** Parse and install, which is the only way a document becomes the loaded one. */
-function loadIds(text: string, fileName: string): IdsDocument {
+export function loadIds(text: string, fileName: string): IdsDocument {
   const parsed = parseIds(text);
   loaded = { title: parsed.title, fileName, specs: parsed.specs };
+  // Results belong to the document that produced them.
+  last = null;
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("ifcviewx:ids-loaded"));
   return loaded;
 }
 
@@ -102,7 +123,11 @@ function matcher(node: Element | null): Matcher | null {
     if (patterns.length && !patterns.some((pattern) => pattern.test(text))) return false;
     if (options.length && !options.includes(text.toLowerCase())) return false;
     const number = Number(text);
-    if (Number.isFinite(number)) {
+    const bounded = min !== null || max !== null || above !== null || below !== null;
+    if (bounded) {
+      // A numeric bound cannot be met by a value that is not a number, so
+      // "REI 60" must fail minInclusive 90 rather than slip through unchecked.
+      if (!Number.isFinite(number)) return false;
       if (min !== null && number < min) return false;
       if (max !== null && number > max) return false;
       if (above !== null && number <= above) return false;
@@ -127,6 +152,19 @@ const attributeValues = (props: ItemProperties, match: Matcher | null): string[]
     .filter((item) => item.value !== null && (!match || match(item.name)))
     .map((item) => String(item.value));
 
+type Cardinality = "required" | "optional" | "prohibited";
+
+const readCardinality = (node: Element): Cardinality => {
+  const value = attribute(node, "cardinality") || (attribute(node, "minOccurs") === "0" ? "optional" : "required");
+  return value === "optional" || value === "prohibited" ? value : "required";
+};
+
+const cardinalityTest = (cardinality: Cardinality, present: boolean, matches: boolean): boolean => {
+  if (cardinality === "prohibited") return !matches;
+  if (cardinality === "optional") return !present || matches;
+  return matches;
+};
+
 function readFacet(node: Element): Facet {
   const kind = node.localName;
   if (kind === "entity") {
@@ -149,13 +187,16 @@ function readFacet(node: Element): Facet {
   if (kind === "attribute") {
     const name = matcher(child(node, "name"));
     const value = matcher(child(node, "value"));
+    const cardinality = readCardinality(node);
+    const labelName = describe(child(node, "name"));
     return {
       kind,
       supported: true,
-      label: `attribute ${describe(child(node, "name"))}${value ? ` is ${describe(child(node, "value"))}` : ""}`,
+      label: `attribute ${labelName}${value ? ` is ${describe(child(node, "value"))}` : ""}`,
+      correction: `Set attribute ${labelName}${value ? ` to ${describe(child(node, "value"))}` : ""}`,
       test: (props) => {
         const values = attributeValues(props, name).filter((item) => item !== "");
-        return value ? values.some(value) : values.length > 0;
+        return cardinalityTest(cardinality, values.length > 0, value ? values.some(value) : values.length > 0);
       },
     };
   }
@@ -163,16 +204,17 @@ function readFacet(node: Element): Facet {
     const set = matcher(child(node, "propertySet"));
     const base = matcher(child(node, "baseName"));
     const value = matcher(child(node, "value"));
-    const cardinality = attribute(node, "cardinality") || (attribute(node, "minOccurs") === "0" ? "optional" : "required");
+    const cardinality = readCardinality(node);
     const setLabel = describe(child(node, "propertySet"));
+    const propertyLabel = describe(child(node, "baseName"));
     return {
       kind,
       supported: true,
-      label: `${setLabel}.${describe(child(node, "baseName"))}${value ? ` is ${describe(child(node, "value"))}` : ""}${
+      label: `${setLabel}.${propertyLabel}${value ? ` is ${describe(child(node, "value"))}` : ""}${
         cardinality === "prohibited" ? " (prohibited)" : ""
       }`,
+      correction: `Add ${setLabel}.${propertyLabel}${value ? ` with value ${describe(child(node, "value"))}` : ""}`,
       test: (props) => {
-        if (cardinality === "optional") return true;
         const values: string[] = [];
         for (const pset of props.psets) {
           if (set && !set(pset.name)) continue;
@@ -181,12 +223,85 @@ function readFacet(node: Element): Facet {
             if (property.value !== null && String(property.value) !== "") values.push(String(property.value));
           }
         }
-        const present = value ? values.some(value) : values.length > 0;
-        return cardinality === "prohibited" ? !present : present;
+        return cardinalityTest(cardinality, values.length > 0, value ? values.some(value) : values.length > 0);
       },
     };
   }
-  return { kind, supported: false, label: kind, test: () => true };
+  if (kind === "classification") {
+    const system = matcher(child(node, "system"));
+    const value = matcher(child(node, "value"));
+    const cardinality = readCardinality(node);
+    const systemLabel = describe(child(node, "system"));
+    const valueLabel = describe(child(node, "value"));
+    return {
+      kind,
+      supported: true,
+      label: `classification ${systemLabel}${value ? ` : ${valueLabel}` : ""}`,
+      correction: `Assign classification ${systemLabel}${value ? ` : ${valueLabel}` : ""}`,
+      test: (props) => {
+        const candidates = (props.classifications ?? []).filter((item) => !system || system(item.system));
+        const matches = candidates.some((item) => !value || [item.value, item.name, item.uri]
+          .some((entry) => entry !== null && value(entry)));
+        return cardinalityTest(cardinality, candidates.length > 0, matches);
+      },
+    };
+  }
+  if (kind === "material") {
+    const value = matcher(child(node, "value"));
+    const cardinality = readCardinality(node);
+    const valueLabel = describe(child(node, "value"));
+    return {
+      kind,
+      supported: true,
+      label: `material ${valueLabel}`,
+      correction: `Assign material ${valueLabel}`,
+      test: (props) => {
+        const materials = props.materials ?? [];
+        const matches = materials.some((item) => !value || [item.name, item.category, item.code, item.uri]
+          .some((entry) => entry !== null && value(entry)));
+        return cardinalityTest(cardinality, materials.length > 0, matches);
+      },
+    };
+  }
+  if (kind === "partOf") {
+    const entity = child(node, "entity");
+    const name = matcher(entity ? child(entity, "name") : null);
+    const relation = (attribute(node, "relation") || "").toUpperCase();
+    const relations = new Set(relation.split(/\s+/).filter(Boolean));
+    const cardinality = readCardinality(node);
+    const targetLabel = entity ? describe(child(entity, "name")) : "anything";
+    return {
+      kind,
+      supported: true,
+      label: `part of ${targetLabel}${relation ? ` via ${relation}` : ""}`,
+      correction: `Associate the element with ${targetLabel}${relation ? ` using ${relation}` : ""}`,
+      test: (props, context) => {
+        const spatial = context.ancestors(props.expressID).map((item) => ({ ...item, relation: "" }));
+        const related = props.partOf ?? [];
+        const spatialRelation = relations.size === 0 || [...relations].some((item) =>
+          item === "IFCRELCONTAINEDINSPATIALSTRUCTURE" || item === "IFCRELAGGREGATES");
+        const chain = [
+          ...(related.length === 0 && spatialRelation ? spatial : []),
+          ...related.filter((item) => relations.size === 0 || relations.has(item.relation)),
+        ];
+        const matches = chain.some((item) => !name || name(item.type) || name(item.name ?? ""));
+        return cardinalityTest(cardinality, chain.length > 0, matches);
+      },
+    };
+  }
+
+  // An unsupported facet must never answer a test. Returning true here is how
+  // a validator quietly claims to have checked something it cannot: in
+  // applicability it would match every element in the model. Throwing means a
+  // caller that forgets the `supported` guard fails loudly instead.
+  return {
+    kind,
+    supported: false,
+    label: `${kind} (not supported by this validator)`,
+    test: () => {
+      throw new Error(`the ${kind} facet cannot be evaluated here`);
+    },
+  };
 }
 
 const readFacets = (node: Element | null): Facet[] =>
@@ -200,14 +315,43 @@ function parseIds(text: string): { title: string; specs: Spec[] } {
   const info = child(root, "info");
   const specs = [...root.getElementsByTagName("*")]
     .filter((node) => node.localName === "specification")
-    .map((node) => ({
-      name: attribute(node, "name") || "Specification",
-      description: attribute(node, "description") || (child(node, "description")?.textContent ?? ""),
-      applicability: readFacets(child(node, "applicability")),
-      requirements: readFacets(child(node, "requirements")),
-    }));
+    .map((node) => {
+      const applicability = child(node, "applicability");
+      const minimum = Number(attribute(applicability ?? node, "minOccurs") || "1");
+      const maximum = attribute(applicability ?? node, "maxOccurs") || "1";
+      const maximumNumber = Number(maximum);
+      return {
+        name: attribute(node, "name") || "Specification",
+        description: attribute(node, "description") || (child(node, "description")?.textContent ?? ""),
+        minOccurs: Number.isInteger(minimum) && minimum >= 0 ? minimum : 1,
+        maxOccurs: maximum === "unbounded"
+          ? null
+          : Number.isInteger(maximumNumber) && maximumNumber >= 0 ? maximumNumber : 1,
+        applicability: readFacets(applicability),
+        requirements: readFacets(child(node, "requirements")),
+      };
+    });
   if (specs.length === 0) throw new Error("The IDS holds no specifications.");
   return { title: (info && child(info, "title")?.textContent) || "IDS", specs };
+}
+
+/**
+ * Every element's spatial ancestry, walked once from the tree. Building it per
+ * element would be a tree walk per element; a spec over ten thousand walls
+ * would walk the tree ten thousand times.
+ */
+export function spatialContext(viewer: Viewer): FacetContext {
+  const chains = new Map<number, Array<{ type: string; name: string }>>();
+  const tree = viewer.getSpatialTree();
+  if (tree) {
+    const walk = (node: SpatialNode, above: Array<{ type: string; name: string }>): void => {
+      chains.set(node.expressID, above);
+      const below = [...above, { type: node.type, name: node.name ?? "" }];
+      for (const kid of node.children) walk(kid, below);
+    };
+    walk(tree, []);
+  }
+  return { ancestors: (expressID) => chains.get(expressID) ?? [] };
 }
 
 async function runSpec(
@@ -215,36 +359,52 @@ async function runSpec(
   spec: Spec,
   onProgress: (done: number, total: number) => void,
 ): Promise<SpecResult> {
+  // Applicability decides which elements the specification is about. If any
+  // part of it cannot be evaluated, the covered set is unknown, so the whole
+  // specification is reported as not run rather than run over the wrong set.
+  const blocked = [...new Set(spec.applicability.filter((facet) => !facet.supported).map((facet) => facet.kind))];
+  if (blocked.length) {
+    return { spec, applicable: 0, passed: 0, failures: [], truncated: false, unreadable: 0, applicabilityIssue: null, blocked };
+  }
+
   const types = viewer.getElementTypes();
   const prefilters = spec.applicability.map((facet) => facet.typeTest).filter(Boolean) as Array<(type: string) => boolean>;
   const candidates = [...types].filter(([, type]) => prefilters.every((test) => test(type))).map(([id]) => id);
+  const context = spatialContext(viewer);
 
-  const reasons = new Map<number, string>();
+  const reasons = new Map<number, { reason: string; suggestion?: string }>();
   let applicable = 0;
   let passed = 0;
   const found = await scanElements(
     viewer,
     candidates,
     (props) => {
-      if (!spec.applicability.every((facet) => facet.test(props))) return false;
+      if (!spec.applicability.every((facet) => facet.test(props, context))) return false;
       applicable++;
-      const failed = spec.requirements.find((facet) => facet.supported && !facet.test(props));
+      const failed = spec.requirements.find((facet) => facet.supported && !facet.test(props, context));
       if (!failed) {
         passed++;
         return false;
       }
-      reasons.set(props.expressID, failed.label);
+      reasons.set(props.expressID, { reason: failed.label, suggestion: failed.correction });
       return true;
     },
     onProgress,
   );
+  const applicabilityIssue = applicable < spec.minOccurs
+    ? `Expected at least ${spec.minOccurs} applicable element${spec.minOccurs === 1 ? "" : "s"}, found ${applicable}`
+    : spec.maxOccurs !== null && applicable > spec.maxOccurs
+      ? `Expected at most ${spec.maxOccurs} applicable element${spec.maxOccurs === 1 ? "" : "s"}, found ${applicable}`
+      : null;
   return {
     spec,
     applicable,
     passed,
-    failures: found.ids.map((id) => ({ id, reason: reasons.get(id) ?? "requirement not met" })),
+    failures: found.ids.map((id) => ({ id, ...(reasons.get(id) ?? { reason: "requirement not met" }) })),
     truncated: found.truncated,
     unreadable: found.missing,
+    applicabilityIssue,
+    blocked: [],
   };
 }
 
@@ -253,7 +413,7 @@ async function runSpec(
  * to paint as it goes; the assistant takes the array and summarises it. One
  * runner, so the two can never report different results for the same file.
  */
-async function runIds(
+export async function runIds(
   viewer: Viewer,
   onSpec?: (result: SpecResult, index: number, total: number) => void,
   onProgress?: (spec: Spec, index: number, total: number, done: number, of: number) => void,
@@ -268,12 +428,95 @@ async function runIds(
     results.push(result);
     onSpec?.(result, index, total);
   }
+  last = summarize(results);
+  publishIdsDocket(results);
   return results;
 }
 
-/** The same run, flattened to what an LLM can read in one report. */
-export async function idsReport(viewer: Viewer): Promise<Record<string, unknown>> {
-  const results = await runIds(viewer);
+/** The run, as rows on the shared dock, grouped by specification. */
+function publishIdsDocket(results: SpecResult[]): void {
+  const rows: DocketRow[] = [];
+  for (const result of results) {
+    const group = result.spec.name;
+    if (result.blocked.length) {
+      rows.push({
+        id: `${group}-blocked`,
+        severity: "warning",
+        title: `${group} could not be evaluated`,
+        detail: `Unsupported applicability: ${result.blocked.join(", ")}`,
+        group,
+        ids: [],
+      });
+      continue;
+    }
+    if (result.applicabilityIssue) {
+      rows.push({
+        id: `${group}-applicability`,
+        severity: "error",
+        title: result.applicabilityIssue,
+        group,
+        ids: [],
+      });
+    }
+    for (const failure of result.failures) {
+      rows.push({
+        id: `${group}-${failure.id}`,
+        severity: "error",
+        title: failure.reason,
+        detail: failure.suggestion,
+        group,
+        ids: [failure.id],
+      });
+    }
+  }
+  const failed = results.filter((result) => result.failures.length || result.applicabilityIssue).length;
+  publishDocket({
+    id: "ids",
+    producer: "IDS",
+    title: loaded?.title ?? "IDS",
+    summary: `${failed} of ${results.length} specification(s) failed`,
+    rows,
+  });
+}
+
+export type IdsSpecReport = {
+  name: string;
+  status: "not_run" | "fail" | "pass";
+  applicable: number;
+  passed: number;
+  failed: number;
+  truncated: boolean;
+  blockedBy: string[];
+  notChecked: string[];
+  requirements: string[];
+  failures: Array<{ id: number; reason: string; suggestion?: string }>;
+  applicabilityIssue?: string | null;
+};
+
+export type IdsReport = {
+  ids: string;
+  file: string;
+  specifications: IdsSpecReport[];
+  failedSpecifications: number;
+  notRunSpecifications: number;
+  readable: boolean;
+};
+
+/**
+ * The last run, whichever path ran it. The offline report shows this rather
+ * than starting its own pass, so what it prints is what the user saw.
+ */
+let last: IdsReport | null = null;
+
+export const lastIdsReport = (): IdsReport | null => last;
+
+/** A model load invalidates the previous run, while keeping the IDS file ready to run again. */
+export const clearLastIdsReport = (): void => {
+  last = null;
+};
+
+/** One run flattened, shared by the assistant and the report. */
+function summarize(results: SpecResult[]): IdsReport {
   const applicable = results.reduce((sum, result) => sum + result.applicable, 0);
   const unreadable = results.reduce((sum, result) => sum + result.unreadable, 0);
   return {
@@ -281,19 +524,32 @@ export async function idsReport(viewer: Viewer): Promise<Record<string, unknown>
     file: loaded?.fileName ?? "",
     specifications: results.map((result) => ({
       name: result.spec.name,
+      // A blocked spec was not run at all; saying "0 applicable, 0 failed"
+      // without this reads exactly like a clean pass.
+      status: (result.blocked.length
+        ? "not_run"
+        : result.applicabilityIssue || result.failures.length ? "fail" : "pass") as IdsSpecReport["status"],
       applicable: result.applicable,
       passed: result.passed,
-      failed: result.failures.length,
+      failed: result.failures.length + (result.applicabilityIssue ? 1 : 0),
       truncated: result.truncated,
+      blockedBy: result.blocked,
       notChecked: [...new Set([...result.spec.applicability, ...result.spec.requirements]
         .filter((facet) => !facet.supported).map((facet) => facet.kind))],
       requirements: result.spec.requirements.map((facet) => facet.label),
       failures: result.failures.slice(0, 20),
+      applicabilityIssue: result.applicabilityIssue,
     })),
-    failedSpecifications: results.filter((result) => result.failures.length > 0).length,
+    failedSpecifications: results.filter((result) => result.applicabilityIssue || result.failures.length > 0).length,
+    notRunSpecifications: results.filter((result) => result.blocked.length > 0).length,
     // A geometry-only .ifcx reads as a clean pass, which would be a lie.
     readable: !(applicable === 0 && unreadable > 0),
   };
+}
+
+/** The same run, flattened to what an LLM can read in one report. */
+export async function idsReport(viewer: Viewer): Promise<IdsReport> {
+  return summarize(await runIds(viewer));
 }
 
 export interface IdsActions {
@@ -303,6 +559,8 @@ export interface IdsActions {
   log(message: string, kind?: "info" | "success" | "error"): void;
   /** A document was loaded or replaced; the assistant can now check it. */
   changed?(): void;
+  /** Open the authoring studio, for writing requirements rather than checking. */
+  openStudio?(): void;
 }
 
 export class IdsPanel {
@@ -324,14 +582,17 @@ export class IdsPanel {
     });
     this.run.addEventListener("click", () => void this.validate().catch((err: Error) => this.fail(err)));
 
+    const row = h("div", { class: "row" }, [this.open, this.run, this.input]);
+    if (actions.openStudio) {
+      const studio = h("button", {
+        class: "link-btn", type: "button", text: "Author requirements",
+        title: "Open the IDS Studio to write or edit specifications",
+      });
+      studio.addEventListener("click", () => actions.openStudio?.());
+      row.appendChild(studio);
+    }
     host.appendChild(
-      h("div", { class: "page" }, [
-        h("div", { class: "row" }, [this.open, this.run, this.input]),
-        this.title,
-        this.status,
-        this.empty,
-        this.results,
-      ]),
+      h("div", { class: "page" }, [row, this.title, this.status, this.empty, this.results]),
     );
   }
 
@@ -375,7 +636,7 @@ export class IdsPanel {
       await runIds(
         this.actions.viewer,
         (result) => {
-          if (result.failures.length) failedSpecs++;
+          if (result.applicabilityIssue || result.failures.length) failedSpecs++;
           if (result.truncated) capped++;
           applicable += result.applicable;
           unreadable += result.unreadable;
@@ -409,7 +670,7 @@ export class IdsPanel {
 
   private renderResult(result: SpecResult): HTMLElement {
     const { spec } = result;
-    const failed = result.failures.length;
+    const failed = result.failures.length + (result.applicabilityIssue ? 1 : 0);
     // A spec whose requirements are all facet kinds this checker does not
     // implement has not passed; nothing about it was tested.
     const untested =
@@ -442,6 +703,7 @@ export class IdsPanel {
     if (result.truncated) {
       body.appendChild(h("div", { class: "note", text: "Scan capped; run again after narrowing with filters." }));
     }
+    if (result.applicabilityIssue) body.appendChild(h("div", { class: "note", text: result.applicabilityIssue }));
     if (spec.requirements.length) {
       body.appendChild(
         h("div", { class: "note", text: `Requires: ${spec.requirements.map((facet) => facet.label).join("; ")}` }),

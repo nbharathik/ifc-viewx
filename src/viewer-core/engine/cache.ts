@@ -11,11 +11,14 @@ import {
   CancelledError,
   type AsyncIfcEngine,
   type AsyncLoadOptions,
+  type IfcGridInfo,
   type IfcMesh,
+  type IfcTaskGraph,
   type ItemProperties,
   type LazyCategory,
   type LoadSource,
   type LoadedModelMeta,
+  type OrganizeIndex,
 } from './types.js';
 
 export const FORMAT_VERSION = 1;
@@ -28,7 +31,7 @@ const CACHE_LIMIT_BYTES = 1 << 30;
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-const align = (n: number, to: number): number => (n + to - 1) & ~(to - 1);
+const align = (n: number, to: number): number => Math.ceil(n / to) * to;
 
 interface ChunkLayout {
   ids: number;
@@ -86,6 +89,17 @@ export function serializeBatch(batch: MeshBatch): ArrayBuffer {
   const p = batch.placements;
   const geoCount = g.ids.length;
   const placements = p.expressIDs.length;
+  const vertices = g.vertexCounts.reduce((sum, count) => sum + count, 0);
+  const indices = g.indexCounts.reduce((sum, count) => sum + count, 0);
+  if (
+    g.vertexCounts.length !== geoCount || g.indexCounts.length !== geoCount ||
+    g.localBounds.length !== geoCount * 6 || g.positions.length !== vertices * 3 ||
+    g.normals.length !== g.positions.length || g.indices.length !== indices ||
+    p.geometryIDs.length !== placements || p.matrices.length !== placements * 16 ||
+    p.colors.length !== placements * 4 || p.ifcTypes.length !== placements
+  ) {
+    throw new Error('invalid mesh batch');
+  }
 
   const table: string[] = [];
   const tableIndex = new Map<string, number>();
@@ -95,6 +109,7 @@ export function serializeBatch(batch: MeshBatch): ArrayBuffer {
     let ti = tableIndex.get(name);
     if (ti === undefined) {
       ti = table.length;
+      if (ti > 0xffff) throw new Error('too many IFC types in mesh batch');
       tableIndex.set(name, ti);
       table.push(name);
     }
@@ -127,6 +142,7 @@ export function serializeBatch(batch: MeshBatch): ArrayBuffer {
 }
 
 export function deserializeBatch(buf: ArrayBuffer): MeshBatch {
+  if (buf.byteLength < 20) throw new Error('corrupt cache chunk');
   const view = new DataView(buf);
   const geoCount = view.getUint32(0, true);
   const placements = view.getUint32(4, true);
@@ -136,18 +152,34 @@ export function deserializeBatch(buf: ArrayBuffer): MeshBatch {
   const l = chunkLayout(geoCount, placements, posFloats, idxCount, typeBytes);
   if (l.total !== buf.byteLength) throw new Error('corrupt cache chunk');
 
-  const typeTable = JSON.parse(
-    dec.decode(new Uint8Array(buf, l.typeTable, typeBytes)),
-  ) as string[];
+  let typeTable: unknown;
+  try {
+    typeTable = JSON.parse(dec.decode(new Uint8Array(buf, l.typeTable, typeBytes)));
+  } catch {
+    throw new Error('corrupt cache chunk');
+  }
+  if (!Array.isArray(typeTable) || typeTable.some((entry) => typeof entry !== 'string')) {
+    throw new Error('corrupt cache chunk');
+  }
   const typeIndex = new Uint16Array(buf, l.typeIndex, placements);
   const ifcTypes = new Array<string>(placements);
-  for (let i = 0; i < placements; i++) ifcTypes[i] = typeTable[typeIndex[i]];
+  for (let i = 0; i < placements; i++) {
+    const name = typeTable[typeIndex[i]];
+    if (name === undefined) throw new Error('corrupt cache chunk');
+    ifcTypes[i] = name;
+  }
+
+  const vertexCounts = new Uint32Array(buf, l.vertexCounts, geoCount);
+  const indexCounts = new Uint32Array(buf, l.indexCounts, geoCount);
+  const vertices = vertexCounts.reduce((sum, count) => sum + count, 0);
+  const indices = indexCounts.reduce((sum, count) => sum + count, 0);
+  if (vertices * 3 !== posFloats || indices !== idxCount) throw new Error('corrupt cache chunk');
 
   return {
     geometries: {
       ids: new Uint32Array(buf, l.ids, geoCount),
-      vertexCounts: new Uint32Array(buf, l.vertexCounts, geoCount),
-      indexCounts: new Uint32Array(buf, l.indexCounts, geoCount),
+      vertexCounts,
+      indexCounts,
       localBounds: new Float64Array(buf, l.localBounds, geoCount * 6),
       positions: new Float32Array(buf, l.positions, posFloats),
       normals: new Float32Array(buf, l.normals, posFloats),
@@ -167,7 +199,16 @@ interface CacheManifest {
   stats: LoadedModelMeta['stats'];
   bounds: LoadedModelMeta['bounds'];
   tree: LoadedModelMeta['tree'];
+  geo?: LoadedModelMeta['geo'];
 }
+
+const emptyGeo = (): LoadedModelMeta['geo'] => ({
+  schema: '',
+  projectedCrs: null,
+  operation: null,
+  trueNorth: null,
+  warnings: ['Georeferencing metadata is unavailable in this converted cache.'],
+});
 
 interface CacheHit {
   manifest: CacheManifest;
@@ -299,9 +340,15 @@ class ModelStore {
   async *chunks(hit: CacheHit): AsyncGenerator<ArrayBuffer> {
     let off = 8;
     while (off < hit.end) {
-      const len = new DataView(await hit.file.slice(off, off + 4).arrayBuffer()).getUint32(0, true);
+      if (off + 4 > hit.end) throw new Error('corrupt cache container');
+      const frame = await hit.file.slice(off, off + 4).arrayBuffer();
+      if (frame.byteLength !== 4) throw new Error('corrupt cache container');
+      const len = new DataView(frame).getUint32(0, true);
       off += 4;
-      yield await hit.file.slice(off, off + len).arrayBuffer();
+      if (len > hit.end - off) throw new Error('corrupt cache container');
+      const payload = await hit.file.slice(off, off + len).arrayBuffer();
+      if (payload.byteLength !== len) throw new Error('corrupt cache container');
+      yield payload;
       off += len;
     }
   }
@@ -484,12 +531,14 @@ export async function loadCachedSource(sha: string): Promise<Uint8Array | null> 
   return store.readSource(sha);
 }
 
-/** True when the buffer is a format v1 container (magic "IFCX"). */
+/** True when the buffer has a committed format-v1 header and trailer. */
 export function isFormatBytes(bytes: Uint8Array): boolean {
-  return (
-    bytes.byteLength > 16 &&
-    new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true) === MAGIC
-  );
+  if (bytes.byteLength < 16) return false;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint32(0, true) !== MAGIC || view.getUint32(4, true) !== FORMAT_VERSION) return false;
+  const manifestBytes = view.getUint32(bytes.byteLength - 8, true);
+  return view.getUint32(bytes.byteLength - 4, true) === MAGIC_END
+    && manifestBytes <= bytes.byteLength - 16;
 }
 
 /**
@@ -516,16 +565,29 @@ function digest(bytes: Uint8Array): Promise<string | null> {
 }
 
 /**
- * Transparent cache layer over any engine. Serves one model at a time, like
- * the app: incoming modelIDs are ignored and requests go to the single live
- * model, reopening it from the retained source bytes when a warm load never
- * parsed one.
+ * One loaded model as this layer sees it: the source bytes it was opened from,
+ * and the inner engine's handle once something has needed the parser.
+ *
+ * A warm load replays geometry straight out of the cache and never opens a
+ * parser at all, so `live` stays null until the first property read.
+ */
+interface Slot {
+  bytes: Uint8Array | null;
+  live: number | null;
+  opening: Promise<number> | null;
+}
+
+/**
+ * Transparent cache layer over any engine. Every load takes a slot, and the
+ * `modelID` handed back is that slot rather than the inner engine's handle,
+ * so a property read for the services model cannot be answered by the
+ * architecture model. Slots reopen their retained source bytes on demand,
+ * because a warm load never parsed one.
  */
 export class CachedEngine implements AsyncIfcEngine {
   private readonly store: Promise<ModelStore | null>;
-  private bytes: Uint8Array | null = null;
-  private liveID: number | null = null;
-  private opening: Promise<number> | null = null;
+  private readonly slots = new Map<number, Slot>();
+  private slotSeq = 0;
   private loadToken = 0;
 
   constructor(private readonly inner: AsyncIfcEngine) {
@@ -538,22 +600,38 @@ export class CachedEngine implements AsyncIfcEngine {
 
   async loadModel(source: LoadSource, options: AsyncLoadOptions = {}): Promise<LoadedModelMeta> {
     const token = ++this.loadToken;
-    this.bytes = source.kind === 'bytes' ? source.bytes : null;
-    this.liveID = null;
-    this.opening = null;
+    const slotID = this.slotSeq++;
+    const slot: Slot = {
+      bytes: source.kind === 'bytes' ? source.bytes : null,
+      live: null,
+      opening: null,
+    };
+    this.slots.set(slotID, slot);
 
     // A converted .ifcx file replays directly; no parser involved.
-    if (this.bytes && isFormatBytes(this.bytes)) {
-      return this.replayBuffer(this.bytes, options, token);
+    if (slot.bytes && isFormatBytes(slot.bytes)) {
+      try {
+        return await this.replayBuffer(slot.bytes, options, token, slotID);
+      } catch (err) {
+        this.slots.delete(slotID);
+        throw err;
+      }
     }
 
     const store = await this.store;
     const sha =
-      store && this.bytes && !options.skipGeometry ? await digest(this.bytes) : null;
+      store && slot.bytes && !options.skipGeometry ? await digest(slot.bytes) : null;
 
     if (store && sha) {
       const hit = await store.read(sha);
-      if (hit) return this.replay(store, hit, options, token);
+      if (hit) {
+        try {
+          return await this.replay(store, hit, options, token, slotID);
+        } catch (err) {
+          this.slots.delete(slotID);
+          throw err;
+        }
+      }
     }
 
     const writer = store && sha ? await store.beginWrite(sha) : null;
@@ -561,7 +639,7 @@ export class CachedEngine implements AsyncIfcEngine {
     try {
       const meta = await this.inner.loadModel(
         // Hand the worker a copy it can transfer; ours is retained for reopen.
-        this.bytes ? { kind: 'bytes', bytes: this.bytes.slice() } : source,
+        slot.bytes ? { kind: 'bytes', bytes: slot.bytes.slice() } : source,
         {
           ...options,
           onMeshBatch: (meshes: IfcMesh[]) => {
@@ -576,17 +654,20 @@ export class CachedEngine implements AsyncIfcEngine {
       );
       if (token !== this.loadToken) {
         this.inner.dispose(meta.modelID);
+        this.slots.delete(slotID);
         throw new CancelledError();
       }
-      this.liveID = meta.modelID;
+      slot.live = meta.modelID;
       if (writer) {
         void writer
-          .commit({ stats: meta.stats, bounds: meta.bounds, tree: meta.tree })
+          .commit({ stats: meta.stats, bounds: meta.bounds, tree: meta.tree, geo: meta.geo })
           .catch(() => undefined);
       }
-      return meta;
+      // The slot, not the inner handle: callers address models through here.
+      return { ...meta, modelID: slotID };
     } catch (err) {
       if (writer) void writer.abort().catch(() => undefined);
+      this.slots.delete(slotID);
       throw err;
     }
   }
@@ -596,6 +677,7 @@ export class CachedEngine implements AsyncIfcEngine {
     bytes: Uint8Array,
     options: AsyncLoadOptions,
     token: number,
+    slotID: number,
   ): Promise<LoadedModelMeta> {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const size = bytes.byteLength;
@@ -611,14 +693,25 @@ export class CachedEngine implements AsyncIfcEngine {
       dec.decode(bytes.subarray(end, end + manifestBytes)),
     ) as CacheManifest;
 
+    // The manifest becomes the model's identity (its stats key the caches), so
+    // a dropped file cannot be trusted to carry sane numbers.
+    const stats = (manifest as Partial<CacheManifest>)?.stats;
+    if (!manifest || typeof manifest !== "object" || !stats ||
+      !Number.isSafeInteger(stats.totalEntities) || stats.totalEntities < 0 ||
+      !Number.isSafeInteger(stats.triangleCount) || stats.triangleCount < 0) {
+      throw new Error("That .ifcx file is not readable.");
+    }
+
     const registry = new GeometryRegistry();
     const totalEntities = manifest.stats.totalEntities;
     let meshes = 0;
     let off = 8;
     while (off < end) {
       if (token !== this.loadToken) throw new CancelledError();
+      if (off + 4 > end) throw new Error('Corrupt .ifcx chunk framing.');
       const len = view.getUint32(off, true);
       off += 4;
+      if (len > end - off) throw new Error('Corrupt .ifcx chunk framing.');
       const payload = bytes.buffer.slice(
         bytes.byteOffset + off,
         bytes.byteOffset + off + len,
@@ -630,7 +723,13 @@ export class CachedEngine implements AsyncIfcEngine {
       options.onProgress?.({ phase: 'geometry', entities: meshes, totalEntities, meshes });
     }
     options.onProgress?.({ phase: 'done', entities: totalEntities, totalEntities, meshes });
-    return { modelID: -1, bounds: manifest.bounds, stats: manifest.stats, tree: manifest.tree };
+    return {
+      modelID: slotID,
+      bounds: manifest.bounds,
+      stats: manifest.stats,
+      tree: manifest.tree,
+      geo: manifest.geo ?? emptyGeo(),
+    };
   }
 
   private async replay(
@@ -638,6 +737,7 @@ export class CachedEngine implements AsyncIfcEngine {
     hit: CacheHit,
     options: AsyncLoadOptions,
     token: number,
+    slotID: number,
   ): Promise<LoadedModelMeta> {
     const registry = new GeometryRegistry();
     const totalEntities = hit.manifest.stats.totalEntities;
@@ -651,71 +751,99 @@ export class CachedEngine implements AsyncIfcEngine {
     }
     options.onProgress?.({ phase: 'done', entities: totalEntities, totalEntities, meshes });
     return {
-      modelID: -1,
+      modelID: slotID,
       bounds: hit.manifest.bounds,
       stats: { ...hit.manifest.stats, parseMs: 0, geometryMs: 0 },
       tree: hit.manifest.tree,
+      geo: hit.manifest.geo ?? emptyGeo(),
     };
   }
 
-  /** Open the retained bytes in the inner engine, parse only, at most once. */
-  private ensureLive(): Promise<number> {
-    if (this.liveID !== null) return Promise.resolve(this.liveID);
-    if (!this.opening) {
-      const bytes = this.bytes;
+  /**
+   * Open one slot's retained bytes in the inner engine, parse only, at most
+   * once per slot. A warm load replayed geometry from disk and never parsed,
+   * so the first property read is what pays for the parser.
+   */
+  private ensureLive(slotID: number): Promise<number> {
+    const slot = this.slots.get(slotID);
+    if (!slot) return Promise.reject(new Error(`model ${slotID} is not loaded`));
+    if (slot.live !== null) return Promise.resolve(slot.live);
+    if (!slot.opening) {
+      const bytes = slot.bytes;
       if (!bytes) return Promise.reject(new Error('no model loaded'));
       const opening: Promise<number> = this.inner
         .loadModel({ kind: 'bytes', bytes: bytes.slice() }, { skipGeometry: true })
         .then((meta) => {
-          if (this.opening !== opening) {
+          if (slot.opening !== opening) {
             this.inner.dispose(meta.modelID);
             throw new CancelledError();
           }
-          this.liveID = meta.modelID;
+          slot.live = meta.modelID;
           return meta.modelID;
         })
         .catch((err) => {
-          if (this.opening === opening) this.opening = null;
+          if (slot.opening === opening) slot.opening = null;
           throw err;
         });
-      this.opening = opening;
+      slot.opening = opening;
     }
-    return this.opening;
+    return slot.opening;
   }
 
   async loadCategory(
-    _modelID: number,
+    modelID: number,
     category: LazyCategory,
     onMeshBatch: (meshes: IfcMesh[]) => void,
   ): Promise<void> {
-    const id = await this.ensureLive();
+    const id = await this.ensureLive(modelID);
     return this.inner.loadCategory(id, category, onMeshBatch);
   }
 
-  async getItemProperties(_modelID: number, expressID: number): Promise<ItemProperties> {
-    const id = await this.ensureLive();
+  async getItemProperties(modelID: number, expressID: number): Promise<ItemProperties> {
+    const id = await this.ensureLive(modelID);
     return this.inner.getItemProperties(id, expressID);
   }
 
-  async getCountsByType(_modelID: number): Promise<Record<string, number>> {
-    const id = await this.ensureLive();
+  async getCountsByType(modelID: number): Promise<Record<string, number>> {
+    const id = await this.ensureLive(modelID);
     return this.inner.getCountsByType(id);
   }
 
-  dispose(_modelID: number): void {
-    if (this.liveID !== null) this.inner.dispose(this.liveID);
-    this.liveID = null;
-    this.opening = null;
-    this.bytes = null;
+  async getTaskGraph(modelID: number): Promise<IfcTaskGraph> {
+    const id = await this.ensureLive(modelID);
+    return this.inner.getTaskGraph(id);
+  }
+
+  async getOrganizeIndex(modelID: number): Promise<OrganizeIndex> {
+    const id = await this.ensureLive(modelID);
+    return this.inner.getOrganizeIndex(id);
+  }
+
+  async getGridAxes(modelID: number): Promise<IfcGridInfo[]> {
+    const id = await this.ensureLive(modelID);
+    return this.inner.getGridAxes(id);
+  }
+
+  dispose(modelID: number): void {
+    const slot = this.slots.get(modelID);
+    if (!slot) return;
+    slot.opening = null;
+    if (slot.live !== null) this.inner.dispose(slot.live);
+    this.slots.delete(modelID);
   }
 
   cancel(): void {
     this.loadToken++;
+    for (const slot of this.slots.values()) {
+      slot.live = null;
+      slot.opening = null;
+    }
     this.inner.cancel();
   }
 
   terminate(): void {
     this.loadToken++;
+    this.slots.clear();
     this.inner.terminate();
   }
 }

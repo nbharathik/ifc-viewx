@@ -24,43 +24,47 @@ if (await access(dir).then(() => true, () => false)) {
   process.exit(1);
 }
 
-const manifest = `import { definePlugin } from "@ifcviewx/sdk";
+const manifest = `${JSON.stringify({
+  manifestVersion: 2,
+  id,
+  name: title,
+  version: "0.1.0",
+  sdk: ">=2.0.0 <3",
+  description: "A short description of what this extension does.",
+  runtime: { kind: "bundled", entry: "panel.ts" },
+  activationEvents: [`onPanel:${id}`],
+  permissions: ["model.structure.read"],
+  contributes: {
+    panels: [{ id, title, icon: "blocks" }],
+  },
+  catalog: {
+    tagline: "One line on what it does",
+    about: "A paragraph for the catalog. Say what it reads, what it changes, and anything a user would be surprised by.",
+    icon: "blocks",
+    category: "Data",
+    keywords: "search terms people would type",
+    does: ["The first thing it does", "The second thing it does"],
+  },
+}, null, 2)}\n`;
 
-export default definePlugin({
-  id: "${id}",
-  name: "${title}",
-  tagline: "One line on what it does",
-  about:
-    "A paragraph for the catalog. Say what it reads, what it changes, and anything a user would be surprised by.",
-  icon: "blocks",
-  category: "Data",
-  keywords: "search terms people would type",
-  tier: "web",
-  does: [
-    "The first thing it does",
-    "The second thing it does",
-  ],
-});
-`;
+const panel = `import { bar, button, note, page, stats, type ExtensionContext, type ExtensionInstance } from "@ifcviewx/sdk";
 
-const panel = `import { bar, button, note, page, stats, type PluginContext, type PluginInstance } from "@ifcviewx/sdk";
-
-export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
+export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstance {
   const body = document.createElement("div");
   const root = page(bar(button("Count elements", () => run())), body);
 
   const run = (): void => {
-    const elements = ctx.elements();
+    const elements = ctx.model.elements();
     body.replaceChildren(
       stats([
         ["Elements", elements.length.toLocaleString()],
-        ["Classes", String(ctx.classes().length)],
+        ["Classes", String(ctx.model.classes().length)],
       ]),
       note("Click an element in the viewport and this panel can react to it."),
     );
   };
 
-  ctx.on("model", () => run());
+  ctx.events.on("model", () => run());
   host.appendChild(root);
   run();
 
@@ -69,11 +73,11 @@ export function mount(host: HTMLElement, ctx: PluginContext): PluginInstance {
 `;
 
 await mkdir(dir, { recursive: true });
-await writeFile(join(dir, "manifest.ts"), manifest);
+await writeFile(join(dir, "extension.json"), manifest);
 await writeFile(join(dir, "panel.ts"), panel);
 
 console.log(`Created src/plugins/${id}/`);
-console.log("  manifest.ts   what the catalog shows");
+console.log("  extension.json   permissions, activation, and catalog metadata");
 console.log("  panel.ts      what runs when someone opens it");
 console.log("");
 console.log("Run `npm run dev` and open the Plugins button. Nothing else to register.");

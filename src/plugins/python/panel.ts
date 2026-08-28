@@ -6,8 +6,8 @@
 // The static guard is deliberately not in this path. It exists to check code an
 // LLM wrote; what you type here is your own, and running natively the service
 // applies its own guard regardless of who wrote it.
-import { h, icon, iconButton, toast } from "@ifcviewx/sdk";
-import type { PluginContext, PluginInstance } from "@ifcviewx/sdk";
+import { h, header, icon, iconButton, toast } from "@ifcviewx/sdk";
+import type { ExtensionContext, ExtensionInstance } from "@ifcviewx/sdk";
 
 const START = `# The model is available as \`model\` (ifcopenshell.file).
 # Assign to \`result\` to display a value.
@@ -28,7 +28,7 @@ const SNIPPETS: Array<[string, string]> = [
   ],
 ];
 
-export function mount(host: HTMLElement, ctx: PluginContext, payload?: unknown): PluginInstance {
+export function mount(host: HTMLElement, ctx: ExtensionContext, payload?: unknown): ExtensionInstance {
   const code = h("textarea", { class: "code", spellcheck: "false" });
   const output = h("pre", { class: "output" });
   const status = h("div", { class: "status-line" });
@@ -44,7 +44,7 @@ export function mount(host: HTMLElement, ctx: PluginContext, payload?: unknown):
     title: "Execute on a copy and stage the result",
   });
 
-  code.value = typeof payload === "string" && payload.trim() ? payload : ctx.read("code", START);
+  code.value = typeof payload === "string" && payload.trim() ? payload : ctx.storage.read("code", START);
 
   const setStatus = (text: string, isError = false): void => {
     status.textContent = text;
@@ -69,7 +69,7 @@ export function mount(host: HTMLElement, ctx: PluginContext, payload?: unknown):
 
   const run = (mode: "query" | "edit"): void => {
     if (busy) return;
-    ctx.write("code", code.value);
+    ctx.storage.write("code", code.value);
     setBusy(true);
     setStatus(mode === "edit" ? "Executing the edit on a copy" : "Running query");
     const call =
@@ -91,7 +91,7 @@ export function mount(host: HTMLElement, ctx: PluginContext, payload?: unknown):
 
   runBtn.addEventListener("click", () => run("query"));
   editBtn.addEventListener("click", () => run("edit"));
-  code.addEventListener("change", () => ctx.write("code", code.value));
+  code.addEventListener("change", () => ctx.storage.write("code", code.value));
   code.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
@@ -119,9 +119,10 @@ export function mount(host: HTMLElement, ctx: PluginContext, payload?: unknown):
   });
 
   syncTier();
-  ctx.on("service", syncTier);
+  ctx.events.on("service", syncTier);
   host.appendChild(
     h("div", { class: "page" }, [
+      header("Python console", "Write IfcOpenShell against the open model. Edits run on a copy and stage for review."),
       code,
       h("div", { class: "row" }, [runBtn, editBtn, snippets, h("span", { class: "grow" }), tier]),
       status,
@@ -129,7 +130,11 @@ export function mount(host: HTMLElement, ctx: PluginContext, payload?: unknown):
         output,
         h("div", { class: "out-actions" }, [
           iconButton("copy", "Copy", () => {
-            void navigator.clipboard?.writeText(output.textContent ?? "").then(() => toast("Copied", "success"));
+            if (!navigator.clipboard) return void toast("The browser blocked the clipboard", "error");
+            void navigator.clipboard.writeText(output.textContent ?? "").then(
+              () => toast("Copied", "success"),
+              () => toast("The browser blocked the clipboard", "error"),
+            );
           }, "icon-btn sm ghost"),
           iconButton("trash", "Clear output", () => (output.textContent = ""), "icon-btn sm ghost"),
         ]),
@@ -147,7 +152,7 @@ export function mount(host: HTMLElement, ctx: PluginContext, payload?: unknown):
       code.focus();
     },
     dispose() {
-      ctx.write("code", code.value);
+      ctx.storage.write("code", code.value);
     },
   };
 }

@@ -1,0 +1,57 @@
+{
+  "manifestVersion": 2,
+  "id": "compare",
+  "name": "Model Compare",
+  "version": "2.0.0",
+  "sdk": ">=2.0.0 <3",
+  "description": "Classify property, containment, placement and mesh-shape changes between IFC revisions.",
+  "runtime": {
+    "kind": "bundled",
+    "entry": "panel.ts"
+  },
+  "activationEvents": ["onPanel:compare"],
+  "permissions": [
+    "model.summary.read",
+    "model.structure.read",
+    "model.properties.read",
+    "model.index.build",
+    "geometry.query",
+    "view.read",
+    "view.control",
+    "file.export"
+  ],
+  "contributes": {
+    "panels": [
+      { "id": "compare", "title": "Model Compare", "icon": "compare" }
+    ],
+    "analyses": [
+      { "id": "compare.run", "title": "Geometry-aware model comparison", "capability": "compare", "resultView": "compare.results" }
+    ],
+    "resultViews": [
+      { "id": "compare.results", "title": "Revision changes" }
+    ],
+    "exporters": [
+      { "id": "compare.csv", "title": "Revision change register", "mimeTypes": ["text/csv"], "extensions": ["csv"] }
+    ]
+  },
+  "localCompanion": {
+    "id": "org.ifcviewx.core",
+    "version": ">=0.1.2 <1",
+    "required": false
+  },
+  "catalog": {
+    "tagline": "See what moved, reshaped, changed level or changed data",
+    "about": "Matches revisions by GlobalId and builds compact mesh signatures in background workers to distinguish placement, rotation, bounds and shape changes from ordinary property edits. The baseline mesh is never added to the renderer and is released after its signatures are built, keeping the interactive model responsive. Results can be filtered, isolated, colored and handed to the shared result store for assistant follow-up.",
+    "icon": "compare",
+    "category": "Quality",
+    "keywords": "diff revision version change baseline history delta placement rotation geometry shape bounds level property",
+    "does": [
+      "Added, removed and unchanged records matched by GlobalId",
+      "Placement translation and rotation deltas with world-bounds size changes",
+      "Compact sampled mesh signatures for geometry-change classification",
+      "Separate shape, movement, containment and property filters, including mixed changes",
+      "Fast element coloring, isolation, focused details and complete CSV export",
+      "Typed shared results with mesh fidelity and completeness metadata"
+    ]
+  }
+}

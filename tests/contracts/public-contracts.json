@@ -1,0 +1,1902 @@
+{
+  "schemaVersion": 1,
+  "sdk": {
+    "entry": "src/sdk/index.ts",
+    "exports": [
+      "AnalysisContribution",
+      "ApplyReport",
+      "AssistantToolContribution",
+      "AxisSectionState",
+      "BUILTIN_IDS_TEMPLATES",
+      "Bm25Index",
+      "Box",
+      "BsddHit",
+      "BsddKind",
+      "CLASH_LIMIT",
+      "COMPUTED_SET",
+      "CameraPose",
+      "ClashCurrentState",
+      "ClashDecision",
+      "ClashElementIdentity",
+      "ClashGroupMode",
+      "ClashHit",
+      "ClashIgnoreRule",
+      "ClashKind",
+      "ClashOptions",
+      "ClashPair",
+      "ClashReviewGroup",
+      "ClashReviewRow",
+      "ClashReviewState",
+      "CloudPlacement",
+      "CommandContribution",
+      "CompareEntry",
+      "CompareKind",
+      "CompareResult",
+      "CompareSnapshot",
+      "ComputeContext",
+      "ComputedKind",
+      "ComputedProperty",
+      "ComputedSet",
+      "ComputedStore",
+      "ContextActionContribution",
+      "ContributionFor",
+      "ContributionKind",
+      "CoordinateOperationInfo",
+      "DEFAULT_POINT_LIMIT",
+      "DEFAULT_TOLERANCE_MM",
+      "DeviationOptions",
+      "DeviationResult",
+      "DistanceOptions",
+      "DistanceResult",
+      "EXTENSION_PERMISSIONS",
+      "ElementRow",
+      "ElementVolume",
+      "ExporterContribution",
+      "ExtensionCapabilities",
+      "ExtensionCapabilitySummary",
+      "ExtensionCatalogMetadata",
+      "ExtensionCommandService",
+      "ExtensionContext",
+      "ExtensionContributionService",
+      "ExtensionContributions",
+      "ExtensionEvent",
+      "ExtensionEventService",
+      "ExtensionFeedbackService",
+      "ExtensionFileService",
+      "ExtensionGeometryService",
+      "ExtensionInstance",
+      "ExtensionIssueInput",
+      "ExtensionIssuePriority",
+      "ExtensionIssueResult",
+      "ExtensionIssueService",
+      "ExtensionLocalService",
+      "ExtensionLocalStatus",
+      "ExtensionManifest",
+      "ExtensionModelService",
+      "ExtensionModule",
+      "ExtensionOverlayService",
+      "ExtensionPanelMount",
+      "ExtensionPermission",
+      "ExtensionPythonService",
+      "ExtensionResultService",
+      "ExtensionSessionService",
+      "ExtensionStorageService",
+      "ExtensionViewService",
+      "FederatedModel",
+      "FormField",
+      "GeometryDelta",
+      "GeometrySignature",
+      "GeometrySignatureOptions",
+      "GeometrySignatureResult",
+      "GeoreferencedPoint",
+      "GridRow",
+      "GridSort",
+      "IdsCardinality",
+      "IdsDraft",
+      "IdsFacetDraft",
+      "IdsFacetKind",
+      "IdsReport",
+      "IdsRequirementTemplate",
+      "IdsSpecificationDraft",
+      "IdsValueRule",
+      "IfcClassification",
+      "IfcGeoReference",
+      "IfcMaterial",
+      "IfcProperty",
+      "IfcPropertySet",
+      "IfcRelationTarget",
+      "IfcScheduleTime",
+      "IfcTaskGraph",
+      "IfcTaskRecord",
+      "IfcTaskSequenceRecord",
+      "IfcWorkScheduleRecord",
+      "ImporterContribution",
+      "ItemProperties",
+      "LaserAxis",
+      "LaserAxisResult",
+      "LaserHit",
+      "LaserOptions",
+      "LaserResult",
+      "MAX_SELECTOR_STRING_LENGTH",
+      "MAX_VIEW_FILE_BYTES",
+      "MAX_VIEW_FILE_VIEWS",
+      "MEP",
+      "Measurement",
+      "MenuItem",
+      "MeshExportOptions",
+      "MeshExportResult",
+      "MeshFormat",
+      "ModelBounds",
+      "ModelElement",
+      "ModelInfo",
+      "ModelStats",
+      "ModelTransform",
+      "OPENINGS",
+      "OverlayContribution",
+      "PAGE_RASTER_WIDTH",
+      "PanelContribution",
+      "ParamValue",
+      "PlaneClassifyOptions",
+      "PlaneClassifyResult",
+      "PlaneSectionState",
+      "PointCloud",
+      "PopoverSide",
+      "Progress",
+      "ProjectedCrsInfo",
+      "PropertyChange",
+      "PropertyIndex",
+      "RULESET_FORMAT",
+      "RULE_COUNT",
+      "RenderPdfPagesOptions",
+      "RenderPdfPagesResult",
+      "RenderedPage",
+      "ReportFinding",
+      "ResolvedRule",
+      "ResultHandle",
+      "ResultOptions",
+      "ResultPage",
+      "ResultViewContribution",
+      "RuleDefinition",
+      "RuleFinding",
+      "RuleInstance",
+      "RuleModel",
+      "RuleParam",
+      "RuleReport",
+      "RuleRunContext",
+      "RuleSeverity",
+      "Ruleset",
+      "STRUCTURE",
+      "SavedViewApplyOptions",
+      "SearchHit",
+      "SectionAxis",
+      "SectionBox",
+      "SectionContourOptions",
+      "SectionContourResult",
+      "SectionPolyline",
+      "SectionState",
+      "Selector",
+      "SettingContribution",
+      "SheetCalibration",
+      "SheetMarkup",
+      "SheetPlacement",
+      "SheetPoint",
+      "SheetRecord",
+      "SideModel",
+      "SideModelOptions",
+      "SpatialNode",
+      "SpecResult",
+      "StoredSheet",
+      "StoreyInfo",
+      "SunOptions",
+      "SunPosition",
+      "SunResult",
+      "SunSample",
+      "SweepProgress",
+      "SweepResult",
+      "TextOp",
+      "TextSource",
+      "ToolbarContribution",
+      "TrueNorthInfo",
+      "Value",
+      "Vec3",
+      "ViewDefinition",
+      "ViewFilter",
+      "ViewPreset",
+      "ViewStore",
+      "Viewer",
+      "VisibilityRule",
+      "VolumeOptions",
+      "VolumesResult",
+      "XlsxOptions",
+      "applySavedView",
+      "applyView",
+      "attachPopover",
+      "attachTip",
+      "autoPlacement",
+      "bar",
+      "boxesOverlap",
+      "buildIndex",
+      "busyRow",
+      "button",
+      "byModel",
+      "cancelClash",
+      "captureView",
+      "centreOf",
+      "centreOn",
+      "checkFormula",
+      "clashClassPair",
+      "clashFingerprint",
+      "clashReport",
+      "classCounts",
+      "classPicker",
+      "classifyByPlane",
+      "cloneFacet",
+      "compareSnapshots",
+      "computedKey",
+      "confirmAction",
+      "contextRuleModel",
+      "copyTable",
+      "dayArc",
+      "daylightHours",
+      "defaultRuleset",
+      "defineExtension",
+      "describeSelector",
+      "detectClashes",
+      "download",
+      "elementsOf",
+      "emptyState",
+      "evaluateProperty",
+      "exportMesh",
+      "expressOf",
+      "extractSectionContours",
+      "field",
+      "findRule",
+      "formatLength",
+      "formatNumber",
+      "geometryMeasure",
+      "geometrySignatures",
+      "grid",
+      "groupClashes",
+      "h",
+      "header",
+      "hint",
+      "icon",
+      "iconButton",
+      "idsOfTypes",
+      "infoIcon",
+      "isAxisSection",
+      "isLas",
+      "isPdf",
+      "isPortable",
+      "isText",
+      "lastIdsReport",
+      "loadIds",
+      "matchText",
+      "measureDeviation",
+      "measureDistance",
+      "measureLaser",
+      "measureOnSheet",
+      "measureSun",
+      "measureVolumes",
+      "metresPerPixel",
+      "modelOf",
+      "needsIndex",
+      "newFacet",
+      "newIdsDocument",
+      "newSheet",
+      "nextFrame",
+      "normalizeSelector",
+      "note",
+      "number",
+      "openSideModel",
+      "packId",
+      "page",
+      "parseComputedFile",
+      "parseIdsDocument",
+      "parseRuleset",
+      "parseViewFile",
+      "placementDrift",
+      "placementScale",
+      "placementTransform",
+      "progress",
+      "promptForm",
+      "readImagePage",
+      "readPointCloud",
+      "readRowProperty",
+      "registerRule",
+      "renderPdfPage",
+      "renderPdfPages",
+      "resolveRule",
+      "resolveSelector",
+      "resolvedClashes",
+      "reviewClashes",
+      "ruleDefinitions",
+      "runIds",
+      "runRuleset",
+      "saveCsv",
+      "saveMesh",
+      "saveXlsx",
+      "scaleLabel",
+      "search",
+      "searchBsdd",
+      "select",
+      "selectorPortable",
+      "serializeComputed",
+      "serializeIdsDocument",
+      "serializeRuleset",
+      "serializeViews",
+      "sheetStore",
+      "sheetToWorld",
+      "showContextMenu",
+      "siteLocalInstant",
+      "sizeOf",
+      "spinner",
+      "stats",
+      "storeyBands",
+      "sunDirection",
+      "sunPosition",
+      "toCsv",
+      "toScene",
+      "toXlsx",
+      "toast",
+      "tokenize",
+      "viewNeedsIndex",
+      "worldToSheet",
+      "worstDepth"
+    ]
+  },
+  "bundledPlugins": [
+    {
+      "folder": "clash",
+      "manifestVersion": 2,
+      "id": "clash",
+      "version": "2.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:clash"
+      ],
+      "permissions": [
+        "model.summary.read",
+        "model.structure.read",
+        "model.properties.read",
+        "model.index.build",
+        "geometry.query",
+        "view.control",
+        "review.issue.create",
+        "viewport.capture",
+        "storage.extension",
+        "file.open",
+        "file.export"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "clash",
+            "title": "Clash Detection",
+            "icon": "alert"
+          }
+        ],
+        "analyses": [
+          {
+            "id": "clash.run",
+            "title": "Run clash detection",
+            "capability": "clash",
+            "resultView": "clash.results"
+          }
+        ],
+        "resultViews": [
+          {
+            "id": "clash.results",
+            "title": "Clash results"
+          }
+        ],
+        "importers": [
+          {
+            "id": "clash.rules",
+            "title": "Shared clash ignore rules",
+            "accepts": [
+              "application/json",
+              ".json"
+            ]
+          }
+        ],
+        "exporters": [
+          {
+            "id": "clash.csv",
+            "title": "Clash report CSV",
+            "mimeTypes": [
+              "text/csv"
+            ]
+          },
+          {
+            "id": "clash.rules",
+            "title": "Shareable ignore rules",
+            "mimeTypes": [
+              "application/json"
+            ]
+          }
+        ]
+      },
+      "localCompanion": null
+    },
+    {
+      "folder": "compare",
+      "manifestVersion": 2,
+      "id": "compare",
+      "version": "2.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:compare"
+      ],
+      "permissions": [
+        "model.summary.read",
+        "model.structure.read",
+        "model.properties.read",
+        "model.index.build",
+        "geometry.query",
+        "view.read",
+        "view.control",
+        "file.export"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "compare",
+            "title": "Model Compare",
+            "icon": "compare"
+          }
+        ],
+        "analyses": [
+          {
+            "id": "compare.run",
+            "title": "Geometry-aware model comparison",
+            "capability": "compare",
+            "resultView": "compare.results"
+          }
+        ],
+        "resultViews": [
+          {
+            "id": "compare.results",
+            "title": "Revision changes"
+          }
+        ],
+        "exporters": [
+          {
+            "id": "compare.csv",
+            "title": "Revision change register",
+            "mimeTypes": [
+              "text/csv"
+            ],
+            "extensions": [
+              "csv"
+            ]
+          }
+        ]
+      },
+      "localCompanion": {
+        "id": "org.ifcviewx.core",
+        "version": ">=0.1.2 <1",
+        "required": false
+      }
+    },
+    {
+      "folder": "explorer",
+      "manifestVersion": 2,
+      "id": "explorer",
+      "version": "1.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:explorer"
+      ],
+      "permissions": [
+        "model.summary.read",
+        "model.index.build",
+        "view.control",
+        "storage.extension",
+        "file.export"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "explorer",
+            "title": "Element Explorer",
+            "icon": "table"
+          }
+        ],
+        "exporters": [
+          {
+            "id": "explorer.csv",
+            "title": "Element table CSV",
+            "mimeTypes": [
+              "text/csv"
+            ]
+          }
+        ]
+      },
+      "localCompanion": null
+    },
+    {
+      "folder": "finder",
+      "manifestVersion": 2,
+      "id": "finder",
+      "version": "1.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:finder"
+      ],
+      "permissions": [
+        "model.structure.read",
+        "model.index.build",
+        "geometry.query",
+        "view.control",
+        "file.export"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "finder",
+            "title": "Model Finder",
+            "icon": "search"
+          }
+        ],
+        "exporters": [
+          {
+            "id": "finder.csv",
+            "title": "Search results CSV",
+            "mimeTypes": [
+              "text/csv"
+            ]
+          }
+        ]
+      },
+      "localCompanion": null
+    },
+    {
+      "folder": "ids-studio",
+      "manifestVersion": 2,
+      "id": "ids-studio",
+      "version": "1.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:ids-studio"
+      ],
+      "permissions": [
+        "model.summary.read",
+        "model.structure.read",
+        "model.properties.read",
+        "view.control",
+        "review.issue.create",
+        "viewport.capture",
+        "storage.extension",
+        "file.open",
+        "file.export"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "ids-studio",
+            "title": "IDS Requirements Studio",
+            "icon": "clipboard"
+          }
+        ],
+        "resultViews": [
+          {
+            "id": "ids-studio.results",
+            "title": "IDS compliance results"
+          }
+        ],
+        "importers": [
+          {
+            "id": "ids-studio.open",
+            "title": "IDS 1.0 document",
+            "accepts": [
+              ".ids",
+              ".xml",
+              "application/xml",
+              "text/xml"
+            ]
+          }
+        ],
+        "exporters": [
+          {
+            "id": "ids-studio.ids",
+            "title": "IDS 1.0 document",
+            "mimeTypes": [
+              "application/xml"
+            ]
+          },
+          {
+            "id": "ids-studio.results",
+            "title": "IDS compliance results",
+            "mimeTypes": [
+              "application/json"
+            ]
+          },
+          {
+            "id": "ids-studio.corrections",
+            "title": "Staged IDS corrections",
+            "mimeTypes": [
+              "application/json"
+            ]
+          }
+        ]
+      },
+      "localCompanion": null
+    },
+    {
+      "folder": "model-health",
+      "manifestVersion": 2,
+      "id": "model-health",
+      "version": "1.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:model-health"
+      ],
+      "permissions": [
+        "model.structure.read",
+        "model.index.build",
+        "geometry.query",
+        "view.control"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "model-health",
+            "title": "Model Health",
+            "icon": "check"
+          }
+        ]
+      },
+      "localCompanion": null
+    },
+    {
+      "folder": "point-cloud",
+      "manifestVersion": 2,
+      "id": "point-cloud",
+      "version": "1.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:point-cloud"
+      ],
+      "permissions": [
+        "model.summary.read",
+        "model.structure.read",
+        "geometry.query",
+        "geometry.mesh.read",
+        "view.read",
+        "view.control",
+        "view.overlay",
+        "storage.extension",
+        "file.open",
+        "file.export"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "point-cloud",
+            "title": "Point Cloud",
+            "icon": "cube"
+          }
+        ],
+        "importers": [
+          {
+            "id": "point-cloud.open",
+            "title": "Point cloud",
+            "accepts": [
+              ".las",
+              ".xyz",
+              ".pts",
+              ".txt",
+              ".asc",
+              ".csv"
+            ]
+          }
+        ],
+        "exporters": [
+          {
+            "id": "point-cloud.csv",
+            "title": "Deviation CSV",
+            "mimeTypes": [
+              "text/csv"
+            ]
+          }
+        ],
+        "overlays": [
+          {
+            "id": "point-cloud.scan",
+            "title": "Scan points"
+          }
+        ]
+      },
+      "localCompanion": null
+    },
+    {
+      "folder": "presentation",
+      "manifestVersion": 2,
+      "id": "presentation",
+      "version": "1.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:presentation"
+      ],
+      "permissions": [
+        "model.summary.read",
+        "model.structure.read",
+        "model.index.build",
+        "view.read",
+        "view.control",
+        "viewport.capture",
+        "storage.extension",
+        "file.export"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "presentation",
+            "title": "Presentation",
+            "icon": "walk"
+          }
+        ],
+        "exporters": [
+          {
+            "id": "presentation.deck",
+            "title": "Slide deck",
+            "mimeTypes": [
+              "application/json"
+            ]
+          },
+          {
+            "id": "presentation.video",
+            "title": "Recorded walkthrough",
+            "mimeTypes": [
+              "video/webm"
+            ]
+          }
+        ]
+      },
+      "localCompanion": null
+    },
+    {
+      "folder": "python",
+      "manifestVersion": 2,
+      "id": "python",
+      "version": "1.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:python"
+      ],
+      "permissions": [
+        "automation.python",
+        "edit.propose",
+        "storage.extension"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "python",
+            "title": "Python Console",
+            "icon": "terminal"
+          }
+        ]
+      },
+      "localCompanion": null
+    },
+    {
+      "folder": "report-builder",
+      "manifestVersion": 2,
+      "id": "report-builder",
+      "version": "1.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:report-builder"
+      ],
+      "permissions": [
+        "model.summary.read",
+        "model.structure.read",
+        "model.properties.read",
+        "model.index.build",
+        "geometry.query",
+        "view.read",
+        "view.control",
+        "storage.extension",
+        "file.open",
+        "file.export"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "report-builder",
+            "title": "Report Builder",
+            "icon": "clipboard"
+          }
+        ],
+        "importers": [
+          {
+            "id": "report-builder.template",
+            "title": "Report template",
+            "accepts": [
+              ".json"
+            ]
+          }
+        ],
+        "exporters": [
+          {
+            "id": "report-builder.template",
+            "title": "Report template",
+            "mimeTypes": [
+              "application/json"
+            ]
+          },
+          {
+            "id": "report-builder.csv",
+            "title": "Report CSV",
+            "mimeTypes": [
+              "text/csv"
+            ]
+          },
+          {
+            "id": "report-builder.html",
+            "title": "Printable report",
+            "mimeTypes": [
+              "text/html"
+            ]
+          }
+        ]
+      },
+      "localCompanion": null
+    },
+    {
+      "folder": "rule-studio",
+      "manifestVersion": 2,
+      "id": "rule-studio",
+      "version": "1.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:rule-studio"
+      ],
+      "permissions": [
+        "model.summary.read",
+        "model.structure.read",
+        "model.properties.read",
+        "model.index.build",
+        "geometry.query",
+        "geometry.mesh.read",
+        "view.read",
+        "view.control",
+        "viewport.capture",
+        "review.issue.create",
+        "storage.extension",
+        "file.open",
+        "file.export"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "rule-studio",
+            "title": "Rule Studio",
+            "icon": "shield"
+          }
+        ],
+        "importers": [
+          {
+            "id": "rule-studio.ruleset",
+            "title": "Ruleset",
+            "accepts": [
+              ".json"
+            ]
+          }
+        ],
+        "exporters": [
+          {
+            "id": "rule-studio.ruleset",
+            "title": "Ruleset",
+            "mimeTypes": [
+              "application/json"
+            ]
+          },
+          {
+            "id": "rule-studio.findings",
+            "title": "Rule findings CSV",
+            "mimeTypes": [
+              "text/csv"
+            ]
+          }
+        ]
+      },
+      "localCompanion": null
+    },
+    {
+      "folder": "schedule-4d",
+      "manifestVersion": 2,
+      "id": "schedule-4d",
+      "version": "1.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:schedule-4d"
+      ],
+      "permissions": [
+        "model.summary.read",
+        "model.structure.read",
+        "model.properties.read",
+        "model.index.build",
+        "view.read",
+        "view.control",
+        "review.issue.create",
+        "viewport.capture",
+        "file.open",
+        "file.export",
+        "storage.extension"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "schedule-4d",
+            "title": "4D Schedule",
+            "icon": "clock"
+          }
+        ],
+        "analyses": [
+          {
+            "id": "schedule-4d.progress",
+            "title": "Planned versus actual progress",
+            "capability": "schedule",
+            "resultView": "schedule-4d.results"
+          }
+        ],
+        "resultViews": [
+          {
+            "id": "schedule-4d.results",
+            "title": "4D progress report"
+          }
+        ],
+        "importers": [
+          {
+            "id": "schedule-4d.csv",
+            "title": "Schedule CSV",
+            "accepts": [
+              ".csv",
+              ".tsv",
+              "text/csv",
+              "text/tab-separated-values"
+            ]
+          },
+          {
+            "id": "schedule-4d.mapping",
+            "title": "4D mapping",
+            "accepts": [
+              ".json",
+              "application/json"
+            ]
+          }
+        ],
+        "exporters": [
+          {
+            "id": "schedule-4d.mapping",
+            "title": "4D task mapping",
+            "mimeTypes": [
+              "application/json"
+            ]
+          },
+          {
+            "id": "schedule-4d.report",
+            "title": "4D progress report",
+            "mimeTypes": [
+              "text/csv"
+            ]
+          }
+        ]
+      },
+      "localCompanion": null
+    },
+    {
+      "folder": "section-workspace",
+      "manifestVersion": 2,
+      "id": "section-workspace",
+      "version": "1.1.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:section-workspace",
+        "onCommand:section-workspace.open"
+      ],
+      "permissions": [
+        "model.summary.read",
+        "model.structure.read",
+        "geometry.query",
+        "view.read",
+        "view.control",
+        "storage.extension",
+        "file.export"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "section-workspace",
+            "title": "Section Workspace",
+            "icon": "section"
+          }
+        ],
+        "commands": [
+          {
+            "id": "section-workspace.open",
+            "title": "Open Section Workspace",
+            "icon": "section"
+          }
+        ],
+        "analyses": [
+          {
+            "id": "section-workspace.contours",
+            "title": "Section contours",
+            "capability": "sectionContours",
+            "resultView": "section-workspace.results"
+          }
+        ],
+        "resultViews": [
+          {
+            "id": "section-workspace.results",
+            "title": "Section elements"
+          }
+        ],
+        "exporters": [
+          {
+            "id": "section-workspace.svg",
+            "title": "Section drawing SVG",
+            "mimeTypes": [
+              "image/svg+xml"
+            ],
+            "extensions": [
+              "svg"
+            ]
+          },
+          {
+            "id": "section-workspace.booklet",
+            "title": "Floor plan set",
+            "mimeTypes": [
+              "text/html"
+            ],
+            "extensions": [
+              "html"
+            ]
+          }
+        ]
+      },
+      "localCompanion": null
+    },
+    {
+      "folder": "sheets",
+      "manifestVersion": 2,
+      "id": "sheets",
+      "version": "1.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:sheets"
+      ],
+      "permissions": [
+        "model.summary.read",
+        "model.structure.read",
+        "model.index.build",
+        "geometry.query",
+        "geometry.mesh.read",
+        "view.read",
+        "view.control",
+        "viewport.capture",
+        "review.issue.create",
+        "storage.extension",
+        "file.open",
+        "file.export"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "sheets",
+            "title": "Sheets",
+            "icon": "layers"
+          }
+        ],
+        "importers": [
+          {
+            "id": "sheets.open",
+            "title": "Drawing sheet",
+            "accepts": [
+              ".pdf",
+              ".png",
+              ".jpg",
+              ".jpeg",
+              ".webp"
+            ]
+          }
+        ],
+        "exporters": [
+          {
+            "id": "sheets.markup",
+            "title": "Sheet markup",
+            "mimeTypes": [
+              "image/svg+xml"
+            ]
+          }
+        ]
+      },
+      "localCompanion": null
+    },
+    {
+      "folder": "smart-measure",
+      "manifestVersion": 2,
+      "id": "smart-measure",
+      "version": "1.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:smart-measure",
+        "onCommand:smart-measure.open"
+      ],
+      "permissions": [
+        "model.summary.read",
+        "model.structure.read",
+        "geometry.query",
+        "view.read",
+        "view.control",
+        "view.overlay",
+        "storage.extension",
+        "local.invoke"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "smart-measure",
+            "title": "Smart Measure",
+            "icon": "ruler"
+          }
+        ],
+        "commands": [
+          {
+            "id": "smart-measure.open",
+            "title": "Open Smart Measure",
+            "icon": "ruler"
+          }
+        ],
+        "analyses": [
+          {
+            "id": "smart-measure.distance",
+            "title": "Shortest object distance",
+            "capability": "distance",
+            "resultView": "smart-measure.results"
+          },
+          {
+            "id": "smart-measure.laser",
+            "title": "Three-axis surface laser",
+            "capability": "laser",
+            "resultView": "smart-measure.results"
+          }
+        ],
+        "resultViews": [
+          {
+            "id": "smart-measure.results",
+            "title": "Measurement results"
+          }
+        ],
+        "overlays": [
+          {
+            "id": "smart-measure.laser",
+            "title": "Live laser axes",
+            "quota": 6
+          }
+        ]
+      },
+      "localCompanion": {
+        "id": "org.ifcviewx.core",
+        "version": ">=0.1.2 <1",
+        "required": false
+      }
+    },
+    {
+      "folder": "spaces",
+      "manifestVersion": 2,
+      "id": "spaces",
+      "version": "1.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:spaces"
+      ],
+      "permissions": [
+        "model.summary.read",
+        "model.index.build",
+        "geometry.query",
+        "view.read",
+        "view.control",
+        "storage.extension",
+        "file.export"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "spaces",
+            "title": "Room Book",
+            "icon": "layers"
+          }
+        ],
+        "exporters": [
+          {
+            "id": "spaces.csv",
+            "title": "Space book CSV",
+            "mimeTypes": [
+              "text/csv"
+            ]
+          }
+        ]
+      },
+      "localCompanion": null
+    },
+    {
+      "folder": "storeys",
+      "manifestVersion": 2,
+      "id": "storeys",
+      "version": "1.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:storeys"
+      ],
+      "permissions": [
+        "model.structure.read",
+        "geometry.query",
+        "view.read",
+        "view.control",
+        "storage.extension"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "storeys",
+            "title": "Storey Navigator",
+            "icon": "layers"
+          }
+        ]
+      },
+      "localCompanion": null
+    },
+    {
+      "folder": "takeoff",
+      "manifestVersion": 2,
+      "id": "takeoff",
+      "version": "1.0.0",
+      "sdk": ">=2.0.0 <3",
+      "runtime": {
+        "kind": "bundled",
+        "entry": "panel.ts"
+      },
+      "activationEvents": [
+        "onPanel:takeoff"
+      ],
+      "permissions": [
+        "model.summary.read",
+        "model.index.build",
+        "geometry.query",
+        "view.control",
+        "storage.extension",
+        "file.export"
+      ],
+      "contributes": {
+        "panels": [
+          {
+            "id": "takeoff",
+            "title": "Quantity Takeoff",
+            "icon": "calculator"
+          }
+        ],
+        "exporters": [
+          {
+            "id": "takeoff.csv",
+            "title": "Quantity takeoff CSV",
+            "mimeTypes": [
+              "text/csv"
+            ]
+          }
+        ]
+      },
+      "localCompanion": null
+    }
+  ],
+  "capabilities": [
+    "camera",
+    "categories",
+    "check",
+    "clash",
+    "color",
+    "counts",
+    "definition.property",
+    "definition.ruleset",
+    "definition.view",
+    "distance",
+    "docket.triage",
+    "find",
+    "fit",
+    "graph.neighbours",
+    "graph.spaces",
+    "hide",
+    "ids",
+    "isolate",
+    "issue.stage",
+    "laser",
+    "models",
+    "properties",
+    "renameByPattern",
+    "result.group",
+    "result.isolate",
+    "result.open",
+    "result.page",
+    "result.select",
+    "schedule",
+    "search",
+    "section",
+    "sectionBox",
+    "sectionContours",
+    "select",
+    "selection",
+    "setAttribute",
+    "setProperty",
+    "show",
+    "storeys",
+    "unhide",
+    "view.pickAt",
+    "visibility"
+  ],
+  "registeredIds": [
+    "ai.new",
+    "analysis.alignment",
+    "analysis.clash",
+    "analysis.compare",
+    "analysis.geo",
+    "analysis.health",
+    "analysis.ids",
+    "analysis.ids-studio",
+    "analysis.point-cloud",
+    "analysis.presentation",
+    "analysis.report-builder",
+    "analysis.rules",
+    "analysis.schedule-4d",
+    "analysis.section-workspace",
+    "analysis.smart-measure",
+    "analysis.takeoff",
+    "app.connection",
+    "app.help",
+    "app.install",
+    "app.palette",
+    "app.plugins",
+    "app.ribbon",
+    "app.settings",
+    "app.theme",
+    "app.touch",
+    "bcf.new",
+    "cam.ar",
+    "cam.back",
+    "cam.bottom",
+    "cam.fit",
+    "cam.fitsel",
+    "cam.fly",
+    "cam.front",
+    "cam.iso",
+    "cam.left",
+    "cam.ortho",
+    "cam.perp",
+    "cam.right",
+    "cam.rotl",
+    "cam.rotr",
+    "cam.top",
+    "cam.vr",
+    "edit.apply",
+    "edit.delete",
+    "edit.discard",
+    "edit.property",
+    "edit.redo",
+    "edit.rename",
+    "edit.undo",
+    "file.attach",
+    "file.check",
+    "file.close",
+    "file.conformance",
+    "file.convert",
+    "file.export",
+    "file.mesh",
+    "file.open",
+    "file.package",
+    "file.plan",
+    "file.report",
+    "file.sample",
+    "file.schedule",
+    "file.screenshot",
+    "file.viewpoint",
+    "ids.open",
+    "panel.ai",
+    "panel.bcf",
+    "panel.computed",
+    "panel.filters",
+    "panel.geo",
+    "panel.ids",
+    "panel.insp",
+    "panel.log",
+    "panel.organize",
+    "panel.props",
+    "panel.py",
+    "panel.results",
+    "panel.schedule-4d",
+    "panel.structure",
+    "panel.summary",
+    "panel.tree",
+    "panel.types",
+    "panel.views",
+    "sel.clear",
+    "sheets.open",
+    "tool.box",
+    "tool.hud",
+    "tool.measure",
+    "tool.plan",
+    "tool.section",
+    "view.open",
+    "view.save",
+    "vis.all",
+    "vis.clear",
+    "vis.edges",
+    "vis.filters",
+    "vis.ghost",
+    "vis.grids",
+    "vis.hide",
+    "vis.isolate",
+    "vis.openings",
+    "vis.picksolid",
+    "vis.redo",
+    "vis.showthrough",
+    "vis.spaces",
+    "vis.undo",
+    "vis.xray",
+    "vis.xrayclear",
+    "vis.xrayrest"
+  ],
+  "persistenceNamespaces": [
+    "IFCViewX",
+    "ifcviewx",
+    "ifcviewx-${}.png",
+    "ifcviewx-cache",
+    "ifcviewx-extensions",
+    "ifcviewx-geo-context.geojson",
+    "ifcviewx.",
+    "ifcviewx.assistant.extension-tools",
+    "ifcviewx.bcf.",
+    "ifcviewx.bcf.${}-${}",
+    "ifcviewx.bcf.author",
+    "ifcviewx.chats",
+    "ifcviewx.computed",
+    "ifcviewx.computed.",
+    "ifcviewx.computed.v1",
+    "ifcviewx.extensions.audit.v1",
+    "ifcviewx.geo.alignments",
+    "ifcviewx.h.dock",
+    "ifcviewx.measure.",
+    "ifcviewx.measure.${}-${}",
+    "ifcviewx.measure.format.v1",
+    "ifcviewx.notes.",
+    "ifcviewx.notes.${}-${}",
+    "ifcviewx.opencde.project",
+    "ifcviewx.opencde.server",
+    "ifcviewx.package",
+    "ifcviewx.pinnedProps",
+    "ifcviewx.plug.${}.",
+    "ifcviewx.plug.${}.${}",
+    "ifcviewx.plug.clash.activeDefinition",
+    "ifcviewx.plug.clash.decisions",
+    "ifcviewx.plug.clash.definitions",
+    "ifcviewx.plug.clash.history.",
+    "ifcviewx.plug.clash.ignoreRules",
+    "ifcviewx.plug.ids-studio.compliance-baseline",
+    "ifcviewx.plug.ids-studio.requirement-templates",
+    "ifcviewx.plug.presentation.deck",
+    "ifcviewx.plug.report-builder.activeId",
+    "ifcviewx.plug.report-builder.templates",
+    "ifcviewx.plug.rule-studio.ruleset",
+    "ifcviewx.plug.schedule-4d.workspace.",
+    "ifcviewx.plugins.open",
+    "ifcviewx.registry",
+    "ifcviewx.registry.url",
+    "ifcviewx.report",
+    "ifcviewx.ribbon.collapsed",
+    "ifcviewx.ribbon.tab",
+    "ifcviewx.rules",
+    "ifcviewx.sets.",
+    "ifcviewx.sets.${}-${}",
+    "ifcviewx.settings",
+    "ifcviewx.sheets",
+    "ifcviewx.survey.density",
+    "ifcviewx.theme",
+    "ifcviewx.touch",
+    "ifcviewx.views",
+    "ifcviewx.views.",
+    "ifcviewx.views.v1",
+    "ifcviewx.vp.",
+    "ifcviewx.vp.${}-${}",
+    "ifcviewx.w.inspector",
+    "ifcviewx.w.outliner",
+    "ifcviewx:connect",
+    "ifcviewx:crs",
+    "ifcviewx:ids-loaded",
+    "ifcviewx:ready"
+  ],
+  "browserBridgeMethods": [
+    "capture_view",
+    "fit_view",
+    "get_model_info",
+    "get_properties",
+    "get_selection",
+    "get_spatial_tree",
+    "get_status",
+    "list_viewpoints",
+    "save_viewpoint",
+    "select_element",
+    "set_visibility",
+    "show_all"
+  ],
+  "localStudio": {
+    "routes": [
+      {
+        "method": "POST",
+        "path": "/api/v1/jobs/{job_id}/cancel"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/jobs/{job_id}/result"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/jobs/{job_id}"
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/jobs"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/providers"
+      },
+      {
+        "method": "GET",
+        "path": "/audit"
+      },
+      {
+        "method": "POST",
+        "path": "/convert"
+      },
+      {
+        "method": "POST",
+        "path": "/guard"
+      },
+      {
+        "method": "GET",
+        "path": "/health"
+      },
+      {
+        "method": "POST",
+        "path": "/jobs/{job_id}/cancel"
+      },
+      {
+        "method": "GET",
+        "path": "/jobs/{job_id}"
+      },
+      {
+        "method": "POST",
+        "path": "/llm/chat"
+      },
+      {
+        "method": "POST",
+        "path": "/llm/stream"
+      },
+      {
+        "method": "POST",
+        "path": "/model"
+      },
+      {
+        "method": "GET",
+        "path": "/models/{name}"
+      },
+      {
+        "method": "GET",
+        "path": "/python/result/{result_id}"
+      },
+      {
+        "method": "POST",
+        "path": "/python"
+      },
+      {
+        "method": "POST",
+        "path": "/schedule"
+      },
+      {
+        "method": "POST",
+        "path": "/store/prune"
+      },
+      {
+        "method": "POST",
+        "path": "/store/reveal"
+      },
+      {
+        "method": "GET",
+        "path": "/store"
+      },
+      {
+        "method": "POST",
+        "path": "/validate"
+      },
+      {
+        "method": "WEBSOCKET",
+        "path": "/ws"
+      },
+      {
+        "method": "GET",
+        "path": "/{path:path}"
+      }
+    ],
+    "mcpTools": [
+      "capture_view",
+      "color_elements",
+      "convert_model",
+      "count_elements",
+      "detect_clashes",
+      "element_schedule",
+      "find_elements",
+      "fit_view",
+      "get_model_info",
+      "get_properties",
+      "get_selection",
+      "get_spatial_tree",
+      "get_status",
+      "get_visibility",
+      "hide_elements",
+      "isolate_elements",
+      "list_converted_models",
+      "list_storeys",
+      "list_viewpoints",
+      "load_categories",
+      "save_viewpoint",
+      "search_model",
+      "section_box",
+      "select_element",
+      "select_elements",
+      "service_status",
+      "set_camera",
+      "set_section",
+      "set_visibility",
+      "show_all",
+      "unhide_elements",
+      "validate_model"
+    ],
+    "cliEntries": {
+      "ifcviewx": "ifcviewx.cli:main",
+      "ifcx-convert": "ifcviewx.convert:main"
+    },
+    "providerEntryPointGroup": "ifcviewx.providers"
+  },
+  "dynamicEntries": {
+    "importMetaGlobs": [
+      {
+        "file": "src/plugins/registry.ts",
+        "pattern": "./*/extension.json"
+      },
+      {
+        "file": "src/plugins/registry.ts",
+        "pattern": "./*/panel.ts"
+      }
+    ],
+    "dynamicImports": [
+      {
+        "file": "src/data/model.ts",
+        "target": "./xlsx.js"
+      },
+      {
+        "file": "src/export/mesh.ts",
+        "target": "three/examples/jsm/exporters/GLTFExporter.js"
+      },
+      {
+        "file": "src/export/mesh.ts",
+        "target": "three/examples/jsm/exporters/OBJExporter.js"
+      },
+      {
+        "file": "src/export/mesh.ts",
+        "target": "three/examples/jsm/exporters/STLExporter.js"
+      },
+      {
+        "file": "src/extensions/installed/manager.ts",
+        "target": "./package.js"
+      },
+      {
+        "file": "src/extensions/installed/manager.ts",
+        "target": "./sandbox.js"
+      },
+      {
+        "file": "src/geometry/service.ts",
+        "target": "./clash/sweep.js"
+      },
+      {
+        "file": "src/geometry/service.ts",
+        "target": "./deviationQuery.js"
+      },
+      {
+        "file": "src/geometry/service.ts",
+        "target": "./distanceQuery.js"
+      },
+      {
+        "file": "src/geometry/service.ts",
+        "target": "./geometryIndex.js"
+      },
+      {
+        "file": "src/geometry/service.ts",
+        "target": "./laserQuery.js"
+      },
+      {
+        "file": "src/geometry/service.ts",
+        "target": "./meshQuery.js"
+      },
+      {
+        "file": "src/geometry/service.ts",
+        "target": "./planeQuery.js"
+      },
+      {
+        "file": "src/geometry/service.ts",
+        "target": "./sectionQuery.js"
+      },
+      {
+        "file": "src/geometry/service.ts",
+        "target": "./signatureQuery.js"
+      },
+      {
+        "file": "src/geometry/service.ts",
+        "target": "./sunQuery.js"
+      },
+      {
+        "file": "src/geometry/service.ts",
+        "target": "./volumeQuery.js"
+      },
+      {
+        "file": "src/main.ts",
+        "target": "./ifc/conformance.js"
+      },
+      {
+        "file": "src/main.ts",
+        "target": "./sheets/sheet.js"
+      },
+      {
+        "file": "src/main.ts",
+        "target": "./ui/bcf.js"
+      },
+      {
+        "file": "src/main.ts",
+        "target": "./ui/geo.js"
+      },
+      {
+        "file": "src/main.ts",
+        "target": "./ui/ids.js"
+      },
+      {
+        "file": "src/main.ts",
+        "target": "./ui/report.js"
+      },
+      {
+        "file": "src/main.ts",
+        "target": "./ui/schedules.js"
+      },
+      {
+        "file": "src/main.ts",
+        "target": "./ui/viewsPane.js"
+      },
+      {
+        "file": "src/python/py.worker.ts",
+        "target": "<computed>"
+      },
+      {
+        "file": "src/sdk/parse.ts",
+        "target": "../viewer-core/engine/workerEngine.js"
+      },
+      {
+        "file": "src/sheets/sheet.ts",
+        "target": "pdfjs-dist"
+      },
+      {
+        "file": "src/viewer-core/viewer.ts",
+        "target": "./engine/inlineEngine.js"
+      }
+    ],
+    "workers": [
+      {
+        "file": "src/geometry/service.ts",
+        "target": "./geometry.worker.ts"
+      },
+      {
+        "file": "src/ifc/ifcEngine.ts",
+        "target": "./ifc.worker.ts"
+      },
+      {
+        "file": "src/main.ts",
+        "target": "./viewer-core/engine/worker.entry.ts"
+      },
+      {
+        "file": "src/python/pythonEngine.ts",
+        "target": "./py.worker.ts"
+      },
+      {
+        "file": "src/sdk/parse.ts",
+        "target": "../viewer-core/engine/worker.entry.ts"
+      },
+      {
+        "file": "src/viewer-core/engine/workerEngine.ts",
+        "target": "<dynamic>"
+      }
+    ],
+    "serviceWorkers": [
+      {
+        "file": "src/ui/fieldMode.ts",
+        "target": "${}sw.js"
+      }
+    ]
+  }
+}

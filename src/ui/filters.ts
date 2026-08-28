@@ -4,6 +4,7 @@
 // hand-hidden elements subtract on top. The panel builds rules, the viewport
 // chip shows what is applied and takes it back off.
 import { attachPopover, h, icon, iconButton, toast } from "./kit.js";
+import type { Selector } from "../views/definition.js";
 import type { ItemProperties, SpatialNode, Viewer } from "../viewer-core/viewer.js";
 
 export interface FilterRule {
@@ -11,6 +12,8 @@ export interface FilterRule {
   label: string;
   mode: "keep" | "hide";
   ids: number[];
+  /** How the rule was built. A saved view stores this, not the ids. */
+  selector?: Selector;
 }
 
 /** Property reads are worker round trips, so one scan is bounded. */
@@ -85,10 +88,20 @@ export class FilterStore {
     viewer.onModelLoaded(() => this.emit());
     viewer.onVisibilityChange(() => this.emit());
     viewer.onSectionChange(() => this.emit());
+    viewer.onMeasureChange(() => this.emit());
   }
 
   list(): FilterRule[] {
     return this.viewer.getRules() as FilterRule[];
+  }
+
+  /** Rule id to the query that built it, for anything saving a definition. */
+  selectors(): Map<string, Selector> {
+    const out = new Map<string, Selector>();
+    for (const rule of this.list()) {
+      if (rule.selector) out.set(rule.id, rule.selector);
+    }
+    return out;
   }
 
   add(rule: Omit<FilterRule, "id">): FilterRule | null {
@@ -106,6 +119,7 @@ export class FilterStore {
   clear(): void {
     this.viewer.clearSection();
     this.viewer.showAll();
+    this.viewer.resetMeasure();
   }
 
   /** Everything currently narrowing the view, rules and viewer state alike. */
@@ -127,8 +141,27 @@ export class FilterStore {
     if (sections.length) {
       out.push({
         label: "Section planes",
-        detail: sections.map((section) => section.axis.toUpperCase()).join(", "),
+        detail: sections.map((section) => (section.axis ? section.axis.toUpperCase() : section.name)).join(", "),
         remove: () => this.viewer.clearSection(),
+      });
+    }
+    const box = this.viewer.getSectionBox();
+    if (box) {
+      const size = box.max.map((value, i) => value - box.min[i]);
+      out.push({
+        label: "Section box",
+        detail: size.map((value) => value.toFixed(1)).join(" x "),
+        remove: () => this.viewer.setSectionBox(null),
+      });
+    }
+    // Measurements stay on the model after the tool closes, so this is where
+    // they come off, next to everything else drawn over the view.
+    const measures = this.viewer.getMeasureCount();
+    if (measures > 0) {
+      out.push({
+        label: "Measurements",
+        detail: `${measures.toLocaleString()} placed`,
+        remove: () => this.viewer.resetMeasure(),
       });
     }
     return out;
@@ -154,7 +187,7 @@ export class FilterChip {
   private readonly count = h("span");
   private readonly button = h(
     "button",
-    { class: "chip-btn", type: "button", title: "Active filters. The model is partly hidden." },
+    { class: "chip-btn", type: "button", title: "What is applied to this view. Click to take any of it off." },
     [icon("funnel", 13)],
   );
 
@@ -169,7 +202,7 @@ export class FilterChip {
 
   private sync(): void {
     const entries = this.store.entries();
-    this.count.textContent = `${entries.length} filter${entries.length === 1 ? "" : "s"}`;
+    this.count.textContent = `${entries.length} applied`;
     this.root.classList.toggle("hidden", entries.length === 0);
     const open = this.root.querySelector<HTMLElement>(".pop");
     if (open) this.build(open);
@@ -187,10 +220,10 @@ export class FilterChip {
         ]),
       );
     }
-    const clear = h("button", { class: "btn grow", type: "button", text: "Clear all filters" });
+    const clear = h("button", { class: "btn grow", type: "button", text: "Clear everything" });
     clear.addEventListener("click", () => this.store.clear());
     pop.replaceChildren(
-      h("div", { class: "pop-title", text: `Applied filters (${entries.length})` }),
+      h("div", { class: "pop-title", text: `Applied to this view (${entries.length})` }),
       list,
       h("div", { class: "pop-row" }, [clear]),
     );
@@ -208,6 +241,7 @@ export class FilterPanel {
     type: "search",
     placeholder: "Filter by class, storey or name",
     spellcheck: "false",
+    "aria-label": "Filter elements by class, storey, or name",
   });
   private readonly setName = h("input", { type: "text", placeholder: "Pset (blank searches all of them)", "aria-label": "Property set" });
   private readonly propName = h("input", { type: "text", placeholder: "Property", "aria-label": "Property name" });
@@ -279,7 +313,7 @@ export class FilterPanel {
    */
   private renderResults(): void {
     const query = this.search.value.trim().toLowerCase();
-    const rows: Array<{ label: string; count: number; icon: string; ids: () => number[] }> = [];
+    const rows: Array<{ label: string; count: number; icon: string; ids: () => number[]; selector: Selector }> = [];
 
     const counts = new Map<string, number>();
     for (const type of this.viewer.getElementTypes().values()) {
@@ -292,6 +326,7 @@ export class FilterPanel {
         count,
         icon: "cube",
         ids: () => [...this.viewer.getElementTypes()].filter(([, t]) => t === type).map(([id]) => id),
+        selector: { kind: "class", values: [type] },
       });
     }
 
@@ -310,6 +345,7 @@ export class FilterPanel {
         count: this.viewer.getSubtreeElementIds(node.expressID).length,
         icon: "layers",
         ids: () => this.viewer.getSubtreeElementIds(node.expressID),
+        selector: { kind: "storey", values: [name] },
       });
     }
 
@@ -321,6 +357,15 @@ export class FilterPanel {
           count: matched.length,
           icon: "search",
           ids: () => matched,
+          // The name search also matches class names, so the saved query says
+          // so rather than pretending it only looked at names.
+          selector: {
+            kind: "any",
+            of: [
+              { kind: "name", op: "contains", value: this.search.value.trim() },
+              { kind: "class", values: [...new Set(this.viewer.getElementTypes().values())].filter((type) => type.toLowerCase().includes(query)) },
+            ],
+          },
         });
       }
     }
@@ -344,11 +389,12 @@ export class FilterPanel {
           h("span", { class: "grow", text: row.label }),
           h("span", { class: "n", text: row.count.toLocaleString() }),
         ]);
-        show.addEventListener("click", () => this.store.add({ label: row.label, mode: "keep", ids: row.ids() }));
+        show.addEventListener("click", () =>
+          this.store.add({ label: row.label, mode: "keep", ids: row.ids(), selector: row.selector }));
         const hide = iconButton(
           "eye-off",
           `Hide ${row.label}`,
-          () => this.store.add({ label: row.label, mode: "hide", ids: row.ids() }),
+          () => this.store.add({ label: row.label, mode: "hide", ids: row.ids(), selector: row.selector }),
           "icon-btn sm",
         );
         return h("div", { class: "filter-pair" }, [show, hide]);
@@ -443,6 +489,17 @@ export class FilterPanel {
       this.status.textContent += `. Narrow the view to under ${SCAN_LIMIT.toLocaleString()} elements first.`;
       return;
     }
-    this.store.add({ label, mode: "keep", ids: found.ids });
+    this.store.add({
+      label,
+      mode: "keep",
+      ids: found.ids,
+      selector: {
+        kind: "property",
+        set,
+        name,
+        op: op === "contains" ? "contains" : op === "not" ? (wanted ? "not" : "missing") : (wanted ? "is" : "exists"),
+        value: this.propValue.value.trim(),
+      },
+    });
   }
 }

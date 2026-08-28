@@ -1,0 +1,118 @@
+import { describe, expect, it } from "vitest";
+import {
+  containsAscii,
+  isCompleteStep,
+  isCompleteStepAsync,
+  isStep,
+  sniffSchema,
+  worthConverting,
+  worthConvertingAsync,
+} from "../src/ifc/format.js";
+
+const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
+
+const STEP = bytes(
+  "ISO-10303-21;\nHEADER;\nFILE_SCHEMA(('IFC4'));\nENDSEC;\nDATA;\n#1=IFCPROJECT();\nENDSEC;\nEND-ISO-10303-21;\n",
+);
+
+describe("sniffSchema", () => {
+  it("reads the declared schema", () => {
+    expect(sniffSchema(STEP)).toBe("IFC4");
+  });
+
+  it("copes with the spacing authoring tools actually emit", () => {
+    expect(sniffSchema(bytes("FILE_SCHEMA ( ( 'IFC2X3' ) );"))).toBe("IFC2X3");
+  });
+
+  it("is null when there is no header to read", () => {
+    expect(sniffSchema(bytes("not an ifc file at all"))).toBeNull();
+  });
+});
+
+describe("isStep", () => {
+  it("answers from the bytes, not the name", () => {
+    expect(isStep(STEP)).toBe(true);
+    expect(isStep(bytes("IFCX\x01\x00\x00\x00"))).toBe(false);
+  });
+
+  it("only looks at the head, so a mention further in does not count", () => {
+    const late = bytes(`${" ".repeat(600)}ISO-10303-21;`);
+    expect(isStep(late)).toBe(false);
+  });
+});
+
+describe("isCompleteStep", () => {
+  it("accepts a complete IFC envelope", () => {
+    expect(isCompleteStep(STEP)).toBe(true);
+  });
+
+  it("rejects a truncated file before it reaches the parser", () => {
+    expect(isCompleteStep(bytes("ISO-10303-21;\nHEADER;\nFILE_SCHEMA(('IFC4'));"))).toBe(false);
+  });
+
+  it("does not impose the schema hint's 4 KiB bound on valid files", () => {
+    const longHeader = "x".repeat(5000);
+    const longTrailer = " ".repeat(5000);
+    expect(isCompleteStep(bytes(
+      `ISO-10303-21;\nHEADER;\n/*${longHeader}*/\nFILE_SCHEMA(('IFC4'));\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;${longTrailer}`,
+    ))).toBe(true);
+  });
+
+  it("yields while rejecting a large truncated file", async () => {
+    const large = new Uint8Array(2 * 1024 * 1024);
+    large.set(bytes("ISO-10303-21;"));
+    let settled = false;
+    const complete = isCompleteStepAsync(large).then((value) => {
+      settled = true;
+      return value;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await expect(complete).resolves.toBe(false);
+  });
+});
+
+describe("containsAscii", () => {
+  it("finds a token anywhere in the buffer", () => {
+    expect(containsAscii(bytes("aaa IFCADVANCEDBREP aaa"), "IFCADVANCEDBREP")).toBe(true);
+  });
+
+  it("does not match a partial run at the end", () => {
+    expect(containsAscii(bytes("aaa IFCADVANCED"), "IFCADVANCEDBREP")).toBe(false);
+  });
+
+  it("restarts on a false start", () => {
+    expect(containsAscii(bytes("abab abc"), "abc")).toBe(true);
+  });
+});
+
+describe("worthConverting", () => {
+  it("offers conversion for brep-heavy files", () => {
+    expect(worthConverting(bytes("#1=IFCADVANCEDBREP(...);"), "model.ifc")).toBe(true);
+  });
+
+  it("leaves small tessellated files alone", () => {
+    expect(worthConverting(STEP, "model.ifc")).toBe(false);
+  });
+
+  it("offers conversion on size alone", () => {
+    expect(worthConverting(new Uint8Array(60e6), "big.ifc")).toBe(true);
+  });
+
+  it("never offers to convert what is already converted", () => {
+    expect(worthConverting(new Uint8Array(60e6), "already.ifcx")).toBe(false);
+  });
+});
+
+describe("IFC format hints", () => {
+  it("finds a brep token that crosses a scan chunk boundary", async () => {
+    const token = new TextEncoder().encode("IFCADVANCEDBREP");
+    const bytes = new Uint8Array(1024 * 1024 + token.length);
+    bytes.set(token, 1024 * 1024 - 4);
+    await expect(worthConvertingAsync(bytes, "model.ifc")).resolves.toBe(true);
+  });
+
+  it("does not offer conversion for an IFCX container", async () => {
+    await expect(worthConvertingAsync(new Uint8Array(1), "model.ifcx")).resolves.toBe(false);
+  });
+});

@@ -11,12 +11,17 @@ export interface BridgeClientOptions {
 
 const DEFAULT_URL = "ws://127.0.0.1:8765";
 /** Comfortably inside the service's own websocket frame limit. */
-const MAX_FRAME_CHARS = 8e6;
+const MAX_FRAME_BYTES = 8e6;
+const encoder = new TextEncoder();
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
 
 export class BridgeClient {
   private ws: WebSocket | null = null;
   private readonly handlers = new Map<string, BridgeHandler>();
   private closedByUser = false;
+  private readonly inFlight = new WeakMap<WebSocket, number>();
 
   constructor(private readonly options: BridgeClientOptions) {}
 
@@ -51,38 +56,54 @@ export class BridgeClient {
   }
 
   private async onMessage(ws: WebSocket, raw: string): Promise<void> {
-    let msg: { id?: number; method?: string; params?: Record<string, unknown> };
+    let parsed: unknown;
     try {
-      msg = JSON.parse(raw) as typeof msg;
+      parsed = JSON.parse(raw) as unknown;
     } catch {
       return;
     }
-    if (msg.id === undefined || !msg.method) return;
-    const handler = this.handlers.get(msg.method);
+    if (!isRecord(parsed)) return;
+    const { id, method, params } = parsed;
+    if (typeof id !== "number" || !Number.isFinite(id) || typeof method !== "string" || !method) return;
+    if (params !== undefined && !isRecord(params)) return;
+    const handler = this.handlers.get(method);
     // The socket can close while a handler runs, and send() on a closed socket
     // throws straight past the catch that is meant to report the failure.
-    const reply = (payload: unknown): void => {
+    const reply = (payload: string): void => {
       if (ws.readyState !== WebSocket.OPEN) return;
       try {
-        ws.send(JSON.stringify(payload));
+        ws.send(payload);
       } catch {
         // Nothing left to answer on.
       }
     };
+    const running = this.inFlight.get(ws) ?? 0;
+    if (running >= 32) {
+      reply(JSON.stringify({ id, error: "too many bridge requests are already running" }));
+      return;
+    }
+    this.inFlight.set(ws, running + 1);
     try {
-      if (!handler) throw new Error(`unknown method: ${msg.method}`);
-      const result = await handler(msg.params ?? {});
-      const body = JSON.stringify({ id: msg.id, result: result ?? null });
+      if (!handler) throw new Error(`unknown method: ${method}`);
+      const result = await handler(params ?? {});
+      const body = JSON.stringify({ id, result: result ?? null });
+      const bodyBytes = encoder.encode(body).byteLength;
       // A whole spatial tree can outrun the service's frame limit, and a frame
       // that never arrives reads as a hang rather than as a size problem.
-      if (body.length > MAX_FRAME_CHARS) {
+      if (bodyBytes > MAX_FRAME_BYTES) {
         throw new Error(
-          `result is ${(body.length / 1e6).toFixed(1)} MB, over the ${MAX_FRAME_CHARS / 1e6} MB frame limit; ask for a narrower slice`,
+          `result is ${(bodyBytes / 1e6).toFixed(1)} MB, over the ${MAX_FRAME_BYTES / 1e6} MB frame limit; ask for a narrower slice`,
         );
       }
-      reply({ id: msg.id, result: result ?? null });
+      // Send the exact string whose encoded size was checked. Serializing a
+      // result twice can invoke toJSON twice and produce a different frame.
+      reply(body);
     } catch (err) {
-      reply({ id: msg.id, error: err instanceof Error ? err.message : String(err) });
+      reply(JSON.stringify({ id, error: err instanceof Error ? err.message : String(err) }));
+    } finally {
+      const remaining = (this.inFlight.get(ws) ?? 1) - 1;
+      if (remaining > 0) this.inFlight.set(ws, remaining);
+      else this.inFlight.delete(ws);
     }
   }
 

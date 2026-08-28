@@ -1,51 +1,142 @@
-// Every folder here that carries a manifest.ts is a plugin.
-//
-// There is no list to add yourself to and no core file to edit: dropping the
-// folder in is the registration. The manifests are collected at build time and
-// are small, so the catalog is complete from the first frame; the panels stay
-// behind a dynamic import and only download when someone opens one.
+// Extension folders are discovered from extension.json at build time. Their
+// panels stay behind dynamic imports and load only when opened.
 import { SHORTCUTS } from "./shortcuts.js";
-import type { PluginManifest, PluginModule } from "../sdk/types.js";
+import type { ExtensionModule } from "../extensions/api.js";
+import type { ExtensionManifest } from "../sdk/contributions.js";
+import { validateManifest } from "../extensions/manifest.js";
 import type { ServiceClient } from "../bridge/serviceClient.js";
+import type { InstalledExtensionView } from "../extensions/installed/types.js";
+import { isReleasePluginVisible } from "../app/release.js";
 
-const manifests = import.meta.glob<{ default: PluginManifest }>("./*/manifest.ts", { eager: true });
-const panels = import.meta.glob<PluginModule>("./*/panel.ts");
+const extensionManifests = import.meta.glob<ExtensionManifest>("./*/extension.json", {
+  eager: true,
+  import: "default",
+});
+const panels = import.meta.glob<ExtensionModule>("./*/panel.ts");
 
-/** "./clash/manifest.ts" -> "clash" */
+export type CatalogTier = "web" | "local" | "core";
+
+export interface CatalogPlugin {
+  id: string;
+  name: string;
+  tagline: string;
+  about: string;
+  icon: string;
+  category: string;
+  tier: CatalogTier;
+  keywords: string;
+  does: string[];
+  author?: string;
+  url?: string;
+  capability?: string;
+  command?: string;
+  soon?: boolean;
+  extension?: ExtensionManifest;
+  load?: () => Promise<ExtensionModule>;
+  installation?: InstalledExtensionView;
+}
+
 const folderOf = (path: string): string => path.slice(2, path.indexOf("/", 2));
 
-function collect(): PluginManifest[] {
-  const found: PluginManifest[] = [];
-  for (const [path, module] of Object.entries(manifests)) {
+function fromExtension(
+  folder: string,
+  raw: unknown,
+  panel: (() => Promise<ExtensionModule>) | undefined,
+): CatalogPlugin | null {
+  const validation = validateManifest(raw);
+  if (!validation.manifest) {
+    console.error(
+      `Extension ${folder} has an invalid extension.json:\n${validation.issues.map((issue) => `  ${issue.path}: ${issue.message}`).join("\n")}`,
+    );
+    return null;
+  }
+  const manifest = validation.manifest;
+  if (manifest.id !== folder) {
+    console.error(`Extension ${folder} declares id "${manifest.id}"; the id must match the folder name.`);
+    return null;
+  }
+  if (manifest.runtime.entry !== "panel.ts") {
+    console.error(`Extension ${folder} runtime.entry must be "panel.ts" in the bundled host.`);
+    return null;
+  }
+  if (!panel) {
+    console.error(`Extension ${folder} has no panel.ts; it will not open.`);
+    return null;
+  }
+  return {
+    id: manifest.id,
+    name: manifest.name,
+    tagline: manifest.catalog.tagline,
+    about: manifest.catalog.about,
+    icon: manifest.catalog.icon,
+    category: manifest.catalog.category,
+    tier: "web",
+    keywords: manifest.catalog.keywords,
+    does: manifest.catalog.does,
+    author: manifest.publisher?.name,
+    url: manifest.publisher?.url,
+    load: panel,
+    extension: manifest,
+  };
+}
+
+function collect(): CatalogPlugin[] {
+  const found: CatalogPlugin[] = [];
+  for (const [path, raw] of Object.entries(extensionManifests)) {
     const folder = folderOf(path);
-    const manifest = module.default;
-    if (!manifest?.id) {
-      console.warn(`Plugin ${folder} has no default export from definePlugin; skipped.`);
-      continue;
-    }
-    if (manifest.id !== folder) {
-      console.warn(`Plugin ${folder} declares id "${manifest.id}"; the id must match the folder name.`);
-    }
-    const panel = panels[`./${folder}/panel.ts`];
-    if (!panel && !manifest.load) {
-      console.warn(`Plugin ${folder} has no panel.ts and no load(); it will not open.`);
-    }
-    found.push({ ...manifest, load: manifest.load ?? panel });
+    const extension = fromExtension(folder, raw, panels[`./${folder}/panel.ts`]);
+    if (extension && isReleasePluginVisible(extension.id)) found.push(extension);
   }
   return [...found, ...SHORTCUTS].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Alphabetical inside each tier, which is the order the catalog shows them in. */
-export const CATALOG: PluginManifest[] = collect();
+export const CATALOG: CatalogPlugin[] = collect();
 
-export function findPlugin(id: string): PluginManifest | undefined {
+export function setInstalledExtensions(
+  records: InstalledExtensionView[],
+  load: (id: string) => Promise<ExtensionModule>,
+): void {
+  const bundled = CATALOG.filter((plugin) => !plugin.installation);
+  const bundledIds = new Set(bundled.map((plugin) => plugin.id));
+  const installed = records
+    .filter((record) => isReleasePluginVisible(record.id) && !bundledIds.has(record.id))
+    .map((record): CatalogPlugin => {
+      const version = record.versions.find((entry) => entry.hash === record.activeHash);
+      if (!version) throw new Error(`${record.id} has no active installed version`);
+      const manifest = version.manifest;
+      return {
+        id: manifest.id,
+        name: manifest.name,
+        tagline: manifest.catalog.tagline,
+        about: manifest.catalog.about,
+        icon: manifest.catalog.icon,
+        category: manifest.catalog.category,
+        tier: "web",
+        keywords: manifest.catalog.keywords,
+        does: manifest.catalog.does,
+        author: manifest.publisher?.name,
+        url: manifest.publisher?.url,
+        load: () => load(record.id),
+        extension: manifest,
+        installation: record,
+      };
+    });
+  CATALOG.splice(0, CATALOG.length, ...bundled, ...installed);
+  CATALOG.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function findPlugin(id: string): CatalogPlugin | undefined {
   return CATALOG.find((plugin) => plugin.id === id);
 }
 
-/** A tool the app already carries; the catalog points at it rather than mounting it. */
-export const isBuiltIn = (plugin: PluginManifest): boolean => plugin.tier === "core";
+export const isBuiltIn = (plugin: CatalogPlugin): boolean => plugin.tier === "core";
 
-/** Local plugins only work in Local Studio, and only if it offers the capability. */
-export const isLive = (plugin: PluginManifest, service: ServiceClient): boolean =>
-  plugin.tier !== "local" ||
-  (service.mode() === "local" && (!plugin.capability || service.can(plugin.capability)));
+export const isLive = (plugin: CatalogPlugin, service: ServiceClient): boolean =>
+  (!plugin.installation || (plugin.installation.enabled && !plugin.installation.sessionDisabled)) &&
+  (!plugin.extension?.localCompanion?.required ||
+    service.matchCompanion(
+      plugin.extension.localCompanion.id,
+      plugin.extension.localCompanion.version,
+    ).status === "available") &&
+  (plugin.tier !== "local" ||
+    (service.mode() === "local" && (!plugin.capability || service.can(plugin.capability))));

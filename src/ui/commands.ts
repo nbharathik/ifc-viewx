@@ -45,12 +45,30 @@ export class CommandRegistry {
   private readonly commands = new Map<string, Command>();
   private readonly keys = new Map<string, string>();
 
-  add(commands: Command[]): void {
+  add(commands: Command[], include: (command: Command) => boolean = () => true): void {
     for (const command of commands) {
+      if (!include(command)) continue;
       this.commands.set(command.id, command);
       const chord = command.binding ?? command.shortcut;
       if (chord) this.keys.set(normalize(chord), command.id);
     }
+  }
+
+  /** Register a lazy extension command and remove exactly that command later. */
+  register(command: Command): () => void {
+    if (this.commands.has(command.id)) throw new Error(`Command ${command.id} is already registered`);
+    const chord = command.binding ?? command.shortcut;
+    const key = chord ? normalize(chord) : "";
+    if (key && this.keys.has(key)) throw new Error(`Shortcut ${chord} is already registered`);
+    this.commands.set(command.id, command);
+    if (key) this.keys.set(key, command.id);
+    let live = true;
+    return () => {
+      if (!live) return;
+      live = false;
+      if (this.commands.get(command.id) === command) this.commands.delete(command.id);
+      if (key && this.keys.get(key) === command.id) this.keys.delete(key);
+    };
   }
 
   get(id: string): Command | undefined {

@@ -5,9 +5,13 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -15,18 +19,36 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm audit --audit-level=moderate
       - run: npm run build
+      - run: npm run contracts:types:check
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # A tag that disagrees with pyproject would publish the wrong number
-      # under the right name, and PyPI never lets a version be reused.
-      - name: Tag must match package version
+          cache: pip
+          cache-dependency-path: local-bridge/pyproject.toml
+      # A tag that disagrees with package or pyproject metadata would publish
+      # the wrong number under the right name, and PyPI never allows reuse.
+      - name: Tag must match all release metadata
         if: startsWith(github.ref, 'refs/tags/')
+        run: node scripts/bump-version.mjs --check "${GITHUB_REF_NAME#v}"
+      - name: Test Local Studio with compatible dependencies
+        working-directory: local-bridge
         run: |
-          v=$(grep -m1 '^version' local-bridge/pyproject.toml | cut -d'"' -f2)
-          [ "$v" = "${GITHUB_REF_NAME#v}" ] || { echo "tag $GITHUB_REF_NAME does not match version $v"; exit 1; }
-      - run: pip install build && python -m build local-bridge
+          pip install "build>=1.3,<2" "twine>=7,<8" -e ".[check,test]"
+          python -m ruff check src tests
+          python -m pytest tests -q
+          python -c "from ifcviewx import server; assert server.mcp"
+      - run: python -m build local-bridge
+      - run: twine check local-bridge/dist/*
+      - name: Verify the wheel contains the viewer
+        run: python -c "import glob, zipfile; names = zipfile.ZipFile(glob.glob('local-bridge/dist/*.whl')[0]).namelist(); assert 'ifcviewx/app/index.html' in names; assert not any(name.startswith('ifcviewx/app/docs/') for name in names)"
+      - name: Install and smoke-test the release wheel
+        run: |
+          python -m venv .wheel-smoke
+          .wheel-smoke/bin/python -m pip install local-bridge/dist/*.whl
+          .wheel-smoke/bin/python -m pip check
+          .wheel-smoke/bin/ifcviewx --help
       - uses: actions/upload-artifact@v4
         with:
           name: dist
@@ -34,9 +56,12 @@ jobs:
 
   publish:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment: pypi
     permissions:
+      contents: read
       id-token: write
     steps:
       - uses: actions/download-artifact@v4
@@ -49,6 +74,7 @@ jobs:
     needs: publish
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     env:

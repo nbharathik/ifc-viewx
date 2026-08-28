@@ -23,6 +23,12 @@ class AppBundleHook(BuildHookInterface):
         dist = Path(self.root).parent / "dist"
         if (dist / "index.html").is_file():
             shutil.rmtree(app, ignore_errors=True)
-            shutil.copytree(dist, app)
+            shutil.copytree(
+                dist,
+                app,
+                ignore=lambda directory, names: (
+                    {"docs"} if Path(directory).resolve() == dist.resolve() and "docs" in names else set()
+                ),
+            )
         if not (app / "index.html").is_file():
             raise RuntimeError("no built viewer to bundle: run `npm run build` at the repo root first")

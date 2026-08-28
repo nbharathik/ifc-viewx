@@ -1,0 +1,45 @@
+{
+  "manifestVersion": 2,
+  "id": "report-builder",
+  "name": "Report Builder",
+  "version": "1.0.0",
+  "sdk": ">=2.0.0 <3",
+  "description": "Pick a scope and columns, group and total them, save the definition as a template and issue it as CSV, XLSX or a printable page.",
+  "runtime": { "kind": "bundled", "entry": "panel.ts" },
+  "activationEvents": ["onPanel:report-builder"],
+  "permissions": [
+    "model.summary.read",
+    "model.structure.read",
+    "model.properties.read",
+    "model.index.build",
+    "geometry.query",
+    "view.read",
+    "view.control",
+    "storage.extension",
+    "file.open",
+    "file.export"
+  ],
+  "contributes": {
+    "panels": [{ "id": "report-builder", "title": "Report Builder", "icon": "clipboard" }],
+    "importers": [{ "id": "report-builder.template", "title": "Report template", "accepts": [".json"] }],
+    "exporters": [
+      { "id": "report-builder.template", "title": "Report template", "mimeTypes": ["application/json"] },
+      { "id": "report-builder.csv", "title": "Report CSV", "mimeTypes": ["text/csv"] },
+      { "id": "report-builder.html", "title": "Printable report", "mimeTypes": ["text/html"] }
+    ]
+  },
+  "catalog": {
+    "tagline": "Free-form schedules: your columns, your grouping, saved as a template",
+    "about": "Pick the elements, pick the columns from attributes, property sets, quantities and computed properties, then group and total them. The definition is saved as a template, so the same table reproduces on the next revision and issues identically to CSV, XLSX or a print-ready page.",
+    "icon": "clipboard",
+    "category": "Data",
+    "keywords": "report schedule table columns group totals door schedule room data sheet takeoff xlsx csv print pdf",
+    "does": [
+      "Columns from attributes, property sets, quantities and computed properties",
+      "Group by any column, with count, sum, average, min and max",
+      "Scope by class, storey, property, the current selection or what is visible",
+      "Save as a template and reproduce the same table on the next revision",
+      "Export to CSV, XLSX and a self-contained printable page"
+    ]
+  }
+}
