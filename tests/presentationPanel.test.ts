@@ -40,7 +40,8 @@ interface Harness {
 }
 
 function harness(views: ViewDefinition[], dwell = 60): Harness {
-  const store = new ViewStore(localStorage);
+  const store = new ViewStore();
+  store.clear();
   for (const view of views) expect(store.save(view)).toBe(true);
   const deck = {
     name: "Review",
@@ -124,6 +125,7 @@ describe("Presentation lifecycle", () => {
   beforeEach(() => {
     document.body.replaceChildren();
     localStorage.clear();
+    new ViewStore().clear();
   });
 
   afterEach(() => {

@@ -8,6 +8,7 @@ import { transform } from "esbuild";
 
 const PLUGINS = join("src", "plugins");
 const OUT = join("docs", "plugins", "catalog.md");
+const { version: releaseVersion } = JSON.parse(await readFile("package.json", "utf8"));
 async function evaluate(source) {
   const { code } = await transform(source, { loader: "ts", format: "esm" });
   return import(`data:text/javascript,${encodeURIComponent(code)}`);
@@ -59,9 +60,9 @@ const section = ([tier, title, blurb]) => {
 };
 
 const page = [
-  "# Available tools in 0.1.2",
+  `# Available tools in ${releaseVersion}`,
   "",
-  "This page lists the tools available in the planned 0.1.2 release. Each one runs in the browser or through Local Studio.",
+  `This page lists the tools available in the ${releaseVersion} release. Each one runs in the browser or through Local Studio.`,
   "",
   ...TIERS.map(section).filter(Boolean),
 ].join("\n");

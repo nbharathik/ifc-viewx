@@ -44,7 +44,7 @@ These are the plugins and built-in tools available in this release.
 
 | In the browser | Local Studio | Built into the app |
 | --- | --- | --- |
-| Element Explorer, Python Console, Quantity Takeoff, Room Book, Storey Navigator | Assistant Key Vault, IfcOpenShell Converter, MCP Bridge, Native Python | Element Schedules, IDS Validation, Issue Tracker, Model Checks, Model Edits, Smart Filters |
+| 4D Schedule, Clash Detection, Element Explorer, IDS Requirements Studio, Model Compare, Model Finder, Model Health, Point Cloud, Presentation, Python Console, Quantity Takeoff, Report Builder, Room Book, Rule Studio, Section Workspace, Sheets, Smart Measure, Storey Navigator | Assistant Key Vault, IfcOpenShell Converter, MCP Bridge, Native Python | Element Schedules, IDS Validation, Issue Tracker, Model Checks, Model Edits, Smart Filters |
 
 See the [available tools](https://nbharathik.github.io/ifc-viewx/docs/plugins/catalog/).
 

@@ -32,7 +32,7 @@ interface OrganizeRow {
 }
 
 export class OrganizePane {
-  private readonly page = h("div", { class: "page scroll" });
+  private readonly page = h("div", { class: "page browse-page" });
   private index: OrganizeIndex | null = null;
   private loading = false;
   private pending: Promise<void> = Promise.resolve();
@@ -107,12 +107,15 @@ export class OrganizePane {
       );
       return;
     }
-    const seg = h("div", { class: "seg org-switch", role: "tablist", "aria-label": "Organize mode" });
+    const seg = h("div", { class: "seg org-switch", role: "group", "aria-label": "Group elements by" });
     for (const [mode, label] of MODES) {
-      const button = h("button", { type: "button", text: label, "aria-pressed": String(mode === this.mode) });
+      const button = h("button", {
+        type: "button", text: label, "aria-pressed": String(mode === this.mode), "data-mode": mode,
+      });
       button.addEventListener("click", () => {
         this.mode = mode;
         this.paint();
+        this.page.querySelector<HTMLButtonElement>(`[data-mode="${mode}"]`)?.focus();
       });
       seg.appendChild(button);
     }
@@ -126,7 +129,9 @@ export class OrganizePane {
       this.page.replaceChildren(seg, emptyState("layers", `No ${label}`, EMPTY_HINT[this.mode]));
       return;
     }
-    const list = h("div", {});
+    const list = h("div", {
+      class: "browse-list org-list", role: "region", "aria-label": `${rows.length.toLocaleString()} ${label}`,
+    });
     for (const row of rows.slice(0, MAX_ROWS)) list.appendChild(this.row(row));
     if (rows.length > MAX_ROWS) {
       list.appendChild(h("div", { class: "hint-line", text: `${(rows.length - MAX_ROWS).toLocaleString()} more not shown` }));
@@ -143,10 +148,10 @@ export class OrganizePane {
     const main = h("button", {
       class: "main",
       type: "button",
-      title: `Select these ${count} element(s)`,
+      title: `${entry.label}${entry.tag ? ` - ${entry.tag}` : ""}\nSelect these ${count} element(s)`,
     }, [
-      h("span", { class: "name", text: entry.label }),
-      ...(entry.tag ? [h("span", { class: "tag", text: entry.tag })] : []),
+      h("span", { class: "name", text: entry.label, title: entry.label }),
+      ...(entry.tag ? [h("span", { class: "tag", text: entry.tag, title: entry.tag })] : []),
       h("span", { class: "n", text: count.toLocaleString() }),
     ]);
     main.addEventListener("click", () => this.viewer.selectMany(entry.ids));

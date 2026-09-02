@@ -50,17 +50,17 @@ describe("sample model", () => {
       const type = api.GetNameFromTypeCode(api.GetLineType(modelID, id));
       found.set(type, (found.get(type) ?? 0) + 1);
     }
-    // Two storeys of: slab, four walls, two columns, a door and a window.
-    expect(found.get("IfcWall")).toBe(8);
-    expect(found.get("IfcSlab")).toBe(2);
-    expect(found.get("IfcColumn")).toBe(4);
-    expect(found.get("IfcDoor")).toBe(2);
+    // Segmented facades and partitions leave visible door and window gaps.
+    expect(found.get("IfcWall")).toBe(24);
+    expect(found.get("IfcSlab")).toBe(4);
+    expect(found.get("IfcColumn")).toBe(8);
+    expect(found.get("IfcDoor")).toBe(4);
     expect(found.get("IfcWindow")).toBe(2);
     expect(found.get("IfcBuildingStorey")).toBe(2);
     // Two rooms per storey, each with a quantity set and a property set.
     expect(found.get("IfcSpace")).toBe(4);
     expect(found.get("IfcElementQuantity")).toBe(4);
-    expect(found.get("IfcPropertySet")).toBe(12);
+    expect(found.get("IfcPropertySet")).toBe(28);
   });
 
   it("gives every space the quantities a room book reads", () => {
@@ -71,7 +71,7 @@ describe("sample model", () => {
       LongName?: { value?: string };
     };
     expect(first.Name?.value).toBe("101");
-    expect(first.LongName?.value).toBe("Office");
+    expect(first.LongName?.value).toBe("Open office");
 
     const quantities = api.GetLineIDsWithType(modelID, api.GetTypeCodeFromName("IFCQUANTITYAREA"));
     // Net and gross floor area on each of the four rooms.
@@ -81,8 +81,22 @@ describe("sample model", () => {
       AreaValue?: { value?: number };
     };
     expect(area.Name?.value).toBe("NetFloorArea");
-    // Half of a 9.4 by 7.4 metre inner footprint.
-    expect(area.AreaValue?.value).toBeCloseTo(34.78, 1);
+    // Half of the inner footprint, allowing for the central partition.
+    expect(area.AreaValue?.value).toBeCloseTo(47.8125, 3);
+  });
+
+  it("carries useful material assignments for organising and colour-by", () => {
+    const materials = api.GetLineIDsWithType(modelID, api.GetTypeCodeFromName("IFCMATERIAL"));
+    const names: string[] = [];
+    for (let i = 0; i < materials.size(); i++) {
+      const line = api.GetLine(modelID, materials.get(i)) as { Name?: { value?: string } };
+      if (line.Name?.value) names.push(line.Name.value);
+    }
+    expect(names.sort()).toEqual([
+      "Clear glass", "Concrete", "Oak", "Painted steel", "Warm white masonry",
+    ]);
+    const relations = api.GetLineIDsWithType(modelID, api.GetTypeCodeFromName("IFCRELASSOCIATESMATERIAL"));
+    expect(relations.size()).toBe(5);
   });
 
   it("tessellates into real geometry", () => {
@@ -96,15 +110,48 @@ describe("sample model", () => {
         triangles += geometry.GetIndexDataSize() / 3;
       }
     });
-    // Eighteen boxes, twelve triangles each, before any welding.
-    expect(meshes).toBe(18);
-    expect(triangles).toBeGreaterThanOrEqual(18 * 12);
+    // Forty-two styled products, twelve triangles each before any welding.
+    expect(meshes).toBe(42);
+    expect(triangles).toBeGreaterThanOrEqual(42 * 12);
+  });
+
+  it("joins the floor, walls and roof without a floating level", () => {
+    const bounds = new Map<string, { min: number; max: number }>();
+    api.StreamAllMeshes(modelID, (mesh) => {
+      const product = api.GetLine(modelID, mesh.expressID) as { Name?: { value?: string } };
+      const name = product.Name?.value;
+      if (!name) return;
+      let min = Number.POSITIVE_INFINITY;
+      let max = Number.NEGATIVE_INFINITY;
+      for (let i = 0; i < mesh.geometries.size(); i++) {
+        const placed = mesh.geometries.get(i);
+        const matrix = Array.from(placed.flatTransformation as ArrayLike<number>);
+        const geometry = api.GetGeometry(modelID, placed.geometryExpressID);
+        const vertices = api.GetVertexArray(geometry.GetVertexData(), geometry.GetVertexDataSize());
+        for (let vertex = 0; vertex < vertices.length; vertex += 6) {
+          const x = vertices[vertex];
+          const y = vertices[vertex + 1];
+          const z = vertices[vertex + 2];
+          // web-ifc emits the viewer's Y-up coordinates.
+          const worldY = matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13];
+          min = Math.min(min, worldY);
+          max = Math.max(max, worldY);
+        }
+      }
+      bounds.set(name, { min, max });
+    });
+
+    expect(bounds.get("Ground-bearing slab")).toMatchObject({ max: expect.closeTo(0, 5) });
+    expect(bounds.get("South wall left 1")).toMatchObject({ min: expect.closeTo(0, 5), max: expect.closeTo(3, 5) });
+    expect(bounds.get("First-floor slab")).toMatchObject({ min: expect.closeTo(3, 5), max: expect.closeTo(3.2, 5) });
+    expect(bounds.get("South wall left 2")).toMatchObject({ min: expect.closeTo(3.2, 5), max: expect.closeTo(6.2, 5) });
+    expect(bounds.get("Warm roof")).toMatchObject({ min: expect.closeTo(6.2, 5) });
   });
 
   it("reads back the property set the walls carry", () => {
-    // Eight walls plus the four rooms' Pset_SpaceCommon.
+    // Twenty-four wall segments plus the four rooms' Pset_SpaceCommon.
     const sets = api.GetLineIDsWithType(modelID, api.GetTypeCodeFromName("IFCPROPERTYSET"));
-    expect(sets.size()).toBe(12);
+    expect(sets.size()).toBe(28);
     const first = api.GetLine(modelID, sets.get(0)) as { Name?: { value?: string } };
     expect(first.Name?.value).toBe("Pset_WallCommon");
   });

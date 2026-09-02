@@ -60,6 +60,16 @@ describe("assistant panel workflow", () => {
     expect(send.disabled).toBe(true);
   });
 
+  it("keeps new chat beside the conversation instead of duplicating it in the ribbon", () => {
+    const { host, callbacks } = buildPanel();
+    const newChat = host.querySelector<HTMLButtonElement>('[aria-label="New chat"]');
+
+    expect(newChat).not.toBeNull();
+    newChat!.click();
+
+    expect(callbacks.onNewChat).toHaveBeenCalledTimes(1);
+  });
+
   it("locks the turn's mode and keeps Stop operable while work is running", () => {
     vi.useFakeTimers();
     const { host, panel, callbacks } = buildPanel();

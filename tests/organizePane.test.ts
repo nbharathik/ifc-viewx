@@ -65,9 +65,12 @@ describe("Organize pane", () => {
     const list = rows(host);
     expect(list).toHaveLength(2);
     expect(list[0].querySelector(".name")?.textContent).toBe("HVAC supply");
+    expect(list[0].querySelector(".name")?.getAttribute("title")).toBe("HVAC supply");
     expect(list[0].querySelector(".tag")?.textContent).toBe("IfcSystem");
     expect(list[0].querySelector(".n")?.textContent).toBe("3");
     expect(list[1].querySelector(".name")?.textContent).toBe("Group #51");
+    expect(host.querySelector(".browse-list")?.getAttribute("aria-label")).toBe("2 groups");
+    expect(host.querySelector(".org-switch")?.getAttribute("role")).toBe("group");
   });
 
   it("shows a busy row while the index loads", async () => {

@@ -73,8 +73,10 @@ const SURVEY_DENSITY_KEY = "ifcviewx.survey.density";
 const SURVEY_CAP = 500;
 /** Rail width plus the gutter the measure card starts after, in CSS px. */
 const CARD_GUTTER = 42;
-/** The section panel is the widest rail popover. */
-const WIDEST_POP = 262;
+/** The widest rail popover, used to avoid the open measure card. */
+// Colour grouping needs more room than section controls: six modes stay
+// legible even while the measure card is open beside it.
+const WIDEST_POP = 304;
 
 /** First authored quantity under any of these names, quantity sets only. */
 function readQuantity(props: ItemProperties | null, names: string[]): number | null {
@@ -1488,8 +1490,9 @@ export class Dock {
   }
 
   private buildColors(pop: HTMLElement): void {
+    pop.classList.add("color-pop");
     pop.append(h("div", { class: "pop-title", text: "Colour by" }));
-    const legend = h("div", { class: "pop-list legend" });
+    const legend = h("div", { class: "pop-list legend", role: "region", "aria-label": "Colour groups" });
     const status = h("div", {});
 
     const paint = (merged?: ColorResult): void => {
@@ -1504,7 +1507,7 @@ export class Dock {
       for (const group of result.groups) {
         const row = h("button", { class: "legend-row", type: "button", title: `Isolate ${group.label}` }, [
           h("span", { class: "legend-dot", style: `background:${cssColor(group.color)}` }),
-          h("span", { class: "grow", text: group.label }),
+          h("span", { class: "grow", text: group.label, title: group.label }),
           h("span", { class: "legend-count", text: group.count.toLocaleString() }),
         ]);
         row.addEventListener("click", () => this.viewer.isolate(group.ids, `Colour: ${group.label}`));
@@ -1573,7 +1576,7 @@ export class Dock {
       ["Random", { kind: "random" }],
       ["Material", { kind: "material" }],
     ];
-    const seg = h("div", { class: "seg color-modes" });
+    const seg = h("div", { class: "seg color-modes", role: "group", "aria-label": "Group colours by" });
     for (const [label, rule] of modes) {
       const button = h("button", { type: "button", text: label });
       button.setAttribute("aria-pressed", String(this.colorRule.kind === rule.kind));
@@ -1590,7 +1593,7 @@ export class Dock {
 
     const index = this.indexProvider?.();
     const options = index ? colorableKeys(index) : [];
-    const keys = h("select", { class: "pop-select" }) as HTMLSelectElement;
+    const keys = h("select", { class: "pop-select", "aria-label": "Colour by property" }) as HTMLSelectElement;
     keys.appendChild(h("option", { value: "", text: options.length ? "Property..." : "Property (open a model)" }));
     for (const [key, count] of options) {
       keys.appendChild(h("option", { value: key, text: `${key}  (${count})` }));
@@ -1603,7 +1606,9 @@ export class Dock {
     });
 
     // Custom colour for the current selection, layered over the active rule.
-    const swatch = h("input", { type: "color", value: "#ff8c1a", title: "Custom colour" }) as HTMLInputElement;
+    const swatch = h("input", {
+      type: "color", value: "#ff8c1a", title: "Custom colour", "aria-label": "Custom colour",
+    }) as HTMLInputElement;
     swatch.className = "pop-swatch";
     const applySwatch = h("button", { class: "btn", type: "button", text: "Colour selection" });
     applySwatch.addEventListener("click", () => {

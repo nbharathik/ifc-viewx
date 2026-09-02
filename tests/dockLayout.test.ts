@@ -107,4 +107,15 @@ describe("rail panel placement", () => {
     expect(dock.querySelectorAll(".pop")).toHaveLength(1);
     expect(dock.querySelectorAll('button[aria-expanded="true"]')).toHaveLength(1);
   });
+
+  it("lays colour grouping out as a labelled, scrollable result panel", () => {
+    const { dock } = mount(false, 1200);
+    dock.querySelector<HTMLButtonElement>('button[title*="Colour by"]')!.click();
+    const pop = dock.querySelector<HTMLElement>(".color-pop")!;
+    expect(pop).not.toBeNull();
+    expect(pop.querySelector(".color-modes")?.getAttribute("role")).toBe("group");
+    expect(pop.querySelectorAll(".color-modes button")).toHaveLength(6);
+    expect(pop.querySelector(".legend")?.getAttribute("aria-label")).toBe("Colour groups");
+    expect(pop.querySelector(".pop-select")?.getAttribute("aria-label")).toBe("Colour by property");
+  });
 });

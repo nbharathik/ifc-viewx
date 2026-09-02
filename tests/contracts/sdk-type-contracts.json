@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "typescriptVersion": "5.9.3",
   "entry": "src/sdk/index.ts",
-  "digest": "4d53a2add96a3a5a630db1638f07f83f78cd12b3a3401c51bf591f99dbaabc0c",
+  "digest": "f7923ed0365faa67af7dd73c2a4b237164e80c4c4d5dd653258a4bb606d10b6d",
   "files": [
     {
       "path": "src/app/release.d.ts",
-      "bytes": 373,
-      "sha256": "4bfd0e5edf2e35ac310d53ca958b935af15298e0763771f7a35d7edb7f0469e2"
+      "bytes": 435,
+      "sha256": "34a1758722910a3853c74bbb06baf052e4a0671736371b872b933b6f54831da5"
     },
     {
       "path": "src/capabilities/results.d.ts",
