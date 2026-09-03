@@ -38,8 +38,6 @@ jobs:
       - run: npm ci
       - run: npm audit --audit-level=moderate
       - run: npm run build
-        env:
-          VITE_BASE: /${{ github.event.repository.name }}/
       - run: npm run contracts:types:check
       - run: npm run metrics -- --output project-metrics.json
       - uses: actions/upload-artifact@v4

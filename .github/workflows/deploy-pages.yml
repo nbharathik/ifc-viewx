@@ -29,13 +29,14 @@ jobs:
           cache-dependency-path: docs/requirements.txt
       - run: npm ci
       - run: npm run build
-        env:
-          VITE_BASE: /${{ github.event.repository.name }}/
       # The docs build into dist/docs, so one artifact carries both: the app at
       # the root and the site under /docs/. It has to run after vite build,
       # which empties dist.
       - run: pip install -r docs/requirements.txt
       - run: npm run docs:build
+      # Pages reads the custom domain from this file as well as from the
+      # repository setting, so the two cannot drift apart.
+      - run: echo ifcviewx.com > dist/CNAME
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

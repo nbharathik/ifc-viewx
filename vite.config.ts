@@ -6,9 +6,9 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import { viteStaticCopy } from "vite-plugin-static-copy";
 
-// GitHub Pages serves the site from /<repo-name>/, so the base must match.
-// Override with VITE_BASE=/ for local preview or custom domains.
-const base = process.env.VITE_BASE ?? "/ifc-viewx/";
+// The site is served from the root of ifcviewx.com. Override with VITE_BASE
+// when deploying under a subpath.
+const base = process.env.VITE_BASE ?? "/";
 
 // Stamped into exported reports, so a result can be traced to the build that
 // produced it. Read here rather than imported, to keep package.json out of the

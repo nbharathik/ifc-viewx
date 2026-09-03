@@ -3,7 +3,7 @@
 IFCViewX is a fast, private IFC viewer for inspecting and reviewing building
 models. Files are processed locally and stay on your machine.
 
-[Open IFCViewX](https://nbharathik.github.io/ifc-viewx/){ .md-button .md-button--primary }
+[Open IFCViewX](https://ifcviewx.com/){ .md-button .md-button--primary }
 [Available tools](plugins/catalog.md){ .md-button }
 
 ## Start

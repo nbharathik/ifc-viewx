@@ -8,9 +8,9 @@
 <p align="center">
   Local IFC tools for IFCViewX. Everything stays on your machine.
   <br>
-  <a href="https://nbharathik.github.io/ifc-viewx/docs/local-studio/"><strong>Local Studio guide</strong></a>
+  <a href="https://ifcviewx.com/docs/local-studio/"><strong>Local Studio guide</strong></a>
   &middot;
-  <a href="https://nbharathik.github.io/ifc-viewx/docs/">Docs</a>
+  <a href="https://ifcviewx.com/docs/">Docs</a>
 </p>
 
 ## Install and run

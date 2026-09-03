@@ -10,9 +10,9 @@
   <br>
   Everything runs locally and files never leave your machine. Drop an IFC file to get started.
   <br>
-  <a href="https://nbharathik.github.io/ifc-viewx/"><strong>Open the viewer</strong></a>
+  <a href="https://ifcviewx.com/"><strong>Open the viewer</strong></a>
   &middot;
-  <a href="https://nbharathik.github.io/ifc-viewx/docs/">Docs</a>
+  <a href="https://ifcviewx.com/docs/">Docs</a>
 </p>
 
 ## What it does
@@ -36,7 +36,7 @@ ifcviewx model.ifc           # with that model already open
 Serves the same viewer from `127.0.0.1:8765` and adds what a browser tab
 cannot do: IfcOpenShell conversion, native Python, an MCP bridge for AI
 clients, and a vault that keeps your assistant key off the page.
-See [Local Studio](https://nbharathik.github.io/ifc-viewx/docs/local-studio/).
+See [Local Studio](https://ifcviewx.com/docs/local-studio/).
 
 ## Plugins
 
@@ -46,7 +46,7 @@ These are the plugins and built-in tools available in this release.
 | --- | --- | --- |
 | 4D Schedule, Clash Detection, Element Explorer, IDS Requirements Studio, Model Compare, Model Finder, Model Health, Point Cloud, Presentation, Python Console, Quantity Takeoff, Report Builder, Room Book, Rule Studio, Section Workspace, Sheets, Smart Measure, Storey Navigator | Assistant Key Vault, IfcOpenShell Converter, MCP Bridge, Native Python | Element Schedules, IDS Validation, Issue Tracker, Model Checks, Model Edits, Smart Filters |
 
-See the [available tools](https://nbharathik.github.io/ifc-viewx/docs/plugins/catalog/).
+See the [available tools](https://ifcviewx.com/docs/plugins/catalog/).
 
 ## License
 

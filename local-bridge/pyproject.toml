@@ -44,8 +44,9 @@ ifcviewx = "ifcviewx.cli:main"
 ifcx-convert = "ifcviewx.convert:main"
 
 [project.urls]
-Homepage = "https://github.com/nbharathik/ifc-viewx"
-Viewer = "https://nbharathik.github.io/ifc-viewx/"
+Homepage = "https://ifcviewx.com/"
+Documentation = "https://ifcviewx.com/docs/"
+Source = "https://github.com/nbharathik/ifc-viewx"
 
 [build-system]
 # Hatchling 1.32 emits Core Metadata 2.5, which current PyPI tooling rejects.
