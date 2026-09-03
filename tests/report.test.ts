@@ -15,7 +15,7 @@ function base(): ReportModel {
   return {
     title: "Tower A",
     generated: "7 Aug 2026, 14:00",
-    app: "IFCViewX 0.1.1",
+    app: "IFCViewX 0.1.4",
     totals: { entities: 1234, triangles: 98765, visible: 290, hidden: 3 },
     models: [{ name: "arch.ifc", elements: 200, triangles: 60000, visible: true }],
     section: "none",
