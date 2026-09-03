@@ -17,10 +17,10 @@ describe("assistant capability adapter", () => {
     expect(query.map((tool) => tool.name)).not.toContain(assistantToolName("view.pickAt"));
     expect(edit.map((tool) => tool.name)).toContain(assistantToolName("issue.stage"));
     expect(edit.map((tool) => tool.name)).toContain(assistantToolName("view.pickAt"));
-    expect(query.map((tool) => tool.name)).not.toContain(assistantToolName("clash"));
-    expect(query.map((tool) => tool.name)).not.toContain(assistantToolName("laser"));
-    expect(query.map((tool) => tool.name)).not.toContain(assistantToolName("sectionContours"));
-    expect(edit.map((tool) => tool.name)).not.toContain(assistantToolName("definition.ruleset"));
+    expect(query.map((tool) => tool.name)).toContain(assistantToolName("clash"));
+    expect(query.map((tool) => tool.name)).toContain(assistantToolName("laser"));
+    expect(query.map((tool) => tool.name)).toContain(assistantToolName("sectionContours"));
+    expect(edit.map((tool) => tool.name)).toContain(assistantToolName("definition.ruleset"));
     expect(edit.every((tool) => tool.schema.additionalProperties === false)).toBe(true);
   });
 
@@ -147,14 +147,14 @@ describe("assistant capability adapter", () => {
     )))).resolves.toHaveLength(3);
   });
 
-  it("keeps the release-hidden clash capability out of assistant execution", async () => {
+  it("executes the verified clash capability exposed in this release", async () => {
     const clash = vi.fn(async () => ({
       clashes: 1,
       worst: [],
     }));
     const registry = createViewerCapabilityRegistry();
     const context: ViewerCapabilityContext = {
-      viewer,
+      viewer: { getSpatialTree: () => null } as unknown as Viewer,
       semantic: {
         check: async () => ({}),
         schedule: async () => ({}),
@@ -170,9 +170,9 @@ describe("assistant capability adapter", () => {
       { a: ["IfcWall"], b: ["IfcPipeSegment"] },
       "edit",
       new AbortController().signal,
-    )).rejects.toThrow(/unknown or unapproved/i);
+    )).resolves.toMatchObject({ value: { clashes: 1 } });
 
-    expect(clash).not.toHaveBeenCalled();
+    expect(clash).toHaveBeenCalledWith(["IfcWall"], ["IfcPipeSegment"], 10, 0, expect.any(AbortSignal));
     expect(registry.has("clash")).toBe(true);
   });
 

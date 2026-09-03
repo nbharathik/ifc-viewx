@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "typescriptVersion": "5.9.3",
   "entry": "src/sdk/index.ts",
-  "digest": "4d53a2add96a3a5a630db1638f07f83f78cd12b3a3401c51bf591f99dbaabc0c",
+  "digest": "5657b5429ca7385cef06a9370883b4f2f36b3d9b673c4bbbd6444d1a67a404d8",
   "files": [
     {
       "path": "src/app/release.d.ts",
-      "bytes": 373,
-      "sha256": "4bfd0e5edf2e35ac310d53ca958b935af15298e0763771f7a35d7edb7f0469e2"
+      "bytes": 435,
+      "sha256": "34a1758722910a3853c74bbb06baf052e4a0671736371b872b933b6f54831da5"
     },
     {
       "path": "src/capabilities/results.d.ts",
@@ -491,8 +491,8 @@
     },
     {
       "path": "src/views/definition.d.ts",
-      "bytes": 6642,
-      "sha256": "7779fc9d898dbe2186387b500fa76b5baf1080cc6d19a040dcdd24eb39761cc3"
+      "bytes": 6617,
+      "sha256": "dbdc15dd627f810964573fb4a3aeb1a372ebccb34d1f00044e76663d8bdfb3cd"
     }
   ]
 }

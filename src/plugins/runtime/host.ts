@@ -522,16 +522,16 @@ export class PluginHost {
       this.expandButton.setAttribute("aria-expanded", String(wide));
       this.expandButton.setAttribute("aria-controls", this.expanded.id);
       this.expandButton.setAttribute("aria-haspopup", "dialog");
-      this.strip.append(
-        h("span", { class: "grow" }),
+      this.strip.append(h("div", { class: "plug-strip-actions" }, [
         iconButton("x", `Close ${active?.manifest.name ?? "plugin"}`, () => {
           if (this.active) this.close(this.active);
         }, "icon-btn sm"),
         this.expandButton,
         iconButton("blocks", "Browse plugins", () => this.browse(), "icon-btn sm"),
-      );
+      ]));
     } else this.expandButton = null;
     this.paintExpandedTitle();
+    this.revealTab(this.active);
     if (focusWasInWorkspace &&
       (!focused.isConnected || focused.closest(".hidden, [hidden], [inert]"))) {
       if (this.active) this.focusTab(this.active);
@@ -604,9 +604,18 @@ export class PluginHost {
     for (const tab of this.tabList.querySelectorAll<HTMLButtonElement>('[role="tab"]')) {
       if (tab.dataset.pluginId === id) {
         tab.focus();
+        this.revealTab(id);
         return;
       }
     }
+  }
+
+  /** Keep keyboard- and command-selected tabs inside the independently scrolling strip. */
+  private revealTab(id: string): void {
+    if (!id) return;
+    const tab = [...this.tabList.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .find((candidate) => candidate.dataset.pluginId === id);
+    tab?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   }
 
   private moveTabFocus(event: KeyboardEvent): void {

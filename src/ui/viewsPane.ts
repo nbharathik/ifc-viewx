@@ -86,7 +86,7 @@ export class ViewsPane {
       this.gallery,
       h("div", {
         class: "note",
-        text: "A view stores rules, not element ids, so the same file applies to the next revision.",
+        text: "Views stay with the open model for this session. Export them to reuse them later or on another revision.",
       }),
     );
 

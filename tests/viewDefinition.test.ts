@@ -440,6 +440,17 @@ describe("the store", () => {
     expect(new ViewStore(storage).list().map((view) => view.name)).toEqual(["Kept"]);
   });
 
+  it("shares the default library for this session without persisting it", () => {
+    localStorage.setItem("ifcviewx.views.v1", "legacy data");
+    const store = new ViewStore();
+    store.clear();
+    expect(store.save(captureView(fakeViewer(emptyState()), null, { name: "Current model" }))).toBe(true);
+
+    expect(new ViewStore().list().map((view) => view.name)).toEqual(["Current model"]);
+    expect(localStorage.getItem("ifcviewx.views.v1")).toBeNull();
+    store.clear();
+  });
+
   it("groups by folder and reports them sorted", () => {
     const store = new ViewStore(memory());
     store.save(captureView(fakeViewer(emptyState()), null, { name: "A", folder: "Zeta" }));

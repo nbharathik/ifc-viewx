@@ -1,6 +1,6 @@
 [project]
 name = "ifcviewx"
-version = "0.1.2"
+version = "0.1.4"
 description = "IFCViewX Local Studio: fast, private IFC viewer with IfcOpenShell conversion, native Python, model checks and an MCP bridge"
 readme = "README.md"
 requires-python = ">=3.11"

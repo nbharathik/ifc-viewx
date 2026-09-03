@@ -786,13 +786,50 @@ export function serializeViews(views: ViewDefinition[]): string {
   return source;
 }
 
-/** Saved views for this browser. Views are model-independent, so is the key. */
-export class ViewStore {
-  private views: ViewDefinition[] = [];
-  private readonly listeners = new Set<() => void>();
+interface ViewStoreState {
+  views: ViewDefinition[];
+  listeners: Set<() => void>;
+}
 
-  constructor(private readonly storage: Storage | null = safeStorage()) {
-    this.views = this.read();
+/**
+ * The default library is shared by every in-app consumer, but deliberately
+ * lives only for the current browser session. A view can contain thumbnails
+ * and thousands of element offsets, so silently retaining one library for
+ * every model in localStorage is both surprising and expensive.
+ *
+ * Passing an explicit Storage keeps the SDK's opt-in persistence path for
+ * integrations that need it. Passing null still represents unavailable
+ * storage and reports writes as failures.
+ */
+const sessionViewState: ViewStoreState = { views: [], listeners: new Set() };
+let removedLegacyLibrary = false;
+
+function discardLegacyViewLibrary(): void {
+  if (removedLegacyLibrary) return;
+  removedLegacyLibrary = true;
+  try {
+    if (typeof localStorage !== "undefined") localStorage.removeItem(STORE_KEY);
+  } catch {
+    // Privacy modes may expose localStorage while refusing access to it.
+  }
+}
+
+/** Saved views for the currently open model. */
+export class ViewStore {
+  private readonly storage: Storage | null;
+  private readonly state: ViewStoreState;
+  private readonly session: boolean;
+
+  constructor(storage?: Storage | null) {
+    this.session = storage === undefined;
+    this.storage = storage ?? null;
+    if (this.session) {
+      discardLegacyViewLibrary();
+      this.state = sessionViewState;
+    } else {
+      this.state = { views: [], listeners: new Set() };
+      this.state.views = this.read();
+    }
   }
 
   private read(): ViewDefinition[] {
@@ -806,48 +843,48 @@ export class ViewStore {
 
   private write(): boolean {
     try {
-      if (!this.storage) return false;
-      this.storage.setItem(STORE_KEY, serializeViews(this.views));
+      if (!this.storage) return this.session;
+      this.storage.setItem(STORE_KEY, serializeViews(this.state.views));
       return true;
     } catch {
       return false;
     } finally {
-      for (const listener of this.listeners) listener();
+      for (const listener of this.state.listeners) listener();
     }
   }
 
   list(): ViewDefinition[] {
-    return [...this.views];
+    return [...this.state.views];
   }
 
   folders(): string[] {
-    return [...new Set(this.views.map((view) => view.folder).filter(Boolean))].sort();
+    return [...new Set(this.state.views.map((view) => view.folder).filter(Boolean))].sort();
   }
 
   get(id: string): ViewDefinition | undefined {
-    return this.views.find((view) => view.id === id);
+    return this.state.views.find((view) => view.id === id);
   }
 
   /** Add or replace by id; a name collision inside a folder replaces too. */
   save(view: ViewDefinition): boolean {
     const normalized = normalizeView(view);
     if (!normalized) return false;
-    const at = this.views.findIndex(
+    const at = this.state.views.findIndex(
       (existing) => existing.id === normalized.id ||
         (existing.name === normalized.name && existing.folder === normalized.folder),
     );
-    if (at >= 0) this.views[at] = { ...normalized, id: this.views[at].id };
+    if (at >= 0) this.state.views[at] = { ...normalized, id: this.state.views[at].id };
     else {
-      if (this.views.length >= MAX_VIEW_FILE_VIEWS) return false;
-      this.views.push(normalized);
+      if (this.state.views.length >= MAX_VIEW_FILE_VIEWS) return false;
+      this.state.views.push(normalized);
     }
     return this.write();
   }
 
   remove(id: string): boolean {
-    const before = this.views.length;
-    this.views = this.views.filter((view) => view.id !== id);
-    if (this.views.length === before) return false;
+    const before = this.state.views.length;
+    this.state.views = this.state.views.filter((view) => view.id !== id);
+    if (this.state.views.length === before) return false;
     return this.write();
   }
 
@@ -867,11 +904,11 @@ export class ViewStore {
     for (const raw of views.slice(0, MAX_VIEW_FILE_VIEWS)) {
       const view = normalizeView(raw);
       if (!view) continue;
-      const at = this.views.findIndex((existing) => existing.name === view.name && existing.folder === view.folder);
-      if (at >= 0) this.views[at] = { ...view, id: this.views[at].id };
+      const at = this.state.views.findIndex((existing) => existing.name === view.name && existing.folder === view.folder);
+      if (at >= 0) this.state.views[at] = { ...view, id: this.state.views[at].id };
       else {
-        if (this.views.length >= MAX_VIEW_FILE_VIEWS) break;
-        this.views.push(view);
+        if (this.state.views.length >= MAX_VIEW_FILE_VIEWS) break;
+        this.state.views.push(view);
       }
       added++;
     }
@@ -880,20 +917,12 @@ export class ViewStore {
   }
 
   clear(): void {
-    this.views = [];
+    this.state.views = [];
     this.write();
   }
 
   onChange(listener: () => void): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
-  }
-}
-
-function safeStorage(): Storage | null {
-  try {
-    return typeof localStorage === "undefined" ? null : localStorage;
-  } catch {
-    return null;
+    this.state.listeners.add(listener);
+    return () => this.state.listeners.delete(listener);
   }
 }

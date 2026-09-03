@@ -1,4 +1,4 @@
-# IFCViewX 0.1.2
+# IFCViewX 0.1.4
 
 IFCViewX is a fast, private IFC viewer for inspecting and reviewing building
 models. Files are processed locally and stay on your machine.

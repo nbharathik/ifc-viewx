@@ -145,6 +145,8 @@ let pythonSynced = false;
 let summaryDirty = true;
 
 const service = new ServiceClient();
+/** One bounded, session-only library shared by the pane, commands and plugins. */
+const savedViews = new ViewStore();
 
 // ---------------------------------------------------------------------------
 // Shell + viewer
@@ -414,7 +416,7 @@ async function viewsPane(): Promise<ViewsPane> {
       log: (message, kind) => shell.log(message, kind),
       applied: (name) => setActiveViewName(name),
       raiseIssue: (title, ids) => void raiseIssue(title, ids).catch(reportError),
-    });
+    }, savedViews);
   }
   return viewsUi;
 }
@@ -700,6 +702,7 @@ function dropModelState(): void {
   void import("./ui/ids.js").then(({ clearLastIdsReport }) => clearLastIdsReport());
   activeAssistantResult = "";
   focusedAssistantRow = undefined;
+  savedViews.clear();
   showDropzone();
 }
 
@@ -781,6 +784,9 @@ async function loadBytes(
   if (mine !== loadSeq) return false;
   if (pose) viewer.setCamera(pose);
   if (pendingEdit && !options.preservePending) discardPending();
+  // A normal open starts a new model workspace. Internal edit/undo reloads
+  // preserve the camera and the views authored against that same model.
+  if (!preserveCamera) savedViews.clear();
   activeBytes = bytes;
   fileName = name;
   schemaName = sniffSchema(bytes);
@@ -1065,7 +1071,7 @@ async function exportSharePackage(): Promise<void> {
       project: fileName || "model",
       app: `IFCViewX ${__APP_VERSION__}`,
       model: { name: fileName || "model.ifc", bytes: activeBytes },
-      views: new ViewStore().list(),
+      views: savedViews.list(),
       properties: new ComputedStore().list(),
       sheets: await sheetStore.all(),
       state,
@@ -1096,7 +1102,7 @@ async function openSharePackage(file: File): Promise<void> {
     }
   }
   if (contents.views.length) {
-    new ViewStore().merge(contents.views);
+    savedViews.merge(contents.views);
   }
   if (contents.properties.length) {
     new ComputedStore().merge(contents.properties);
@@ -2024,8 +2030,7 @@ async function acceptDefinitionProposal(payload: Record<string, unknown>): Promi
   const kind = String(payload.staged ?? "");
   if (kind === "view") {
     const body = payload.view as Record<string, unknown>;
-    const store = new ViewStore();
-    store.save({
+    savedViews.save({
       ...(body as unknown as ViewDefinition),
       id: `view-${Date.now().toString(36)}`,
       updatedAt: new Date().toISOString(),
@@ -2563,7 +2568,7 @@ const registry = new CommandRegistry();
 registry.add([
   { id: "file.open", label: "Open", icon: "folder", section: "File", shortcut: "Ctrl+O", hint: "Open an IFC or .ifcx file", run: () => fileInput.click() },
   { id: "file.attach", label: "Add model", icon: "layers", section: "File", hint: "Load a second model beside this one", enabled: hasModel, run: () => attachInput.click() },
-  { id: "file.sample", label: "Sample model", icon: "cube", section: "File", hint: "A small two-storey building, generated here, to try the viewer on", run: () => replaceOrConfirm(() => void openSample().catch(reportError)) },
+  { id: "file.sample", label: "Sample model", icon: "cube", section: "File", hint: "A grounded two-storey office with rooms, materials and a roof, generated here to try the viewer", run: () => replaceOrConfirm(() => void openSample().catch(reportError)) },
   { id: "file.export", label: "Export", icon: "download", section: "File", hint: "Download the active IFC", enabled: hasModel, run: exportModel },
   { id: "file.mesh", label: "Export mesh", icon: "cube", section: "File", hint: "glTF, GLB, STL or OBJ of what is on screen, or of the selection", enabled: hasModel, run: exportMeshFile },
   { id: "file.plan", label: "Export plan", icon: "section", section: "File", hint: "The 2D plan as a PNG, cut where the section is", enabled: hasModel, run: () => void savePlanImage() },
@@ -2721,7 +2726,6 @@ const RIBBON: RibbonTab[] = [
     groups: [
       { label: "Assistant", items: [
         { kind: "cmd", id: "panel.ai" },
-        { kind: "cmd", id: "ai.new", size: "sm", label: "New" },
       ] },
       { label: "Selection", items: [
         { kind: "cmd", id: "cam.fitsel" },
@@ -3045,7 +3049,7 @@ function matchingProperty(row: { props: Record<string, unknown> }, lower: string
 /** Saved views without building the pane, so the palette works before it opens. */
 function readSavedViews(): ViewDefinition[] {
   try {
-    return new ViewStore().list();
+    return savedViews.list();
   } catch {
     return [];
   }

@@ -1521,6 +1521,7 @@
     "ifcviewx",
     "ifcviewx-${}.png",
     "ifcviewx-cache",
+    "ifcviewx-demo-building.ifc",
     "ifcviewx-extensions",
     "ifcviewx-geo-context.geojson",
     "ifcviewx.",

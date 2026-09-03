@@ -11,7 +11,7 @@ import type { LazyCategory, Viewer } from "../viewer-core/viewer.js";
 const LAZY = new Set<string>(["IfcSpace", "IfcOpeningElement"]);
 
 export class TypesPane {
-  private readonly page = h("div", { class: "page scroll" });
+  private readonly page = h("div", { class: "page browse-page" });
 
   constructor(
     host: HTMLElement,
@@ -37,7 +37,7 @@ export class TypesPane {
       : null;
     const showAll = h("button", { class: "link-btn", type: "button", text: "Show all" });
     showAll.addEventListener("click", () => this.viewer.showAll());
-    const rows = h("div", {});
+    const rows = h("div", { class: "browse-list", role: "region", "aria-label": "IFC classes" });
     const max = Math.max(...[...groups.values()].map((ids) => ids.length));
     for (const [type, ids] of groups) rows.appendChild(this.row(type, ids, max));
     this.page.replaceChildren(
@@ -71,7 +71,7 @@ export class TypesPane {
         ? `${type} carries no geometry`
         : `Show only these ${ids.length} ${type}\nCtrl-click to add them to the view`,
     }, [
-      h("span", { class: "name", text: type.replace(/^Ifc/, "") }),
+      h("span", { class: "name", text: type.replace(/^Ifc/, ""), title: type }),
       h("span", { class: "bar" }, [bar]),
       h("span", { class: "n", text: ids.length.toLocaleString() }),
     ]);

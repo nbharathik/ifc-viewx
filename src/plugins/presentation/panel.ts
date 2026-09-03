@@ -455,6 +455,9 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
   host.appendChild(root);
   root.addEventListener("keydown", keys);
   paint();
+  const offViews = views.onChange(() => {
+    if (!disposed) paint();
+  });
 
   const off = ctx.events.on("model", () => {
     stopPlayback();
@@ -469,6 +472,7 @@ export function mount(host: HTMLElement, ctx: ExtensionContext): ExtensionInstan
       stopPlayback();
       void stopRecording().catch(() => undefined);
       off();
+      offViews();
       root.removeEventListener("keydown", keys);
     },
   };

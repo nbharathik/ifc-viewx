@@ -1,4 +1,4 @@
-// Every panel added in this pass, mounted for real.
+// Every bundled plugin panel, mounted for real.
 //
 // The failure these catch is the one a unit test on the logic never does: a
 // panel that throws while it builds, because of a control that does not exist
@@ -7,11 +7,24 @@
 // user sees first.
 import { describe, expect, it, vi } from "vitest";
 
+import { mount as mountClash } from "../src/plugins/clash/panel.js";
+import { mount as mountCompare } from "../src/plugins/compare/panel.js";
+import { mount as mountExplorer } from "../src/plugins/explorer/panel.js";
+import { mount as mountFinder } from "../src/plugins/finder/panel.js";
+import { mount as mountIdsStudio } from "../src/plugins/ids-studio/panel.js";
+import { mount as mountModelHealth } from "../src/plugins/model-health/panel.js";
 import { mount as mountPointCloud } from "../src/plugins/point-cloud/panel.js";
 import { mount as mountPresentation } from "../src/plugins/presentation/panel.js";
+import { mount as mountPython } from "../src/plugins/python/panel.js";
 import { mount as mountReportBuilder } from "../src/plugins/report-builder/panel.js";
 import { mount as mountRuleStudio } from "../src/plugins/rule-studio/panel.js";
+import { mount as mountSchedule4d } from "../src/plugins/schedule-4d/panel.js";
+import { mount as mountSectionWorkspace } from "../src/plugins/section-workspace/panel.js";
 import { mount as mountSheets } from "../src/plugins/sheets/panel.js";
+import { mount as mountSmartMeasure } from "../src/plugins/smart-measure/panel.js";
+import { mount as mountSpaces } from "../src/plugins/spaces/panel.js";
+import { mount as mountStoreys } from "../src/plugins/storeys/panel.js";
+import { mount as mountTakeoff } from "../src/plugins/takeoff/panel.js";
 import { DrivePanel } from "../src/ui/drivePanel.js";
 import { ResultsDock, clearDocket, docketSets, publishDocket } from "../src/ui/resultsDock.js";
 import { ComputedPane, ViewsPane } from "../src/ui/viewsPane.js";
@@ -83,6 +96,7 @@ function context(loaded: boolean): ExtensionContext {
       recordStart: () => false,
       recordStop: vi.fn(async () => null),
       measurements: () => [],
+      pickGuide: vi.fn(),
     },
     events: { on: () => () => undefined },
     storage: {
@@ -97,21 +111,34 @@ function context(loaded: boolean): ExtensionContext {
     files: { open: vi.fn(), export: vi.fn() },
     issues: { create: vi.fn() },
     results: { create: vi.fn(), get: vi.fn(), page: vi.fn(), dispose: vi.fn() },
-    local: { status: vi.fn(), capabilities: () => [], invoke: vi.fn() },
+    local: { status: () => ({ state: "offline" }), capabilities: () => [], invoke: vi.fn() },
     python: { runsNatively: () => false, query: vi.fn(), propose: vi.fn() },
     close: vi.fn(),
   } as unknown as ExtensionContext;
 }
 
 const PANELS: Array<[string, (host: HTMLElement, ctx: ExtensionContext) => unknown]> = [
-  ["Rule Studio", mountRuleStudio],
-  ["Report Builder", mountReportBuilder],
-  ["Sheets", mountSheets],
+  ["Clash Detection", mountClash],
+  ["Compare", mountCompare],
+  ["Explorer", mountExplorer],
+  ["Finder", mountFinder],
+  ["IDS Requirements Studio", mountIdsStudio],
+  ["Model Health", mountModelHealth],
   ["Point Cloud", mountPointCloud],
   ["Presentation", mountPresentation],
+  ["Python", mountPython],
+  ["Rule Studio", mountRuleStudio],
+  ["Report Builder", mountReportBuilder],
+  ["4D Schedule", mountSchedule4d],
+  ["Section Workspace", mountSectionWorkspace],
+  ["Sheets", mountSheets],
+  ["Smart Measure", mountSmartMeasure],
+  ["Spaces", mountSpaces],
+  ["Storeys", mountStoreys],
+  ["Takeoff", mountTakeoff],
 ];
 
-describe("every new plugin panel builds", () => {
+describe("every bundled plugin panel builds", () => {
   for (const [name, mount] of PANELS) {
     it(`${name} mounts with a model and renders something`, () => {
       const host = document.createElement("div");

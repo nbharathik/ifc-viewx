@@ -149,6 +149,58 @@ describe("expanded plugin workspace accessibility", () => {
     expect(document.activeElement?.getAttribute("aria-selected")).toBe("true");
   });
 
+  it("keeps overflow actions outside the tab scroller and reveals keyboard-selected tabs", async () => {
+    CATALOG.splice(0, CATALOG.length,
+      plugin("alpha", "Alpha workspace"),
+      plugin("beta", "Beta workspace"),
+      plugin("gamma", "Gamma workspace"),
+    );
+    const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+    const reveal = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: reveal,
+    });
+
+    try {
+      const container = document.body.appendChild(document.createElement("div"));
+      const host = new PluginHost(
+        container,
+        {} as Viewer,
+        {} as ServiceClient,
+        { list: () => [], execute: vi.fn() } as ExtensionCapabilities,
+        actions(),
+        vi.fn(),
+      );
+      await host.open("alpha", false);
+      await host.open("beta", false);
+      await host.open("gamma", false);
+
+      const strip = container.querySelector<HTMLElement>(".plug-strip");
+      const tablist = strip?.querySelector<HTMLElement>(".plug-tabs");
+      const chrome = strip?.querySelector<HTMLElement>(".plug-strip-actions");
+      expect(tablist?.getAttribute("role")).toBe("tablist");
+      expect(chrome?.querySelectorAll("button")).toHaveLength(3);
+      expect(tablist?.contains(chrome ?? null)).toBe(false);
+
+      reveal.mockClear();
+      const tabs = [...tablist!.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+      tabs[2].focus();
+      tabs[2].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+
+      const selected = tablist?.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]');
+      expect(selected?.textContent).toContain("Beta workspace");
+      expect(reveal).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
+      expect(reveal.mock.instances.at(-1)).toBe(selected);
+    } finally {
+      if (originalScrollIntoView) {
+        Object.defineProperty(HTMLElement.prototype, "scrollIntoView", originalScrollIntoView);
+      } else {
+        delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+      }
+    }
+  });
+
   it("implements tabs, arrow navigation, modal focus containment and restoration", async () => {
     CATALOG.splice(0, CATALOG.length, plugin("alpha", "Alpha"), plugin("beta", "Beta"));
     const app = document.createElement("div");
